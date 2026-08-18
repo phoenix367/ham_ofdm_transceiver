@@ -1,0 +1,10 @@
+sequenceDiagram
+    participant A as A (+284 Hz off)
+    participant B as B
+    A->>B: CQ (EXTREME), B measures +284 Hz
+    B->>A: ACK, freq_corr -120 (field max)
+    Note over A: trim -60 (half gain)
+    A->>B: DATA, B measures +224
+    B->>A: ACK, freq_corr -120
+    Note over A,B: ... 3 more exchanges ...
+    Note over A,B: netted: residual < 12 Hz,<br/>drift tracked thereafter

@@ -1,0 +1,229 @@
+\documentclass[12pt,a4paper]{article}
+
+% Encoding and language
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+
+% Page layout
+\usepackage{geometry}
+\geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
+
+% Graphics and figures
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+
+% Hyperlinks
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=cyan,
+    filecolor=magenta,
+    pdftitle={Technical Report -- Adaptive Audio-Band OFDM Transceiver},
+    pdfauthor={Ivan Gubochkin}
+}
+
+% Headers and footers
+\usepackage{fancyhdr}
+\setlength{\headheight}{14.5pt}
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{Technical Report}
+\fancyhead[R]{OFDM Transceiver Prototype}
+\fancyfoot[C]{\thepage}
+
+% Section formatting
+\usepackage{titlesec}
+\usepackage{abstract}
+
+% Mathematics
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+% Code listings / verbatim appendices
+\usepackage{listings}
+\usepackage{xcolor}
+
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+
+\lstset{
+    basicstyle=\ttfamily\footnotesize,
+    backgroundcolor=\color{gray!10},
+    frame=single,
+    breaklines=true,
+    breakatwhitespace=false,
+    keepspaces=true,
+    showspaces=false,
+    showstringspaces=false,
+    tabsize=2,
+}
+
+% Tables
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{multirow}
+
+% Allow extra inter-word stretch to prevent overfull hboxes from long
+% monospace identifiers that cannot be hyphenated.
+\setlength{\emergencystretch}{4em}
+
+% -----------------------------------------------------------------------
+\begin{document}
+
+% -----------------------------------------------------------------------
+%  Title page
+% -----------------------------------------------------------------------
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+
+    {\Huge\bfseries Technical Report\par}
+    \vspace{0.5cm}
+    {\large OFDM Transceiver Prototype\par}
+    \vspace{1cm}
+    {\Large\itshape An Adaptive Audio-Band OFDM Transceiver for Amateur
+    HF Radio ---\\
+    Article Reproduction, Sensitivity Extension to $-17.9$\,dB,\\
+    Adaptive Link Layer, and a Fixed-Point RTL Reference Model\par}
+
+    \vspace{2cm}
+
+    {\large\bfseries Author\par}
+    \vspace{0.5cm}
+    \begin{tabular}{ll}
+        Ivan Gubochkin & \href{mailto:igubochkin@gmail.com}{igubochkin@gmail.com} \\
+    \end{tabular}
+
+    \vfill
+
+    {\large \today\par}
+\end{titlepage}
+
+% -----------------------------------------------------------------------
+%  Abstract
+% -----------------------------------------------------------------------
+\thispagestyle{plain}
+\begin{abstract}
+\noindent
+This report documents a complete software prototype of an audio-band OFDM
+digital communication system for amateur HF radio, developed in Python
+(NumPy/SciPy) as a faithful reproduction --- and then a substantial
+extension --- of the PHY layer published by
+bashkirtsevich~\cite{habr_ofdm}.  The reproduction is bit-exact against
+every worked example in the article (44/44 checks: CRCs, Base38/QTH
+encodings, convolutional-code outputs, scrambler and interleaver
+sequences) and reaches $-7.2$\,dB sensitivity versus the article's
+$\approx-7.5$\,dB on the same channel model; the residual gap was
+diagnosed as synchronization loss, not the decode chain.  Three
+synchronization defects found during the diagnosis --- a Zadoff--Chu
+time--frequency ambiguity worth $\sim$1\,dB, an SNR-dependent tone-detection
+metric, and a preamble transmitted 7\,dB below data-symbol power --- are
+analysed and corrected.
+
+The waveform is then extended with SNR-adaptive link modes that scale the
+coherent symbol-tiling factor ($4\times/16\times/64\times$), lowering the
+sensitivity floor to \textbf{$-17.9$\,dB} in the 6\,kHz
+band\footnote{Throughout this report, SNR follows the article's
+convention: total signal power versus total noise power in the full
+6\,kHz Nyquist band of the 12\,kHz-sampled audio.  The signal itself
+occupies only $\approx$2.1\,kHz (300--2400\,Hz), so the same operating
+point reads $\approx$4.5\,dB higher against in-band noise only, and
+$\approx$3.8\,dB higher in the ham-standard 2.5\,kHz convention
+($-17.9$\,dB here $\approx$ $-14.1$\,dB ham).} (78\,\% of
+Shannon capacity at $-20$\,dB); with a measured monotone LLR
+recalibration worth 1.5--2\,dB at the sensitivity edge; with an IRA LDPC
+code, Gray-mapped 16-QAM, and CRC-gated chase-combining HARQ; and with a
+complete link layer: a 13-rung rate ladder spanning 7.8--1059\,bit/s over
+$-17.9\ldots+4.7$\,dB, receiver-driven rate adaptation through a 20-bit
+piggybacked link-control word, QoS with fragment-boundary preemption,
+simplex channel access, and closed-loop AFC frequency netting that pulls
+a $+284$\,Hz initial offset inside a 12\,Hz deadband in five exchanges.
+An SSB RF-chain simulator with per-station reference oscillators makes
+carrier offsets emerge from oscillator physics rather than parameters,
+and an integer-only fixed-point twin of the receiver --- Q15 arithmetic,
+block-floating-point FFT, NCO/CORDIC primitives, division-minimised
+channel estimation --- serves as a golden reference for a future RTL
+implementation, matching the floating-point receiver within 0.5\,dB and
+surpassing it at $-9/-10$\,dB.  All results are backed by self-verifying
+regression suites (44 article checks, 10 end-to-end cases, 24
+fixed-point checks, whole-system simplex and AFC scenario tests) and by
+a blind-decoded WAV demonstration of a complete two-station session over
+the fading RF channel.
+\end{abstract}
+
+\newpage
+\tableofcontents
+\listoftables
+\newpage
+
+% -----------------------------------------------------------------------
+% Body sections — each in its own file under sections/ for easy editing.
+% -----------------------------------------------------------------------
+\input{sections/01-list-of-abbreviations}
+\input{sections/02-introduction}
+\input{sections/03-phy-layer}
+\input{sections/04-synchronization}
+\input{sections/05-adaptive-modes}
+\input{sections/06-llr-calibration}
+\input{sections/07-coding-extensions}
+\input{sections/08-link-layer}
+\input{sections/09-afc-netting}
+\input{sections/10-rf-channel}
+\input{sections/11-fixed-point}
+\input{sections/12-validation-results}
+\input{sections/12b-c-implementation}
+\input{sections/13-discussion}
+\input{sections/14-conclusion}
+
+% -----------------------------------------------------------------------
+% References
+% -----------------------------------------------------------------------
+\clearpage
+\phantomsection
+\addcontentsline{toc}{section}{References}
+\bibliographystyle{plain}
+\bibliography{references}
+
+% -----------------------------------------------------------------------
+% Appendices
+% -----------------------------------------------------------------------
+\clearpage
+\appendix
+
+\phantomsection
+\addcontentsline{toc}{section}{Appendices}
+\begin{center}
+    {\Huge\bfseries Appendices\par}
+\end{center}
+\vspace{1.5em}
+
+\noindent The four appendices below collect verbatim tool output that
+would interrupt the main narrative.
+Appendix~\ref{app:verify} reproduces the output of the bit-exact
+article-reproduction suite (\texttt{verify\_article.py}) referenced in
+Section~\ref{sec:results};
+Appendix~\ref{app:fixed} reproduces the output of the fixed-point
+validation suite (\texttt{fixed\_point.py}) referenced in
+Section~\ref{sec:fixed};
+Appendix~\ref{app:demo} reproduces the blind-decoded transcript of
+the recorded two-station demonstration session
+(\texttt{demo\_wav.py}) referenced in Section~\ref{sec:results};
+and Appendix~\ref{app:fixeddemo} reproduces the transcript of the same
+demonstration running entirely on the fixed-point pipeline at
+$+5$\,dB, where the ladder climbs into 16-QAM.
+
+\vspace{1.5em}
+\clearpage
+
+\input{appendices/verify-article}
+\input{appendices/fixed-point-suite}
+\input{appendices/demo-transcript}
+\input{appendices/fixed-demo-transcript}
+
+\end{document}

@@ -1,0 +1,13 @@
+flowchart TD
+    subgraph RXside["receiver side (per inbound link)"]
+        M["per-frame SNR"] --> FLT["fade-aware filter:<br/>2nd-lowest, age <= 60 s"]
+        FLT --> REQ["rung request<br/>up: sens+2.5 dB held<br/>down: margin < 1 dB<br/>silence: decay + purge history"]
+    end
+    subgraph TXside["transmitter side (per outbound link)"]
+        PR["peer request"] --> MIN
+        CAP["peer's SNR report of MY signal<br/>(clamps instantly when peer goes deaf)"] --> MIN
+        OFF["learned per-rung offsets<br/>loss +0.7 dB / success -0.15 dB"] --> CAP
+        MIN["min(...)"] --> LOSS["loss fallback<br/>2 losses: -2 rungs<br/>4 losses: rung 0"] --> RUNG["TX rung"]
+        STALE["request age > 90 s<br/>decays"] --> LOSS
+    end
+    REQ -. "in LC word" .-> PR

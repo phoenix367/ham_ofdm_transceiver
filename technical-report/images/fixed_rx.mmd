@@ -1,0 +1,26 @@
+flowchart TD
+    IN["int16 audio"] --> HF["63-tap FIR Hilbert<br/>Q15 taps, I/Q"]
+    HF --> DET
+    subgraph DET["detection (all integer)"]
+        direction TB
+        SP["block-floating FFT spectrogram<br/>(per-block exponent, aligned)"] -->
+        TC["tone contrast metric, Q10<br/>CFO shift grid"] -->
+        ZK["Q15 ZC kernel correlation<br/>alpha-max + beta-min/2 magnitude"] -->
+        LG["lag-N correlation,<br/>CORDIC atan2, phase word"]
+    end
+    DET --> NCO["NCO derotation<br/>32-bit CFO phase word,<br/>4096-entry sine ROM"]
+    NCO --> DEM
+    subgraph DEM["per symbol"]
+        direction TB
+        AC["tile sum, BFP FFT"] -->
+        CE["pilot rotation (|ZC|=1:<br/>division-free) +<br/>Q15 interp weight ROM"] -->
+        LL["matched-filter LLRs<br/>Re/Im(Y conj H), exponent-tracked;<br/>16-QAM: per-symbol amplitude ref<br/>(one divider)"]
+    end
+    DEM --> Q{"calibrate?"}
+    Q -->|no| Q6["peak-normalized quantize<br/>6-bit (8-bit for 16-QAM)"]
+    Q -->|yes| CALP["header alpha fit (1 divider),<br/>calibrated scale,<br/>32-entry reliability ROM"]
+    Q6 --> DECI
+    CALP --> DECI
+    DECI["descramble, deinterleave,<br/>int Viterbi / int LDPC min-sum<br/>(alpha=0.75 as x-(x>>2))"] --> CRC{"CRC"}
+    CRC -->|ok| PKT["packet"]
+    CRC -->|fail| HQ["DemodError carries int LLRs,<br/>chase combine on retry"]

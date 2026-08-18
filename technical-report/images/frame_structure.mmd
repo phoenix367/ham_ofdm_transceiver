@@ -1,0 +1,6 @@
+flowchart LR
+    A["Newman tone comb A<br/>bins 8,12,16,20<br/>2T x 128 smp"] -->
+    B["Newman tone comb B<br/>bins 10,14,18,22<br/>T x 128 smp"] -->
+    C["CP + Zadoff-Chu x L<br/>root 17/19/21 by mode<br/>32 + L x 128 smp"] -->
+    H["header<br/>6 symbols, always<br/>BPSK + conv 1/3"] -->
+    D["data block<br/>N symbols<br/>mod/FEC from header"]

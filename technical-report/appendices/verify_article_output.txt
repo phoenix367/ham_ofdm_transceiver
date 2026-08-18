@@ -1,0 +1,46 @@
+[PASS] subcarrier spacing = 93.75 Hz
+[PASS] channel bins = 3..25 (23 carriers)
+[PASS] center bin = 14 (1312.5 Hz)
+[PASS] pilot bins = [3, 6, 10, 14, 17, 21, 25]
+[PASS] data carriers = 16
+[PASS] cyclic prefix = 32 samples (25%)
+[PASS] tiled symbol = CP + 4*128 samples
+[PASS] newman tone bins = [8, 12, 16, 20]
+[PASS] newman shifted bins = [10, 14, 18, 22]
+[PASS] callsign_to_int('R9FEU') = 4671407026402144
+[PASS] int_to_callsign round-trip
+[PASS] qth6_to_int('LO88CA') = 12261936
+[PASS] int_to_qth6 round-trip
+[PASS] crc8_lte example = 0b10101101
+[PASS] crc16 example input is 236 bits
+[PASS] crc16_ccitt example = 0b1001001100011111
+[PASS] crc16 example payload decodes to article text
+[PASS] crc16 example equals Data(reserved=12375, ...).encode() body
+[PASS] Header(ver=1, BEACON, BPSK, R13, len=90) bits
+[PASS] Header round-trip
+[PASS] Beacon packet size = 90 bits
+[PASS] Beacon callsign field bits
+[PASS] Beacon QTH field bits
+[PASS] Beacon round-trip
+[PASS] Data packet size = 20+216+16 bits
+[PASS] Data round-trip
+[PASS] CC impulse response (rate 1/3)
+[PASS] CC codec constants
+[PASS] header CC rate 1/3 (93 bits)
+[PASS] header CC rate 1/2 (62 bits)
+[PASS] header CC rate 2/3 (47 bits)
+[PASS] header CC rate 3/4 (42 bits)
+[PASS] Viterbi round-trip CCLTEBPSK
+[PASS] Viterbi round-trip CCLTEBPSK_12
+[PASS] Viterbi round-trip CCLTEBPSK_23
+[PASS] Viterbi round-trip CCLTEBPSK_34
+[PASS] Viterbi corrects 8/93 hard errors (rate 1/3)
+[PASS] interleave 32 bits over 16 carriers
+[PASS] deinterleave inverts interleave
+[PASS] scrambler example sequence
+[PASS] scramble is an involution
+[PASS] descramble (soft) recovers source
+[PASS] ZC sequence constant amplitude
+[PASS] ZC periodic ACF is a delta function
+
+44 passed, 0 failed

@@ -1,0 +1,6 @@
+flowchart TD
+    RX["every decoded frame"] --> SNR["SNR estimate"] --> REQ["rung request<br/>(RX-driven ladder)"]
+    RX --> CFO["CFO measurement"] --> NET["AFC netting request"]
+    RX --> BER["pre-FEC BER"] --> LOG["diagnostics"]
+    TXO["every ack / timeout"] --> OFF["learned per-rung<br/>sensitivity offsets"]
+    FAIL["every failed decode"] --> LLR["stored LLRs"] --> HARQ["chase combining<br/>on retransmission"]

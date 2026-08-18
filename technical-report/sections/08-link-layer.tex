@@ -1,0 +1,147 @@
+\section{Link Layer}
+\label{sec:link}
+
+Two half-duplex stations form \emph{two directed links}, each governed
+by its receiver --- only the receiver knows its own noise floor.  There
+is no shared ``link mode'' to negotiate; each side requests what it can
+hear.
+
+\subsection{The Rate Ladder}
+
+Thirteen operating points (mode $\times$ modulation $\times$ code
+rate, dominated rungs removed) span \textbf{7.8--1059\,bit/s} over
+\textbf{$-17.9\ldots+4.7$\,dB} (Table~\ref{tab:ladder}).  Every
+sensitivity is measured, not derived
+(\texttt{experiments/ladder\_sweep.py}, 48 packets/point, recalibrated
+receiver; full PER curves in \texttt{results/ladder\_recal.json}).
+Requests and grants are ladder indices carried in the link-control
+word.  One quirk is documented: rung 1 (ROBUST BPSK 1/3) is dominated
+by rung 2 (faster, equally sensitive) and is kept only for
+ladder-index stability --- it is never selected.
+
+\begin{table}[H]
+    \centering
+    \caption{The measured rate ladder (PER $\le 10\,\%$ sensitivities,
+             recalibrated receiver, 6\,kHz-band SNR).}
+    \label{tab:ladder}
+    \small
+    \begin{tabular}{@{}rlrr@{\hspace{2em}}rlrr@{}}
+    \toprule
+    \# & \textbf{mode/mod/FEC} & \textbf{bit/s} & \textbf{dB} &
+    \# & \textbf{mode/mod/FEC} & \textbf{bit/s} & \textbf{dB} \\
+    \midrule
+    0 & EXTREME BPSK 1/3 & 7.8 & $-17.9$ & 7  & NORMAL QPSK 1/2  & 353  & $-5.3$ \\
+    1 & ROBUST BPSK 1/3  & 31  & $-11.7$ & 8  & NORMAL QPSK 2/3  & 471  & $-3.8$ \\
+    2 & ROBUST BPSK 1/2  & 46  & $-11.8$ & 9  & NORMAL QPSK 3/4  & 529  & $-2.2$ \\
+    3 & ROBUST QPSK 1/3  & 62  & $-11.3$ & 10 & NORMAL QAM16 1/2 & 706  & $+0.7$ \\
+    4 & NORMAL BPSK 1/3  & 118 & $-7.6$  & 11 & NORMAL QAM16 2/3 & 941  & $+2.6$ \\
+    5 & NORMAL BPSK 1/2  & 176 & $-7.3$  & 12 & NORMAL QAM16 3/4 & 1059 & $+4.7$ \\
+    6 & NORMAL QPSK 1/3  & 235 & $-7.0$  &    &                  &      &         \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{The Link-Control Word}
+
+Every frame --- data, ACKs, everything --- piggybacks a 20-bit word in
+\texttt{Data.reserved}:
+\texttt{seq(2)\,|\,ack(2)\,|\,req\_rung(4)\,|\,snr\_report(4)\,|\,%
+freq\_corr(5)\,|\,flags(3)}.  The SNR report uses 2\,dB steps; the
+frequency-correction field carries $\pm 120$\,Hz in 8\,Hz steps
+(Section~\ref{sec:afc}); flags are last-fragment, no-data (ACK-only),
+and priority-stream.
+
+\subsection{Rate Adaptation: Three Feedback Paths}
+
+Figure~\ref{fig:adaptation} shows the controller.  On the receive
+side, per-frame SNR estimates pass through a fade-aware filter (the
+second-lowest of recent measurements, age-windowed to 60\,s) before
+driving the rung request: upshift requires the target rung's
+sensitivity plus 2.5\,dB of held margin, downshift triggers below
+1\,dB (the hysteresis band prevents ping-pong), and inbound
+\emph{silence} decays the request and purges the measurement history
+--- without the purge, stale pre-fade measurements resurrect a high
+rung the moment one frame gets through.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/adaptation.png}
+    \caption{Receiver-driven rate adaptation.  The three feedback paths
+             have three different latencies: the peer's explicit
+             request (one round trip), the peer's SNR report of
+             \emph{your} signal (instant clamp when the peer goes
+             deaf), and loss-driven fallback (no feedback at all).}
+    \label{fig:adaptation}
+\end{figure}
+
+On the transmit side, the rung is the minimum of the peer's request
+and a cap derived from the peer's SNR report of our own signal,
+adjusted by \emph{learned per-rung offsets} ($+0.7$\,dB on loss,
+$-0.15$\,dB on success --- correcting the static table per
+deployment), with loss fallback (2 consecutive losses
+$\rightarrow -2$ rungs, 4 $\rightarrow$ rung 0) and staleness decay.
+Bootstrap is trivial by construction: both sides start at rung 0
+(EXTREME), which works whenever anything works, and one decoded
+exchange carries enough measurement to jump directly to the
+SNR-indicated rung.
+
+\subsection{ARQ, QoS, and Preemption}
+
+ARQ is stop-and-wait with piggybacked ACKs (the 2-bit sequence number
+suffices), enhanced by the HARQ combining of Section~\ref{sec:coding}.
+An invariant worth recording: sequence numbers 0--7 are all
+legitimate, so ``nothing received yet'' is represented by
+\texttt{None}, never a magic value --- the initial implementation used
+7 as a sentinel and deadlocked the moment a real frame carried
+sequence 7.
+
+QoS is policy, not machinery: three classes (control $>$ interactive
+$>$ bulk) with strict priority; per-class air-time caps size fragments
+(a 27-byte EXTREME frame is 43\,s of air time, so latency budgeting
+happens at segmentation); control and ACK traffic rides one rung below
+bulk for extra margin.  The priority stream \emph{preempts} an
+in-progress bulk message at fragment boundaries --- the
+priority-stream LC flag selects one of two reassembly buffers --- so
+an urgent message injected mid-transfer arrives $\sim$23\,s before the
+bulk completes instead of after it.
+
+\subsection{Simplex Channel Access}
+
+Both stations share one frequency and are deaf while transmitting.
+Figure~\ref{fig:simplex} shows the access state machine.  The
+load-bearing rules: carrier sense before keying; the listen window is
+sized from the \emph{expected reply's} air time at the peer's rung; a
+timeout on a \emph{busy} channel is not a loss (the peer may be
+replying at a slower rung); random 1--6\,s backoff breaks the symmetry
+of two stations keying together; and a station replies only to frames
+that carried data --- no ACK-of-ACK loops.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{images/simplex_state.png}
+    \caption{Simplex channel-access state machine
+             (\texttt{LinkStation.poll\_tx}).}
+    \label{fig:simplex}
+\end{figure}
+
+The whole-system test (\texttt{experiments/simplex\_session.py}) runs
+two stations with bidirectional QoS traffic and a $-14$\,dB fade in
+the middle of the bulk transfer: all messages deliver bit-exact in QoS
+priority order, the fade costs four timeouts and one
+fallback-and-recover cycle, and the session terminates without
+deadlock at 11--22\,bit/s effective on the shared channel.
+Figure~\ref{fig:link_adaptation} shows the controller-level
+simulation: bootstrap at EXTREME, a fast climb to the QPSK rungs,
+loss-driven fallback within two frames of a sudden fade, and
+recovery.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/link_adaptation.png}
+    \caption{Controller-level two-station simulation
+             (\texttt{experiments/link\_adaptation.py}): asymmetric
+             channel, $-16$\,dB start, sudden fade; 1290/1500 bytes
+             delivered at 24\,bit/s effective goodput including ACK
+             overhead and turnarounds.}
+    \label{fig:link_adaptation}
+\end{figure}

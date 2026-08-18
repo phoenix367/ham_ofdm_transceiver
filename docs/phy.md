@@ -1,0 +1,113 @@
+# PHY layer
+
+## Numerology
+
+| Parameter | Value |
+|---|---|
+| Sample rate | 12 kHz (audio into an SSB transceiver, AGC off) |
+| FFT | 128 bins → 93.75 Hz spacing |
+| Band | 300–2400 Hz → bins 3..25, 23 subcarriers |
+| Pilots | 7, Zadoff-Chu root 3, bins 3 6 10 14 17 21 25 |
+| Data carriers | 16 |
+| Cyclic prefix | 32 samples (25%) |
+| Symbol tiling | 4× / 16× / 64× by link mode (+6 dB per 4×, coherent) |
+| CFO tolerance | ±375 Hz design, ±300 Hz spec |
+
+## Frame structure
+
+```mermaid
+flowchart LR
+    A["Newman tone comb A<br/>bins 8,12,16,20<br/>2T × 128 smp"] -->
+    B["Newman tone comb B<br/>bins 10,14,18,22<br/>T × 128 smp"] -->
+    C["CP + Zadoff-Chu × L<br/>root 17/19/21 by mode<br/>32 + L × 128 smp"] -->
+    H["header<br/>6 symbols, always<br/>BPSK + conv 1/3"] -->
+    D["data block<br/>N symbols<br/>mod/FEC from header"]
+```
+
+Header (25 bits): `ver(2) | typ(3) | mod(2) | spd(2) | len(8) | CRC-8`.
+`ver=2` marks an LDPC-coded data block; `len` is the data-packet bit count
+(≤255). Preamble tone and ZC bins carry gain (×√5.75 and ×2) so the whole
+frame has uniform per-sample power — detection sensitivity depends on it.
+
+## Transmit chain
+
+```mermaid
+flowchart TD
+    P["packet bits + CRC"] --> F{"FEC"}
+    F -->|"conv K=7, R 1/3<br/>punctured 1/2 · 2/3 · 3/4"| I
+    F -->|"LDPC IRA 768/256<br/>shortened (ver=2)"| I
+    I["pad to whole symbols →<br/>interleave over 16 carriers"] --> S["scramble<br/>15-bit LFSR, seed 0x5A"]
+    S --> M["map: BPSK / QPSK /<br/>16-QAM Gray"]
+    M --> O["OFDM symbol:<br/>data + ZC pilots +<br/>Hermitian mirror → IFFT"]
+    O --> T["tile × sym_tile → add CP"]
+    T --> W["prepend preamble"]
+    W --> CF["clip and filter<br/>RMS+6 dB, LPF 3 kHz"]
+    CF --> OUT["12 kHz audio"]
+```
+
+## Receive chain
+
+```mermaid
+flowchart TD
+    IN["audio"] --> HB["Hilbert → analytic signal"]
+    HB --> NM["tone detection:<br/>block spectrogram, in-mask vs<br/>out-of-mask power contrast,<br/>CFO shift grid ±4 bins"]
+    NM --> RC["residual CFO:<br/>full-block FFT peak +<br/>lag-N phase (unambiguous)"]
+    RC --> ZC["ZC matched filter, m=0 locked:<br/>normalized correlation argmax<br/>→ sample-exact timing"]
+    ZC --> FS["freq_shift by total CFO"]
+    FS --> SY["per-symbol demod"]
+    subgraph SY["per symbol"]
+        direction TB
+        T1["remove CP, accumulate tiles<br/>(polyfit tracker ≤4×,<br/>freq-search tracker above)"] -->
+        T2["FFT → pilots → ZF estimate<br/>→ Wiener refine → MMSE eq"] -->
+        T3["LLRs = f(Re/Im, EsN0/carrier)<br/>clip ±20"]
+    end
+    SY --> CAL["optional: header-fitted α ×<br/>reliability map (llr_recal)"]
+    CAL --> DEC["descramble → deinterleave →<br/>Viterbi / LDPC min-sum"]
+    DEC --> CRC{"CRC ok?"}
+    CRC -->|yes| PKT["packet"]
+    CRC -->|no + stored LLRs| HQ["chase combine<br/>with prev attempt"] --> DEC
+    CRC -->|no| ERR["DemodError<br/>(carries LLRs for HARQ)"]
+```
+
+### Synchronization details worth knowing
+
+- **Tone metric** is a contrast ratio (mean in-mask bin power / mean
+  out-of-mask), floor-regularized by 1% of the median block power — an
+  absolute energy fraction is SNR-dependent and noise-free signals divide by
+  zero.
+- **ZC stage is locked to the zero-CFO hypothesis.** Scanning m=±1 lets the
+  ZC time-frequency ambiguity (a frequency-shifted replica correlates at a
+  shifted time) win at low SNR: ±1 bin CFO error + ~30-sample timing error,
+  ≈1 dB of sensitivity. Low-SNR modes use a group-coherent kernel with a
+  small ±15 Hz fractional grid instead.
+- **The `STFOFDMModem` variant** places tones every 8 bins (period-16 comb),
+  replacing the FFT-peak residual estimator with 802.11-style
+  delay-and-correlate (lag-16 → lag-128), equal performance over ±300 Hz.
+
+## Link modes
+
+```mermaid
+flowchart LR
+    E["EXTREME<br/>64× tiles, ZC root 21<br/>7.8 bit/s · −17.9 dB"] ---
+    R["ROBUST<br/>16× tiles, ZC root 19<br/>31–62 bit/s · −11.8 dB"] ---
+    N["NORMAL<br/>4× tiles, ZC root 17<br/>118–1059 bit/s · −7.6…+4.7 dB"]
+```
+
+Long-symbol modes replace per-tile phase tracking (pure noise at −19 dB) with
+a **per-symbol residual-CFO hypothesis search**: derotate the whole symbol
+over a frequency grid, accumulate tiles, keep the hypothesis with maximum
+in-band energy — spending the symbol's full energy (~19 dB E/N0 even at
+−20 dB SNR) on the frequency decision. A slew-limited tracker (full grid on
+the first symbol, ±2 steps after) suppresses per-symbol argmax noise.
+
+EXTREME sits at 78% of Shannon capacity at −20 dB (22.3 vs 30 bit/s in
+2100 Hz), so its −17.9 dB measured floor is ~3 dB from the theoretical wall.
+
+## LLR quality and recalibration
+
+The raw LLRs (`4·re·EsN0`, clipped ±20) are *shape*-miscalibrated: weak LLRs
+are ~4× more reliable than they claim (decision-directed noise estimation +
+per-carrier weighting), the clipped top overstates. A measured monotone
+reliability map (each |L| bin → log-odds of its empirical error rate) fixes
+it and is worth **1.5–2 dB** at the BPSK/QPSK sensitivity edge. Gated to
+MU≤2 (trained on BPSK statistics); off by default, on in the link layer.

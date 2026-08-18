@@ -1,0 +1,11 @@
+flowchart TD
+    P["packet bits + CRC"] --> F{"FEC"}
+    F -->|"conv K=7, R 1/3<br/>punctured 1/2 - 2/3 - 3/4"| I
+    F -->|"LDPC IRA 768/256<br/>shortened (ver=2)"| I
+    I["pad to whole symbols,<br/>interleave over 16 carriers"] --> S["scramble<br/>15-bit LFSR, seed 0x5A"]
+    S --> M["map: BPSK / QPSK /<br/>16-QAM Gray"]
+    M --> O["OFDM symbol:<br/>data + ZC pilots +<br/>Hermitian mirror, IFFT"]
+    O --> T["tile x sym_tile, add CP"]
+    T --> W["prepend preamble"]
+    W --> CF["clip and filter<br/>RMS+6 dB, LPF 3 kHz"]
+    CF --> OUT["12 kHz audio"]

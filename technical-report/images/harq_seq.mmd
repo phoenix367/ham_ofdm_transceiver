@@ -1,0 +1,9 @@
+sequenceDiagram
+    participant A as station A
+    participant B as station B
+    A->>B: DATA seq=1 (fades mid-frame)
+    Note over B: CRC fails, LLRs stored
+    B-->>A: (no ack, timeout, backoff)
+    A->>B: DATA seq=1 retransmit
+    Note over B: alone fails,<br/>fresh+stored passes CRC
+    B->>A: ACK 1 (+ SNR report, rung request)

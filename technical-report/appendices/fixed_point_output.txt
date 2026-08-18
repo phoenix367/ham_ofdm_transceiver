@@ -1,0 +1,31 @@
+[PASS] fixed FFT SQNR > 55 dB  (59.1 dB)
+[PASS] Hilbert FIR SQNR > 55 dB  (60.7 dB)
+[PASS] NCO derotation residual < -60 dBc  (-67.5 dBc)
+[PASS] CORDIC atan2 error < 0.001 rad  (1.00001)
+[PASS] CORDIC magnitude error < 0.1%  (19999)
+[PASS] integer Viterbi corrects noisy 6-bit LLRs
+[PASS] fixed TX waveform correlation > 0.999  (0.99998)
+[PASS] clean fixed TX -> fixed RX
+[PASS] clean float TX -> fixed RX
+[PASS] clean fixed TX -> float RX
+
+NORMAL PER, fixed RX vs float RX, 30 packets/point:
+  -6 dB: fixed 26/30   float 30/30
+  -7 dB: fixed 27/30   float 29/30
+  -8 dB: fixed 26/30   float 23/30
+[PASS] fixed RX within ~1 dB of float at -7 dB  (see table above)
+[PASS] fixed RX decodes LDPC (ver=2) frames
+[PASS] fixed RX decodes 16-QAM frames
+[PASS] fixed TX LDPC (ver=2) -> fixed RX
+[PASS] fixed TX LDPC -> float RX
+[PASS] fixed TX 16-QAM -> fixed RX
+[PASS] fixed TX 16-QAM -> float RX
+[PASS] integer SNR estimate within 2 dB  (errs 0.6/0.8 dB at -7/0)
+[PASS] calibrated mode (alpha fit + reliability ROM) decodes
+[PASS] HARQ chase combining (complementary erasures)
+[PASS] repacked LC word roundtrips fixed chain
+[PASS] fixed TX emits ver=1 (conv) headers by default
+[PASS] fixed ROBUST decode @ -11 dB  (cfo +29.4 Hz)
+[PASS] fixed EXTREME decode @ -17 dB  (cfo +33.8 Hz)
+
+24 passed, 0 failed

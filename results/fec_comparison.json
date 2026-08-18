@@ -1,0 +1,63 @@
+{
+  "experiment": "FEC head-to-head with calibrated front end",
+  "mode": "NORMAL",
+  "modulation": "BPSK",
+  "rate": "1/3",
+  "payload_bytes": 27,
+  "n_frames_per_point": 300,
+  "snr_grid_db": [
+    -10.5,
+    -10.0,
+    -9.5,
+    -9.0,
+    -8.5,
+    -8.0,
+    -7.5,
+    -7.0,
+    -6.5
+  ],
+  "snr_convention": "noise in the 6 kHz Nyquist band",
+  "channel": "simulate_channel: random offset 300-1200, CFO uniform +-60 Hz, AWGN",
+  "seed_scheme": "np.random.default_rng([55, snr_index]) per cell; identical draws for all variants at each SNR",
+  "llr_processing": "production demod, default_llr_recal shape map",
+  "variants": [
+    "conv + Viterbi",
+    "LDPC + sum-product",
+    "LDPC + min-sum"
+  ],
+  "decodes": {
+    "conv + Viterbi": [
+      21,
+      83,
+      151,
+      214,
+      247,
+      279,
+      277,
+      294,
+      298
+    ],
+    "LDPC + sum-product": [
+      54,
+      116,
+      193,
+      236,
+      262,
+      282,
+      287,
+      294,
+      297
+    ],
+    "LDPC + min-sum": [
+      40,
+      108,
+      186,
+      235,
+      261,
+      279,
+      287,
+      294,
+      297
+    ]
+  }
+}

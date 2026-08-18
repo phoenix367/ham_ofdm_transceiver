@@ -1,0 +1,19 @@
+\section{System-Demonstration Transcript}
+\label{app:demo}
+
+Verbatim output of
+\texttt{./venv/bin/python experiments/demo\_wav.py}: the two-station
+session over the fading SSB RF chain
+(Section~\ref{sec:results}).  The first block is the simplex
+scheduler's air-time log as heard by the passive monitor (per-frame
+carrier snapshots include each station's LO drift and AFC trims); the
+second block is the \emph{blind-decoded} transcript recovered from the
+monitor's WAV audio alone --- mode, modulation and rate from the frame
+itself, measured CFO, and the unpacked link-control word
+(seq/ack/rung-request/SNR-report) for every decodable frame.  A's and
+B's distinct carrier fingerprints ($\approx -18$ and $\approx
+-22$\,Hz at the monitor after netting) identify the transmitter of
+every frame.  Encrypted-looking payloads are mid-message fragments of
+the bulk transfer; \texttt{b'\textbackslash x00'} frames are ACK-only.
+
+\lstinputlisting{appendices/demo_wav_output.txt}

@@ -1,0 +1,90 @@
+{
+  "experiment": "front-end LLR miscalibration shape",
+  "mode": "NORMAL",
+  "modulation": "BPSK",
+  "rate": "1/3",
+  "snr_db": -8,
+  "snr_convention": "noise in the 6 kHz Nyquist band",
+  "n_frames": 300,
+  "n_llr_samples": 216384,
+  "seed_scheme": "np.random.default_rng([7, chunk]) per 30-frame chunk; channel: offset 300-1200, CFO +-60 Hz, AWGN",
+  "bin_edges": [
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    8.0,
+    11.0,
+    14.0,
+    17.0,
+    20.01
+  ],
+  "min_samples_per_bin": 80,
+  "bins": [
+    {
+      "mean_abs_L": 0.12491548260027713,
+      "p_err": 0.125671830540626,
+      "empirical_llr": 1.939781795340346
+    },
+    {
+      "mean_abs_L": 0.7269343196339927,
+      "p_err": 0.04807791938659206,
+      "empirical_llr": 2.9856601680452113
+    },
+    {
+      "mean_abs_L": 1.2349714270935008,
+      "p_err": 0.023914968999114262,
+      "empirical_llr": 3.7090451237085307
+    },
+    {
+      "mean_abs_L": 1.7369655448267804,
+      "p_err": 0.015061651318869987,
+      "empirical_llr": 4.180427183353745
+    },
+    {
+      "mean_abs_L": 2.4512529333404287,
+      "p_err": 0.00834122101277804,
+      "empirical_llr": 4.77816946525311
+    },
+    {
+      "mean_abs_L": 3.4607840316081755,
+      "p_err": 0.004366368805848903,
+      "empirical_llr": 5.429447622936884
+    },
+    {
+      "mean_abs_L": 4.852350864359062,
+      "p_err": 0.0019943318988138972,
+      "empirical_llr": 6.215449849313644
+    },
+    {
+      "mean_abs_L": 6.8449924812927305,
+      "p_err": 0.0007970244420828905,
+      "empirical_llr": 7.133827869802227
+    },
+    {
+      "mean_abs_L": 9.19162380221649,
+      "p_err": 0.0005494505494505495,
+      "empirical_llr": 7.506042178518122
+    },
+    {
+      "mean_abs_L": 12.220031179350771,
+      "p_err": 0.0008992805755395684,
+      "empirical_llr": 7.01301578963963
+    },
+    {
+      "mean_abs_L": 15.352104057305752,
+      "p_err": 0.0028735632183908046,
+      "empirical_llr": 5.849324779946859
+    },
+    {
+      "mean_abs_L": 18.842831353419662,
+      "p_err": 0.005434782608695652,
+      "empirical_llr": 5.209486152841421
+    }
+  ],
+  "single_temperature_alpha": 0.6678527373533107
+}

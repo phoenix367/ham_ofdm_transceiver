@@ -1,0 +1,16 @@
+\section{Fixed-Point-Pipeline Demonstration Transcript}
+\label{app:fixeddemo}
+
+Verbatim output of
+\texttt{./venv/bin/python experiments/demo\_wav.py -{}-phy fixed
+-{}-snr 5}: the $+5$\,dB two-station session with both stations and
+the passive monitor running the \emph{full fixed-point pipeline}
+(Section~\ref{sec:fixed}) --- fixed transmitters, per-mode fixed
+receivers with blind mode auto-detection, the integer SNR estimator
+driving rate adaptation, and integer HARQ.  The blind transcript shows
+the climb from the EXTREME bootstrap through the QPSK rungs into
+16-QAM (rungs 9--10 on the air, requests up to rung~11), with the
+integer SNR reports in the link-control words and the AFC-netted
+carrier fingerprints in the CFO column.
+
+\lstinputlisting{appendices/fixed_demo_output.txt}

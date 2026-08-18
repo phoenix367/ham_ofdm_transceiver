@@ -1,0 +1,19 @@
+flowchart TD
+    IN["audio"] --> HB["Hilbert, analytic signal"]
+    HB --> NM["tone detection:<br/>block spectrogram, in-mask vs<br/>out-of-mask power contrast,<br/>CFO shift grid +/-4 bins"]
+    NM --> RC["residual CFO:<br/>full-block FFT peak +<br/>lag-N phase (unambiguous)"]
+    RC --> ZC["ZC matched filter, m=0 locked:<br/>normalized correlation argmax,<br/>sample-exact timing"]
+    ZC --> FS["freq_shift by total CFO"]
+    FS --> SY
+    subgraph SY["per symbol"]
+        direction TB
+        T1["remove CP, accumulate tiles<br/>(polyfit tracker at 4x,<br/>freq-search tracker above)"] -->
+        T2["FFT, pilots, ZF estimate,<br/>Wiener refine, MMSE eq"] -->
+        T3["LLRs = f(Re/Im, EsN0 per carrier)<br/>clip +/-20"]
+    end
+    SY --> CAL["optional: header-fitted alpha x<br/>reliability map (llr_recal)"]
+    CAL --> DEC["descramble, deinterleave,<br/>Viterbi / LDPC min-sum"]
+    DEC --> CRC{"CRC ok?"}
+    CRC -->|yes| PKT["packet"]
+    CRC -->|"no + stored LLRs"| HQ["chase combine<br/>with prev attempt"] --> DEC
+    CRC -->|no| ERR["DemodError<br/>(carries LLRs for HARQ)"]

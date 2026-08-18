@@ -1,0 +1,9 @@
+stateDiagram-v2
+    [*] --> Listening
+    Listening --> Transmitting: traffic or ack owed,<br/>channel idle, backoff expired
+    Transmitting --> AwaitReply: frame sent,<br/>expects reply
+    Transmitting --> Listening: ack-only sent
+    AwaitReply --> Listening: frame decoded
+    AwaitReply --> AwaitReply: timeout but channel BUSY<br/>(peer may answer at a slower rung)
+    AwaitReply --> Backoff: timeout, channel idle,<br/>count loss
+    Backoff --> Listening: random 1-6 s elapsed

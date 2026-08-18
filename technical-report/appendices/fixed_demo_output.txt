@@ -1,0 +1,77 @@
+expected CFOs at monitor: A frames +28.4 Hz, B frames -71.0 Hz
+expected station-to-station CFO A->B: +99.4 Hz (AFC netting active)
+
+t=  61.5s  A->B phase complete, B starts its reply traffic
+final trims: A -56.0 Hz, B +40.0 Hz; residual A->B offset +7.6 Hz
+saved /home/ivan/projects/ofdm_transceiver_proto/results/system_demo_fixed_qam16_timeline.png
+saved /home/ivan/projects/ofdm_transceiver_proto/results/system_demo_fixed_qam16.wav  (85.3 s, 1999 KiB, 40 frames)
+  t=   0.0s  A transmits  17.5 s (carrier  +42.6 Hz)
+  t=  17.5s  B transmits  16.8 s (carrier  -57.1 Hz)
+  t=  34.3s  A transmits   1.2 s (carrier   -4.4 Hz)
+  t=  35.6s  B transmits   0.8 s (carrier   -5.5 Hz)
+  t=  36.4s  A transmits   0.9 s (carrier  -32.3 Hz)
+  t=  37.3s  B transmits   0.8 s (carrier   -5.5 Hz)
+  t=  38.1s  A transmits   1.1 s (carrier  -20.3 Hz)
+  t=  39.3s  B transmits   0.8 s (carrier  -17.6 Hz)
+  t=  40.1s  A transmits   1.2 s (carrier  -12.2 Hz)
+  t=  41.4s  B transmits   0.8 s (carrier  -17.6 Hz)
+  t=  42.2s  A transmits   1.2 s (carrier  -12.1 Hz)
+  t=  43.5s  B transmits   0.8 s (carrier  -17.7 Hz)
+  t=  44.3s  A transmits   1.2 s (carrier  -12.1 Hz)
+  t=  45.6s  B transmits   0.8 s (carrier  -17.7 Hz)
+  t=  46.4s  A transmits   1.2 s (carrier  -12.0 Hz)
+  t=  47.7s  B transmits   0.8 s (carrier  -17.8 Hz)
+  t=  48.5s  A transmits   1.2 s (carrier  -11.9 Hz)
+  t=  49.8s  B transmits   0.8 s (carrier  -17.8 Hz)
+  t=  50.6s  A transmits   1.2 s (carrier  -11.9 Hz)
+  t=  51.9s  B transmits   0.8 s (carrier  -17.8 Hz)
+  t=  58.5s  A transmits   1.1 s (carrier  -11.6 Hz)
+  t=  59.7s  B transmits   0.8 s (carrier  -18.0 Hz)
+  t=  60.5s  A transmits   1.0 s (carrier  -11.6 Hz)
+  t=  61.5s  B transmits   1.1 s (carrier  -18.0 Hz)
+  t=  68.2s  B transmits   1.1 s (carrier  -18.2 Hz)
+  t=  70.3s  A transmits   0.9 s (carrier  -11.3 Hz)
+  t=  71.3s  B transmits   1.1 s (carrier  -18.2 Hz)
+  t=  72.5s  A transmits   0.8 s (carrier  -11.2 Hz)
+  t=  73.3s  B transmits   0.9 s (carrier  -18.3 Hz)
+  t=  74.2s  A transmits   0.8 s (carrier  -11.2 Hz)
+  t=  75.0s  B transmits   1.0 s (carrier  -18.3 Hz)
+  t=  76.1s  A transmits   0.8 s (carrier  -11.1 Hz)
+  t=  76.9s  B transmits   1.0 s (carrier  -18.3 Hz)
+  t=  78.0s  A transmits   0.8 s (carrier  -11.1 Hz)
+  t=  78.8s  B transmits   1.0 s (carrier  -18.4 Hz)
+  t=  79.9s  A transmits   0.8 s (carrier  -11.0 Hz)
+  t=  80.7s  B transmits   1.0 s (carrier  -18.4 Hz)
+  t=  81.8s  A transmits   0.8 s (carrier  -10.9 Hz)
+  t=  82.6s  B transmits   0.9 s (carrier  -18.5 Hz)
+  t=  83.5s  A transmits   0.8 s (carrier  -10.9 Hz)
+
+   t, s mode     rate           cfo seq ack req_rung -> speed selection   snr rpt  payload
+   23.3 EXTREME  BPSK 1/3    -71.4Hz   0   1 rung 9 (529 bit/s)             +2.0dB  b'\x00'
+   34.7 NORMAL   QPSK 2/3    -18.6Hz   2   0 rung 10 (706 bit/s)            +4.0dB  b'MSG DE R9FEU: QTH...'
+   38.5 NORMAL   QPSK 3/4    -33.7Hz   0   0 rung 10 (706 bit/s)            +4.0dB  b'!\x87\xeak\xde\xa6\xc8\xde \x04\x07\xf6D\xdalI\xbe...'
+   39.7 NORMAL   QPSK 3/4    -32.7Hz   0   0 rung 9 (529 bit/s)             +2.0dB  b'\x00'
+   48.1 NORMAL   QPSK 2/3    -31.6Hz   0   0 rung 9 (529 bit/s)             +0.0dB  b'\x00'
+   48.9 NORMAL   QPSK 2/3    -26.7Hz   1   0 rung 9 (529 bit/s)             +2.0dB  b'P\xce>m\xfa\xe9\xbf\x90\xb4[\x93\xf9\xf7|!\x97L...'
+   50.2 NORMAL   QPSK 2/3    -31.6Hz   0   1 rung 9 (529 bit/s)             +0.0dB  b'\x00'
+   51.0 NORMAL   QPSK 2/3    -25.0Hz   2   0 rung 9 (529 bit/s)             +2.0dB  b'?\xf7\x87\x83\x9dG\x16\xcc${\xd3\xe0W\xc8\x96\xf7\xbc...'
+   52.3 NORMAL   QPSK 2/3    -32.0Hz   0   2 rung 9 (529 bit/s)             +0.0dB  b'\x00'
+   58.9 NORMAL   QPSK 3/4    -26.9Hz   2   0 rung 9 (529 bit/s)             +2.0dB  b'?\xf7\x87\x83\x9dG\x16\xcc${\xd3\xe0W\xc8\x96\xf7\xbc...'
+   60.1 NORMAL   QPSK 2/3    -33.5Hz   0   2 rung 9 (529 bit/s)             +0.0dB  b'\x00'
+   60.9 NORMAL   QPSK 2/3    -26.0Hz   3   0 rung 10 (706 bit/s)            +4.0dB  b'!z\xfczI\x03\x1d\xfcG\x03\xe2'
+   61.9 NORMAL   QPSK 3/4    -32.4Hz   1   3 rung 9 (529 bit/s)             +2.0dB  b'R R TNX MSG DE UB...'
+   68.6 NORMAL   QPSK 3/4    -31.5Hz   1   3 rung 9 (529 bit/s)             +2.0dB  b'R R TNX MSG DE UB...'
+   70.7 NORMAL   QPSK 3/4    -26.3Hz   3   0 rung 10 (706 bit/s)            +4.0dB  b'!z\xfczI\x03\x1d\xfcG\x03\xe2'
+   71.7 NORMAL   QPSK 3/4    -32.6Hz   1   3 rung 9 (529 bit/s)             +2.0dB  b'R R TNX MSG DE UB...'
+   72.9 NORMAL   QPSK 2/3    -25.3Hz   3   1 rung 10 (706 bit/s)            +2.0dB  b'\x00'
+   73.7 NORMAL   QAM16 1/2   -32.7Hz   2   3 rung 9 (529 bit/s)             +2.0dB  b'9 QTH KP50 73'
+   74.6 NORMAL   QPSK 2/3    -24.0Hz   3   2 rung 10 (706 bit/s)            +2.0dB  b'\x00'
+   76.5 NORMAL   QPSK 2/3    -24.9Hz   3   3 rung 11 (941 bit/s)            +6.0dB  b'\x00'
+   77.3 NORMAL   QAM16 1/2   -31.8Hz   0   3 rung 9 (529 bit/s)             +2.0dB  b'\xb6\xb0)X\x07\x8d\xf1I|\xdf{\xde%T7\xc8f...'
+   80.3 NORMAL   QPSK 2/3    -23.6Hz   3   1 rung 11 (941 bit/s)            +6.0dB  b'\x00'
+   81.1 NORMAL   QAM16 1/2   -32.0Hz   2   3 rung 10 (706 bit/s)            +4.0dB  b'$K\xdeVUv^;9O%\xdbt\xea\x82\xd5\x8a...'
+   82.2 NORMAL   QPSK 3/4    -25.0Hz   3   2 rung 11 (941 bit/s)            +6.0dB  b'\x00'
+   83.0 NORMAL   QAM16 1/2   -31.6Hz   3   3 rung 10 (706 bit/s)            +4.0dB  b'w\xa3zF\xffY\x10\xdb(\xe0Q#'
+   83.9 NORMAL   QPSK 3/4    -26.6Hz   3   3 rung 11 (941 bit/s)            +6.0dB  b'\x00'
+
+decoded 26/40 frames from the noisy/fading WAV (fade dropouts are expected -- the stations' ARQ recovered them)

@@ -1,0 +1,211 @@
+\section{C Implementation and Infrastructure}
+\label{sec:cport}
+
+The fixed-point reference model of Section~\ref{sec:fixed} answers
+\emph{whether} integer arithmetic preserves the link performance; the C
+port (\texttt{cport/}) answers whether the system \emph{fits} a DSP or
+microcontroller.  It is portable C99 with no \texttt{malloc} and no
+floating point on the signal path (doubles remain on the control plane
+--- dB values and timers --- as in the model), and covers the entire
+feature family: both FEC families, all three modulations and link
+modes, the gated two-stage frequency search, HARQ combining, calibrated
+LLRs, the integer SNR estimator, the full link layer, and a streaming
+receiver architecture for MCU deployment.
+
+\subsection{Bit-Exact Porting Methodology}
+\label{sec:cport_method}
+
+Every module is validated against \emph{golden vectors} generated from
+the Python fixed-point model (\texttt{gen\_vectors.py}): inputs and
+expected outputs are dumped as C headers and compared with
+\texttt{memcmp} --- no tolerances anywhere.  Whole transmit frames
+(up to 260\,k samples for EXTREME) are compared through 64-bit
+FNV-1a hashes over every \texttt{int16} sample, with the first 64
+samples embedded verbatim for debuggability.  Two rules keep the
+comparison honest:
+
+\begin{itemize}
+    \item \textbf{ROMs are dumped, never recomputed.}  Twiddles,
+          preamble blocks, pilot symbols, LDPC graph, ladder tables and
+          detection kernels all come from the Python model; a C-side
+          reimplementation of table generation would risk silently
+          diverging in rounding.
+    \item \textbf{Width findings are documented, not patched over.}
+          Every intermediate that exceeds a naive width estimate
+          (Viterbi path metrics, BFP energy sums, the ZC metric's
+          Q-scaling) is recorded in \texttt{WIDTHS.md} with its measured
+          range, so an RTL implementation inherits the analysis.
+\end{itemize}
+
+The suite currently runs \textbf{79 checks} across six binaries
+(primitives, bit pipeline, TX frames, RX demodulation, streaming
+receiver, link layer).  RX genie vectors are self-hosting: clean frames
+are rebuilt by the bit-exact C transmitter inside the test, so only the
+Python detection genie (start sample, CFO word) and expected bits are
+dumped.
+
+\subsection{Streaming Receiver}
+\label{sec:cport_stream}
+
+The frame-at-once reference receiver is impractical on an MCU (it wants
+the whole capture in memory), so \texttt{rx\_stream.c} implements a
+ring-buffer state machine (\textsc{search} $\rightarrow$ \textsc{zc}
+$\rightarrow$ \textsc{header} $\rightarrow$ \textsc{data}) fed in
+arbitrary chunks.  The tone-detection stage is necessarily causal and
+diverges from the model in two documented ways: block exponents and the
+noise floor are windowed (a streaming receiver cannot know the whole
+capture's minimum exponent, and the model's whole-capture \emph{median}
+floor is acausal), and detection commits on a local metric peak ---
+when the above-threshold region ends or the argmax stays stable for a
+full window span --- instead of a global argmax.  On the golden corpus
+the streaming receiver lands on the identical tone anchor for clean
+frames, making everything downstream bit-identical to the
+frame-at-once path.
+
+Memory is dominated by sample history, and two measurements shaped the
+final architecture:
+
+\begin{itemize}
+    \item \textbf{The ring only needs to cover the Zadoff--Chu
+          re-anchor lookback, not the preamble.}  The tone stage is
+          incremental (each 512-sample block folds into a
+          $\approx$540-byte summary; raw tone samples are never
+          re-read).  A permanent high-water-mark diagnostic
+          (\texttt{rxs\_ring\_hwm}) measured the deepest lookback over
+          the corpus at 8\,510 / 32\,318 / 124\,478 samples per mode.
+    \item \textbf{One shared raw ring serves every instance.}  All
+          mode-instances listen to the same audio (the preamble root
+          self-labels the mode), so concurrent instances write
+          identical samples and a single \texttt{int16} ring of
+          147\,456 samples (288\,KB) replaces per-instance analytic
+          rings.  The analytic signal is reconstructed on extraction
+          (Hilbert-on-read), bit-identical to the former write-time
+          FIR --- and measured \emph{faster}, because the 63-tap filter
+          now runs only on consumed regions rather than on every
+          sample in every instance.
+\end{itemize}
+
+\subsection{Protocol Extensions}
+\label{sec:cport_proto}
+
+Two extensions beyond the Python reference address the fixed
+per-frame overhead (preamble + header $\approx$0.64\,s in NORMAL mode)
+that dominates air time at the top rungs:
+
+\begin{itemize}
+    \item \textbf{Selective-repeat burst ARQ.}  Bulk transfers send up
+          to a window of frames back-to-back, answered by one bitmap
+          acknowledgment (NACK-by-omission).  The two flag combinations
+          impossible in the legacy protocol serve as burst frame types,
+          so the legacy path is untouched.
+    \item \textbf{Extended frames.}  The article's header \texttt{len}
+          field counts packet \emph{bits} (255 max
+          $\rightarrow$ 27-byte payloads).  An unused header type
+          codepoint reinterprets \texttt{len} as payload \emph{bytes},
+          allowing 255-byte payloads (2\,076-bit packets) behind a
+          single preamble.  Burst fragment size scales with the
+          engage-time rung (200\,B at rung $\ge$10, 100\,B at $\ge$7,
+          else 25\,B).
+\end{itemize}
+
+Measured on the virtual channel: a 250-byte transfer completes in
+3 frames instead of $\approx$20 for stop-and-wait, and a 5\,000-byte
+file drops from 211 transmitted frames (legacy) to 45, holding the top
+QAM16 rung throughout.  Supporting endpoints added alongside: a
+diagnostic event stream (every TX/RX, timeout, rung change annotated
+with the controller inputs that caused it, burst state transitions)
+plus a controller-decision snapshot --- which immediately located a
+real bug (burst acknowledgment windows systematically timing out and
+poisoning the rate controller toward its hard rung-0 fallback; fixed by
+forgiving a window's first miss and budgeting the reply air time for
+the actual bitmap at a conservative rung) --- and an external
+oscillator fine-tune endpoint (VCTCXO DAC / CAT clarifier actuator
+driven by the AFC netting loop, with budget clamping, an anchor role,
+and a manual override).
+
+\subsection{Memory and Flash Engineering}
+\label{sec:cport_memory}
+
+Table~\ref{tab:cport_flash} shows the measured flash footprint
+(\texttt{arm-none-eabi-gcc -mcpu=cortex-m7 -O2}, const tables count
+into \texttt{.text}).  Three reductions brought the total from an
+initial 242\,KB to $\approx$57\,KB with zero runtime cost and
+bit-exactness enforced by the golden tests:
+
+\begin{itemize}
+    \item \textbf{Preambles stored as their unique periodic blocks}
+          (183\,KB $\rightarrow$ 1.3\,KB): each mode's preamble is
+          exactly a 32-sample tone block tiled $2T{\times}4$ times, a
+          64-sample tone block tiled $T{\times}2$ times, and one
+          128-sample ZC tile (whose tail doubles as the cyclic prefix)
+          repeated \texttt{sym\_tile} times --- 224 unique samples per
+          mode, re-expanded by modulo indexing.
+    \item \textbf{Single-table trigonometry} (18.2\,KB $\rightarrow$
+          8\,KB): the NCO sine table and all six FFT twiddle arrays are
+          exact index-arithmetic views of one 4096-entry cosine table
+          ($\sin[i]=\cos[(i+3N/4) \bmod N]$; twiddles at stride
+          $N/n$); the generator asserts the identities at dump time.
+    \item \textbf{Packed Viterbi traceback} (1 bit per state per step
+          instead of a predecessor byte --- the predecessor is
+          $(s{\gg}1) + (\mathrm{bit}{\ll}5)$), and \texttt{int32}
+          depuncture buffers: extended-frame Viterbi state fell from
+          181\,KB to 42\,KB, bit-identically.
+\end{itemize}
+
+\begin{table}[H]
+    \centering
+    \caption{Measured Cortex-M7 flash footprint (all three modes).}
+    \label{tab:cport_flash}
+    \small
+    \begin{tabular}{@{}lrl@{}}
+    \toprule
+    \textbf{Object} & \textbf{Flash} & \textbf{Dominant tables} \\
+    \midrule
+    \texttt{fft.o}        & 9.4\,KB  & 8\,KB shared cosine ROM \\
+    \texttt{rx\_detect.o} & 10.5\,KB & ZC kernels + detection masks \\
+    \texttt{rx\_stream.o} + \texttt{rx\_demod.o} & 16.9\,KB &
+                            frequency-search tables \\
+    \texttt{ldpc.o}       & 7.2\,KB  & code graph \\
+    \texttt{link.o} + \texttt{station.o} & 7.2\,KB & rate-ladder ROM \\
+    \texttt{tx.o}         & 3.5\,KB  & 1.3\,KB preamble blocks \\
+    \texttt{dsp.o} + \texttt{conv.o} + others & 3.0\,KB & --- \\
+    \midrule
+    \textbf{Total}        & \textbf{$\approx$57\,KB} & \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+RAM, with the shared-ring architecture: 288\,KB shared raw ring
++ 8/35/69\,KB per-mode summaries and scratch + 53\,KB decoder state
+$\approx$ \textbf{453\,KB for the full three-mode station} (a
+single-mode NORMAL build, with the ring shrunk to its measured
+lookback, needs $\approx$40\,KB).  Against the chosen target ---
+STM32H723 (Cortex-M7 at 550\,MHz, 1\,MB flash, $\approx$496\,KB usable
+data RAM) --- the full three-mode station fits with margin, the code
+fits in the 64\,KB ITCM alone, and the CPU projections give
+$\le$10\,\% worst-case load (EXTREME acquisition, amortized), with
+everything else below 3\,\%.
+
+\subsection{Demonstration Infrastructure}
+\label{sec:cport_demo}
+
+The C stack runs end-to-end in an interactive demonstration
+(\texttt{demoapp/}): a virtual channel daemon exposes two station
+devices and a configuration device over Unix sockets, moves 12\,kHz
+\texttt{int16} audio in paced ticks, and applies propagation delay,
+AWGN sized against the delivered-signal RMS, one-pole Rayleigh fading,
+and half-duplex muting; an optional audio mode plays each station's
+receive signal on one stereo channel with the sound card as the pacing
+clock, making the protocol audible (the EXTREME bootstrap's 21-second
+warble adapting up to sub-second QAM16 chirps).  Two console station
+applications (three streaming receivers each, one per mode, over the
+shared ring) provide messaging, multi-part file transfer over the
+burst protocol, channel statistics, the diagnostic event stream, and
+the oscillator fine-tune command.  A scripted smoke test drives the
+whole stack --- text plus a 5\,000-byte file across the impaired
+channel, byte-compared on arrival --- at $25\times$ time scale; the
+protocol clocks itself from received samples, so behaviour is
+identical at any scale.  The stop-and-wait inefficiency, the burst
+protocol's window bugs, the carrier-sense threshold and the rung-0
+fallback were all found by this infrastructure rather than by
+inspection.

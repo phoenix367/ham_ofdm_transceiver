@@ -1,0 +1,9 @@
+flowchart TD
+    subgraph StA["station A (ppm_A, drift_A, trim_A)"]
+        ATX["TX carrier"] --- ARX["RX LO"]
+    end
+    subgraph StB["station B (ppm_B, drift_B, trim_B)"]
+        BTX["TX carrier"] --- BRX["RX LO"]
+    end
+    ATX -->|"CFO seen at B =<br/>err_A - err_B"| BRX
+    BTX -->|"CFO seen at A =<br/>err_B - err_A"| ARX

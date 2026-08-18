@@ -1,0 +1,57 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{What Binds Performance Now}
+
+\paragraph{The front end, not the code.}  The clearest lesson of the
+coding work is that FEC choice stopped mattering before code quality
+did: LDPC's 0.7\,dB AWGN advantage compresses to parity end-to-end
+because the demodulator's LLR quality is the binding constraint.  The
+monotone recalibration recovered 1.5--2\,dB, but a standards-grade
+LDPC matrix (802.11n/NR-style~\cite{ieee80211}) \emph{plus} fully
+calibrated LLRs would be needed to realise the remaining
+$\sim$2\,dB.  Any further sensitivity work should start at the LLR
+front end, not the decoder.
+
+\paragraph{Synchronization is the sensitivity frontier.}  Both the
+original reproduction gap and the fade-loss analysis point the same
+way: at the edge, frames are lost to detection and timing, not to
+decoding.  HARQ helps only in the noise-limited regime for exactly
+this reason --- a sync-level loss leaves no LLRs to combine.
+
+\paragraph{Physics caps EXTREME.}  The $64\times$ mode's 0.69\,s
+coherent integration assumes a channel coherent over that window
+($\lesssim$0.1\,Hz Doppler spread).  This is a physical ceiling, not
+an implementation one, and it is why the mode ladder --- rather than
+ever-longer integration --- is the right architecture.
+
+\paragraph{Feedback latency at the floor.}  Once a direction falls to
+EXTREME, the adaptation loop period is bounded by 25--45\,s frame air
+times.  The controller is designed around this (fade-aware filtering,
+loss fallback, silence decay), but no tuning can make a 7.8\,bit/s
+control loop fast.
+
+\subsection{Limitations}
+
+The channel model, while faithful to the article (and extended with
+Rayleigh fading and a physical LO model), is still a simulation; the
+measured sensitivities should be planned around with $\sim$3\,dB of
+fading margin ($-14\ldots-15$\,dB for EXTREME).  The 16-QAM rungs run
+without LLR recalibration (the map is BPSK-trained); a
+modulation-specific map is straightforward but unmeasured.  The LDPC
+matrix is a from-scratch IRA construction, not a standards matrix.
+The project also has no over-the-air validation yet --- the WAV
+recordings are transceiver-ready precisely to enable it.
+
+\subsection{Future Work}
+
+In rough order of expected value: over-the-air testing with real SSB
+rigs using the recorded WAVs; a standards-grade LDPC matrix plus
+QAM-specific LLR recalibration; porting the fixed receiver's
+slew-limited tracker back to the float model (it is measurably
+better); pilot reduction or 2-D channel estimation to reclaim carrier
+capacity; per-carrier bit-loading on the measured channel estimate;
+frame aggregation in the ARQ to amortise preamble overhead at high
+rungs; a 46.875\,Hz-spacing variant for very stable channels; and
+shrinking EXTREME's frequency-search range after AFC netting
+converges (compute reduction on embedded targets).

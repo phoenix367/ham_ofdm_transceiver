@@ -1,0 +1,138 @@
+/* Streaming-architecture validation: the same captures as the
+ * frame-at-once receiver, fed in arbitrary chunks through the ring-buffer
+ * state machine. The tone stage is causal (windowed alignment/median,
+ * peak-commit), so start/bits must match the reference exactly and the
+ * CFO word within a small tolerance (the tone residual sees a slightly
+ * different window); everything downstream is the same arithmetic. */
+#include <stdio.h>
+#include <string.h>
+
+#include "../src/packets.h"
+#include "../src/tx.h"
+#include "../src/rx_stream.h"
+#include "test_vectors.h"
+
+static int g_pass, g_fail;
+
+static void check(const char *name, int ok)
+{
+    printf("[%s] %s\n", ok ? "PASS" : "FAIL", name);
+    if (ok)
+        g_pass++;
+    else
+        g_fail++;
+}
+
+static int16_t g_samples[600000];
+
+/* feed in chunks: pattern 0 = fixed 160; pattern 1 = LCG 1..1500 */
+static int run_stream(link_mode_t mode, const int16_t *s, int n, int pattern,
+                      rxs_event_t *ev)
+{
+    rxs_t *r = rxs_open(mode, 0);
+    uint32_t lcg = 12345;
+    int pos = 0, got = 0;
+    while (pos < n) {
+        int c;
+        if (pattern == 0) {
+            c = 160;
+        } else {
+            lcg = lcg * 1103515245u + 12345u;
+            c = 1 + (int)((lcg >> 16) % 1500u);
+        }
+        if (c > n - pos)
+            c = n - pos;
+        got = rxs_push(r, s + pos, c, ev);
+        pos += c;
+        if (got && ev->type == 1)
+            break; /* negative events are acquisition retries */
+    }
+    if (!(got && ev->type == 1))
+        got = rxs_flush(r, ev);
+    printf("  ring hwm %s: %lld samples\n",
+           mode == 0 ? "NORMAL" : (mode == 1 ? "ROBUST" : "EXTREME"),
+           (long long)rxs_ring_hwm(r));
+    if (rxs_ring_hwm(r) > RXS_RAW_RING_LEN) {
+        printf("  RING OVERRUN: hwm %lld > capacity %d\n",
+               (long long)rxs_ring_hwm(r), RXS_RAW_RING_LEN);
+        return 0; /* fail the case: reads wrapped into overwritten data */
+    }
+    return got;
+}
+
+static void report_cfo(const char *tag, int64_t got, int64_t want)
+{
+    if (got != want)
+        printf("  %s: cfo %lld want %lld (delta %lld words)\n", tag,
+               (long long)got, (long long)want, (long long)(got - want));
+}
+
+#define CFO_TOL ((int64_t)1 << 21) /* ~5.9 Hz -- tracker absorbs far more */
+
+#define STREAM_CASE(TAG)                                                    \
+    do {                                                                    \
+        rxs_event_t ev;                                                     \
+        int pkt_n = (int)sizeof(TX_##TAG##_PKT);                            \
+        int n = tx_build_frame((link_mode_t)TX_##TAG##_MODE,                \
+                               TX_##TAG##_PKT, pkt_n, PKT_TYP_DATA,         \
+                               (mod_type_t)TX_##TAG##_MOD,                  \
+                               (cc_rate_t)TX_##TAG##_SPD, g_samples + 700); \
+        int p, ok_all = 1;                                                  \
+        memset(g_samples, 0, 700 * sizeof(int16_t));                        \
+        for (p = 0; p < 2; p++) {                                           \
+            int got = run_stream((link_mode_t)TX_##TAG##_MODE, g_samples,   \
+                                 700 + n, p, &ev);                          \
+            int64_t dc = ev.cfo_word - RX_##TAG##_CFO_WORD;                 \
+            int ok = got == 1 && ev.type == 1 &&                            \
+                     ev.start_abs == RX_##TAG##_START &&                    \
+                     (dc < 0 ? -dc : dc) <= CFO_TOL &&                      \
+                     memcmp(ev.bits, TX_##TAG##_PKT, (size_t)pkt_n) == 0;   \
+            if (!ok) {                                                      \
+                printf("  " #TAG " p%d: got=%d type=%d start=%d want %d\n", \
+                       p, got, ev.type, ev.start_abs,                       \
+                       (int)RX_##TAG##_START);                              \
+                report_cfo(#TAG, ev.cfo_word, RX_##TAG##_CFO_WORD);         \
+                ok_all = 0;                                                 \
+            }                                                               \
+        }                                                                   \
+        check("stream " #TAG " (2 chunk patterns)", ok_all);                \
+    } while (0)
+
+int main(void)
+{
+    STREAM_CASE(NORM_BPSK);
+    STREAM_CASE(NORM_QAM16);
+    STREAM_CASE(ROBUST_BPSK);
+    STREAM_CASE(EXTREME_BPSK);
+
+    {
+        rxs_event_t ev;
+        int n = (int)(sizeof(RX_NOISY_SAMPLES) / sizeof(int16_t));
+        int got = run_stream(MODE_NORMAL, RX_NOISY_SAMPLES, n, 1, &ev);
+        int64_t dc = ev.cfo_word - RX_NOISY_CFO_WORD;
+        check("stream noisy (-5 dB, CFO, multipath)",
+              got == 1 && ev.type == 1 && ev.start_abs == RX_NOISY_START &&
+              (dc < 0 ? -dc : dc) <= CFO_TOL &&
+              memcmp(ev.bits, RX_NOISY_PKT, sizeof(RX_NOISY_PKT)) == 0);
+        report_cfo("noisy", ev.cfo_word, RX_NOISY_CFO_WORD);
+    }
+
+    {
+        rxs_event_t ev;
+        int pkt_n = (int)sizeof(TX_LDPC_PKT);
+        int n = tx_build_frame_ex(MODE_NORMAL, TX_LDPC_PKT, pkt_n,
+                                  PKT_TYP_DATA, MOD_BPSK, CC_R13, 1,
+                                  g_samples + 700);
+        int got;
+        memset(g_samples, 0, 700 * sizeof(int16_t));
+        got = run_stream(MODE_NORMAL, g_samples, 700 + n, 0, &ev);
+        check("stream LDPC (ver=2)",
+              got == 1 && ev.type == 1 && ev.hdr.ver == 2 &&
+              ev.start_abs == RX_LDPC_START &&
+              memcmp(ev.bits, TX_LDPC_PKT, (size_t)pkt_n) == 0);
+        report_cfo("ldpc", ev.cfo_word, RX_LDPC_CFO_WORD);
+    }
+
+    printf("\n%d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

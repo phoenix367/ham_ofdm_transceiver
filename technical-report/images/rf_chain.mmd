@@ -1,0 +1,10 @@
+flowchart LR
+    A["TX audio<br/>12 kHz"] --> U["up x4 +<br/>Hilbert"] --> M["x exp(j 2 pi f_tx t)<br/>Re: USB signal"]
+    M --> CH
+    subgraph CH["channel @ 48 kHz"]
+        direction TB
+        F["Rayleigh fading g(t)<br/>Doppler-band-limited"] --> MP["multipath<br/>taps at physical delays"] --> N["AWGN<br/>(audio-band-calibrated)"] --> BE["BSC flips /<br/>BEC erasures"]
+    end
+    CH --> PD["product detector<br/>x exp(-j 2 pi f_rx t)"] --> LP["LPF +/-6 kHz"] --> DN["2 Re, down x4"] --> O["RX audio"]
+    TXLO["TX station LO<br/>f_tx = f_c + err_tx(t)"] --> M
+    RXLO["RX station LO<br/>f_rx = f_c + err_rx(t)"] --> PD

@@ -1,0 +1,8 @@
+flowchart LR
+    S["audio in"] --> N["NORMAL modem<br/>ZC root 17"]
+    N -- "no lock" --> R["ROBUST modem<br/>ZC root 19"]
+    R -- "no lock" --> E["EXTREME modem<br/>ZC root 21"]
+    N -- lock --> D["decode"]
+    R -- lock --> D
+    E -- lock --> D
+    E -- "no lock" --> F["DemodError"]

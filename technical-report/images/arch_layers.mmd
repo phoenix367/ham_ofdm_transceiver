@@ -1,0 +1,30 @@
+flowchart LR
+    subgraph L4["Application"]
+        A1["bytes + QoS class"]
+    end
+    subgraph L3["Link layer"]
+        B1["LinkStation<br/>(station.py)"]
+        B2["LinkController<br/>+ LADDER (link.py)"]
+        B3["LinkControl word<br/>20 bits in Data.reserved"]
+    end
+    subgraph L2["PHY"]
+        C1["Transceiver<br/>(transceiver.py)"]
+        C2["FullOFDMModem /<br/>STFOFDMModem (ofdm.py)"]
+        C3["FEC: conv (coding.py)<br/>LDPC (ldpc.py)"]
+        C4["packets / crc /<br/>interleaver / scrambler /<br/>papr / mapping"]
+    end
+    subgraph L1["RF / channel"]
+        D1["rf.py: SSB + LO"]
+        D2["channel.py: audio-domain<br/>simulator"]
+    end
+    subgraph FX["Fixed-point twin"]
+        E1["ofdm_phy/fixed/*<br/>integer RTL reference"]
+    end
+    A1 --> B1 --> C1 --> D1
+    C1 --> D2
+    B1 --> B2
+    B1 --> B3
+    C1 --> C2
+    C1 --> C3
+    C1 --> C4
+    E1 -.cross-validated.- C1
