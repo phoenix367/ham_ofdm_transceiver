@@ -109,6 +109,19 @@ Cross-module invariants that are easy to break:
   frequency-search demodulator, whose `freq_range` must cover worst-case
   preamble CFO error (±25 Hz for EXTREME). Detection thresholds were tuned
   against noise-only false alarms (0/20) — don't lower them casually.
+- QoS air-time payload caps must be judged on the **whole frame**, not on
+  the payload's own transmission time: at EXTREME the fixed preamble+header
+  is 16.8 s, above every QoS budget, so the rate-based cap alone fragmented
+  a 22-byte message into six 5-byte frames (~4x the air time). `payload_cap`
+  (`station.c`) / `_payload_cap` (`station.py`) return the full 27 bytes
+  whenever `estimate_air_time(rung, 1) >= budget`; keep both twins in sync.
+- Energy-based carrier sense (`demoapp/app.c`) cannot distinguish a long
+  frame from a raised noise floor by level alone — the floor tracker drops
+  instantly but climbs 0.05%/block, so a sharp SNR drop used to freeze
+  carrier sense at BUSY for ~82 s (and a timeout on a busy channel is
+  deliberately not a loss, so the ladder did not adapt either). The bound
+  is `CS_REBASE_S` (60 s > the 38 s longest frame): sustained energy past
+  it is re-baselined as the new floor.
 - `Header.PACKET_SIZE`-style sizes count CRC bits; `Header.len` is the size of
   the *data packet bits including its CRC* (e.g. 90 for a Beacon). C-port
   exception: `PKT_TYP_EXT_DATA` (typ=5, `cport/` only) reinterprets `len` as

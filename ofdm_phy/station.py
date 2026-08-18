@@ -60,6 +60,21 @@ def estimate_air_time(rung_idx: int, payload_len: int) -> float:
     n_data = -(-coded // (m.data_carriers_len * MAPPERS[rung.mod].MU))
     return (preamble + (n_hdr + n_data) * m.symbol_len) / FS
 
+def _payload_cap(rung_idx: int, max_air_s: float) -> int:
+    """Air-time budget -> payload cap, judged on the WHOLE frame.
+
+    At the low rungs the fixed preamble+header (16.8 s at EXTREME) already
+    exceeds every QoS budget, so splitting a message cannot bring a frame
+    under budget -- it only pays that fixed cost once per fragment
+    (measured: a 22-byte message at rung 0 went out as six 5-byte frames,
+    ~4x the air time of one 38 s frame). Where the fixed cost already
+    blows the budget, send the largest packet the format allows.
+    """
+    if estimate_air_time(rung_idx, 1) >= max_air_s:
+        return 27
+    return max_payload_bytes(LADDER[rung_idx], max_air_s)
+
+
 
 @dataclass
 class StationStats:
@@ -165,7 +180,7 @@ class LinkStation:
         if src is None:
             return None
         stream = 1 if src is self.cur_prio else 0
-        cap = max_payload_bytes(LADDER[rung_idx], QOS_MAX_AIR_S[src["qos"]])
+        cap = _payload_cap(rung_idx, QOS_MAX_AIR_S[src["qos"]])
         off = src["off"]
         chunk = src["data"][off:off + cap]
         last = off + len(chunk) >= len(src["data"])

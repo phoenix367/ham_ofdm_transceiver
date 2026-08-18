@@ -222,6 +222,23 @@ static void pop_msg(station_t *st, int qos, st_msg_t *dst)
     st->qcount[qos]--;
 }
 
+/* Air-time budget -> payload cap.  The budget has to be judged on the
+ * WHOLE frame, not on the payload's own transmission time: at the low
+ * rungs the fixed preamble+header (16.8 s at EXTREME) already exceeds
+ * every QoS budget, so splitting a message cannot bring a frame under
+ * budget -- it only pays that fixed cost once per fragment.  Measured
+ * before this guard: a 22-byte message at rung 0 went out as six
+ * 5-byte frames (6x16.8 s of preamble) instead of one 38 s frame,
+ * ~4x the air time.  Where the fixed cost already blows the budget,
+ * fragmenting buys nothing, so send the largest packet the format
+ * allows; elsewhere the original rate-based cap is unchanged. */
+static int payload_cap(int rung_idx, double max_air_s)
+{
+    if (estimate_air_time(rung_idx, 1) >= max_air_s)
+        return 27;
+    return link_max_payload_bytes(rung_idx, max_air_s);
+}
+
 /* priority stream preempts bulk at fragment boundaries */
 static st_frag_t *take_fragment(station_t *st, int rung_idx)
 {
@@ -244,7 +261,7 @@ static st_frag_t *take_fragment(station_t *st, int rung_idx)
     if (!src)
         return 0;
 
-    cap = link_max_payload_bytes(rung_idx, QOS_MAX_AIR_S[src->qos]);
+    cap = payload_cap(rung_idx, QOS_MAX_AIR_S[src->qos]);
     chunk_len = src->len - src->off;
     if (chunk_len > cap)
         chunk_len = cap;

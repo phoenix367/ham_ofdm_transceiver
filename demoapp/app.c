@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -106,10 +107,17 @@ static const char *tstamp(void)
 }
 
 static double g_noise_floor = 1e9; /* min-tracking RMS^2 EWMA */
+static double g_busy_since = -1.0; /* protocol time the busy run started */
+
+/* Longer than any single transmission (the longest frame is EXTREME with a
+ * 27-byte payload, 38 s), so energy that outlasts it cannot be a frame. */
+#define CS_REBASE_S 60.0
 
 static int channel_busy(void)
 {
     double p = g_busy_acc / BUSY_WIN;
+    double now = now_t();
+    int busy;
     /* noise floor: fast to drop, slow to rise -- adapts to whatever the
      * channel's quiet level is (carrier sense must be relative; frames
      * below the noise floor are invisible to energy detection anyway) */
@@ -119,7 +127,26 @@ static int channel_busy(void)
         g_noise_floor *= 1.0005;
     if (g_noise_floor < 25.0)
         g_noise_floor = 25.0;
-    return p > BUSY_RATIO * BUSY_RATIO * g_noise_floor;
+    busy = p > BUSY_RATIO * BUSY_RATIO * g_noise_floor;
+
+    /* A step rise in channel noise (an operator dropping the SNR, a band
+     * opening) would otherwise take minutes to track: the floor drops
+     * instantly but climbs only 0.05% per block, so carrier sense reads
+     * BUSY and the station transmits nothing -- measured at 82 s of dead
+     * air after a +20 -> -17 dB step, with no losses counted either
+     * (a timeout on a busy channel is deliberately not a loss). No real
+     * transmission outlasts one frame, so sustained energy beyond that
+     * IS the new floor: re-baseline onto it. */
+    if (!busy)
+        g_busy_since = -1.0;
+    else if (g_busy_since < 0.0)
+        g_busy_since = now;
+    else if (now - g_busy_since > CS_REBASE_S) {
+        g_noise_floor = p;
+        g_busy_since = -1.0;
+        busy = 0;
+    }
+    return busy;
 }
 
 static void note_busy(const int16_t *s, int n)
@@ -189,6 +216,11 @@ static void show_status(void)
     printf("--- %s @ t=%.1f s (audio clock)\n", g_name, now_t());
     printf("  channel: %s   last frame: SNR %+.1f dB, CFO %+.1f Hz\n",
            channel_busy() ? "BUSY" : "idle", g_last_snr, g_last_cfo);
+    printf("  carrier sense: rms^2 %.0f, noise floor %.0f (%.1f dB over "
+           "floor, busy above %.1f dB)\n",
+           g_busy_acc / BUSY_WIN, g_noise_floor,
+           10.0 * log10((g_busy_acc / BUSY_WIN) / g_noise_floor + 1e-9),
+           20.0 * log10(BUSY_RATIO));
     printf("  tx rung %d (%s %.0f bit/s)   peer requests rung %d\n",
            g_st.stats.last_rung,
            g_st.stats.last_rung >= 0 ? "ladder" : "-",
@@ -509,7 +541,17 @@ int main(int argc, char **argv)
                 g_txing = 0;
             }
             if (!g_txing) {
-                int nf = station_poll_tx(&g_st, now_t(), channel_busy(),
+                int busy = channel_busy();
+                static int prev_busy = -1;
+                if (g_debug && busy != prev_busy) {
+                    printf("%s [%s] dbg t=%.1f %-12s rms^2=%.3g "
+                           "floor=%.3g\n", tstamp(), g_name, now_t(),
+                           busy ? "CS_BUSY" : "CS_IDLE",
+                           g_busy_acc / BUSY_WIN, g_noise_floor);
+                    fflush(stdout);
+                    prev_busy = busy;
+                }
+                int nf = station_poll_tx(&g_st, now_t(), busy,
                                          g_frame, 600000);
                 if (nf > 0) {
                     ssize_t off = 0;
