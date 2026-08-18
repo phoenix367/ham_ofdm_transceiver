@@ -6,13 +6,24 @@ by bashkirtsevich: an audio-band OFDM modem for SSB transceivers with FEC, packe
 framing and a two-stage synchronization preamble, plus the article's air-channel
 simulator and its BER/PER results.
 
+**C port for DSP/MCU: [cport/](cport/README.md)** — portable C99, no
+malloc, no float on the signal path, validated bit-exactly against the
+Python model (79 golden-vector tests); MCU streaming receiver (one
+shared raw sample ring, Hilbert-on-read), burst ARQ + extended frames,
+diagnostic and oscillator fine-tune endpoints. Measured footprint
+≈57 KB flash / ≈453 KB RAM for all three modes — the full station fits
+the STM32H723 target ([cport/FEASIBILITY.md](cport/FEASIBILITY.md)).
+
 **Interactive demo: [demoapp/](demoapp/README.md)** — console messenger
 over a virtual HF channel (two station devices + config device), running
-the C fixed-point stack end to end in real time.
+the C fixed-point stack end to end in real time, with an audible mode
+(stereo output, one station's receiver per ear) and multi-part file
+transfer over the burst protocol.
 
-**Technical report (PDF): [technical-report/](technical-report/README.md)** —
-`make` inside that folder builds
-`build/OFDM_Transceiver_Technical_Report.pdf`.
+**Technical report:
+[technical-report/OFDM_Transceiver_Technical_Report.pdf](technical-report/OFDM_Transceiver_Technical_Report.pdf)**
+(62 pages, committed) — rebuild with `make` inside
+[technical-report/](technical-report/README.md).
 
 **Full documentation with architecture diagrams: [docs/](docs/README.md)** —
 [architecture](docs/architecture.md) · [PHY](docs/phy.md) ·
@@ -40,8 +51,18 @@ python3 -m venv venv
   - `crc.py`, `interleaver.py`, `scrambler.py`, `papr.py` (clip-and-filter),
     `channel.py` (AWGN + multipath + CFO drift + BSC/BEC), `transceiver.py`
     (full TX/RX chains)
-- `experiments/` — reproduction scripts
-- `results/` — generated tables, curves and figures
+- `experiments/` — reproduction scripts (each report figure has a
+  dedicated entry point that writes a JSON record of every parameter
+  and per-point count next to its PNG)
+- `results/` — generated tables, curves, figures and the JSON
+  reproducibility records
+- `cport/` — the C99 port (src, golden-vector tests, bench harness,
+  `gen_vectors.py`); `make -C cport` regenerates vectors, builds and
+  runs all suites
+- `demoapp/` — interactive demo: virtual channel driver (Python) + two
+  console station apps (C)
+- `technical-report/` — LaTeX sources + the built PDF
+- `docs/` — architecture documentation with diagrams
 
 ## Reproducing the article's results
 
@@ -163,6 +184,38 @@ original coarse sweep. Note: ROBUST BPSK ⅓ (rung 1) is now dominated by
 ROBUST BPSK ½ (faster and equally sensitive) — kept for ladder-index
 stability, never selected.
 
+**Reproducible calibration studies (300 frames/point, JSON records).**
+The report's calibration story is backed by a suite of reproduction
+scripts, each writing `results/<name>.json` with every parameter and
+per-point decode count (non-default `--trials` get suffixed filenames so
+smoke runs can't clobber the reference):
+
+- `experiments/llr_shape.py` — the measured miscalibration shape
+  (216k LLR samples; the empirical-reliability curve peaks at ≈7.5
+  log-odds, independently validating the deployed map's 7.4 cap, and
+  *decreases* beyond |L|≈9 into the clipped mass);
+- `experiments/viterbi_recal.py` — raw vs temperature vs map on the
+  Viterbi chain: temperature is bit-identical to raw at every point
+  (asserted — Viterbi is scale-invariant), the map shifts the waterfall
+  ≈1.5 dB (63→216/300 at −9 dB);
+- `experiments/ldpc_recal.py` — min-sum vs exact sum-product, raw vs
+  mapped: raw-LLR sum-product collapses ≈1.5–2 dB *below* min-sum
+  (0/300 at −9 dB vs 112/300), the map fully rescues it, and calibrated
+  min-sum ≡ calibrated sum-product;
+- `experiments/fec_comparison.py` — both families calibrated: LDPC
+  holds +0.3–0.4 dB over conv (193 vs 151/300 at −9.5 dB), so the
+  front end — not the code — was the binding constraint;
+- `experiments/extreme_recal.py` — the same study at the EXTREME edge:
+  the NORMAL-trained map transfers only *below* the operating point
+  (+0.5 dB at −20.5 dB, zero by −18 dB), and the code families reach
+  parity (the deep edge is acquisition-limited);
+- `experiments/qam16_recal.py` — the 16-QAM regression is
+  **rate-dependent**: the map *helps* +0.4 dB at rate ⅓ but regresses
+  −0.5 dB at the ladder rate ⅔ (so the MU ≤ 2 gate is right, for a
+  rate reason), and calibrated min-sum *beats* calibrated sum-product
+  here — min-sum is robust to residual miscalibration in a way the
+  exact rule cannot be.
+
 ## HARQ, QoS preemption, LDPC and 16-QAM (review follow-ups)
 
 - **Chase-combining HARQ** (`Transceiver.demod_frame(prev_data_llrs=...)`):
@@ -180,15 +233,20 @@ stability, never selected.
   rate-1/3 IRA, N=768/K=256, girth≥6, linear-time accumulator encoding,
   normalized min-sum (deliberately: min-sum is scale-invariant, and the
   modem's estimated/clipped LLRs cost exact sum-product several dB). AWGN:
-  ~0.7 dB better than the K=7 conv code at BLER 10%. End-to-end the gain
-  compresses to ≈ parity at −8 dB / slightly ahead at −9 dB — the front-end
-  LLR calibration, not the code, is the binding constraint; a
-  standards-grade matrix (802.11n/NR) plus calibrated LLRs would recover
-  the full ~2 dB. Default FEC remains convolutional.
+  ~0.7 dB better than the K=7 conv code at BLER 10%. End-to-end on raw LLRs the gain
+  compresses to ≈ parity — and the 300-frame calibrated re-measurement
+  (`experiments/fec_comparison.py`) shows why: with the shape map on
+  both chains the LDPC advantage materializes at +0.3–0.4 dB, and
+  calibrated min-sum gives up nothing to exact sum-product. The
+  remaining distance to a standards-grade code (~2 dB) is now
+  attributable to the matrix itself (short block, hand-rolled IRA),
+  with the decoder and front end exonerated by measurement. Default
+  FEC remains convolutional.
 - **16-QAM** (`QAM16Mapper`, Gray, max-log LLRs): ladder rungs 10-12 —
   706 bit/s @ +0.1 dB, 941 @ +2.4, 1059 @ +4.2 (PER≤10%) — filling the
-  article's own "можно применить QAM" gap above 0 dB. Not in the
-  fixed-point model (guarded).
+  article's own "можно применить QAM" gap above 0 dB. Covered by the
+  fixed-point model and the C port as well (integer max-log demapper,
+  8-bit data-LLR quantizer).
 - **Learned rung offsets** (`LinkController.note_outcome`): every
   ack/timeout nudges the effective sensitivity of the rung used
   (+0.7 dB on loss, −0.15 dB on success), correcting the static table
@@ -315,10 +373,11 @@ coding rate for an expected SNR).
 ### Link adaptation & QoS (`ofdm_phy/link.py`)
 
 Two-station protocol layer (`experiments/link_adaptation.py` simulates it
-over the real PHY): a 10-rung speed ladder (mode × modulation × FEC rate,
-dominated rungs removed, sensitivities from the measured sweeps), a 20-bit
-link-control word packed into `Data.reserved`
-(`seq(3)|ack(3)|req_rung(4)|snr_report(6)|flags(3)`) with stop-and-wait ARQ,
+over the real PHY): a 13-rung speed ladder (mode × modulation × FEC rate incl. the
+16-QAM rungs, dominated rungs removed, sensitivities from the measured
+recalibrated sweeps), a 20-bit link-control word packed into
+`Data.reserved` (`seq(2)|ack(2)|req_rung(4)|snr(4)|freq(5)|flags(3)`)
+with stop-and-wait ARQ,
 and a per-direction, receiver-driven controller:
 
 - modes are self-labeling at the PHY (preamble roots), so switching cannot
