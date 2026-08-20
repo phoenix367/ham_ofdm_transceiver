@@ -122,6 +122,13 @@ Cross-module invariants that are easy to break:
   deliberately not a loss, so the ladder did not adapt either). The bound
   is `CS_REBASE_S` (60 s > the 38 s longest frame): sustained energy past
   it is re-baselined as the new floor.
+- `demoapp/sdr_driver.py` presents the same socket devices as `driver.py`
+  but over SSB on a real SDR; its `--selftest` and `--loopback` cover all
+  the DSP without hardware. Two levels that are easy to get wrong: the TX
+  drive (`--tx-ref`, the audio peak mapped to the DAC full scale — the C
+  transmitter reaches int16 full scale, so anything lower clips against
+  the int8 rail and nothing decodes) and the time scale (the SDR path is
+  ~20x the virtual channel's cost, so ~2x is the ceiling, not 25x).
 - `Header.PACKET_SIZE`-style sizes count CRC bits; `Header.len` is the size of
   the *data packet bits including its CRC* (e.g. 90 for a Beacon). C-port
   exception: `PKT_TYP_EXT_DATA` (typ=5, `cport/` only) reinterprets `len` as

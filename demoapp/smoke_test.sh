@@ -8,7 +8,11 @@ DIR=$(mktemp -d)
 LOG=$DIR/logs
 mkdir -p "$LOG"
 
-python3 driver.py --dir "$DIR" --time-scale 25 > "$LOG/driver.log" 2>&1 &
+# DRIVER_CMD lets the same test run against a different channel back end
+# (see sdr_smoke_test.sh, which points it at sdr_driver.py --loopback)
+DRIVER_CMD=${DRIVER_CMD:-"python3 driver.py"}
+SCALE=${SCALE:-25}
+$DRIVER_CMD --dir "$DIR" --time-scale $SCALE > "$LOG/driver.log" 2>&1 &
 DRV=$!
 trap 'kill $DRV 2>/dev/null; rm -rf "$DIR"' EXIT
 sleep 1.5

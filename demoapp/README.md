@@ -77,6 +77,102 @@ drives the ladder up and frames shrink to ~1 s. `--time-scale N` runs the
 whole world N× faster; the apps clock the protocol from received samples,
 so behaviour is identical at any scale.
 
+## Real radio: `sdr_driver.py` (HackRF One and other SoapySDR devices)
+
+The apps talk to a *driver* over a socket, so the channel behind it can be
+swapped without touching the C stack or the console apps:
+
+```bash
+# no hardware: two stations cross-connected through the full SSB path
+python3 sdr_driver.py --loopback --rate 240000 --time-scale 2 --snr-db 18
+
+# verify the signal path (chunk continuity, round-trip fidelity, and a
+# real OFDM frame pushed through TX -> RX and decoded)
+python3 sdr_driver.py --selftest
+
+# a real radio, one station per device
+python3 sdr_driver.py --device driver=hackrf --freq 7.05e6 --rate 2.4e6
+./build/ofdm_console /tmp/ofdmsdr/s1.sock MyCall
+```
+
+Signal path (USB, the model in `ofdm_phy/rf.py`): audio -> analytic signal
+(the same 63-tap Hilbert design the receiver uses) -> interpolate to the
+SDR rate -> int8 I/Q; and back the other way, where taking the real part
+of the decimated baseband *is* an SSB product detector. Tune the radio to
+the **suppressed carrier**: the 300-2400 Hz audio band then lands at
+carrier+300..carrier+2400 Hz, and the LO error between two stations shows
+up as exactly the audio-band CFO the modem already tracks.
+
+Practical notes, in order of how much they bite:
+
+- **Drive level matters more than anything else.** `--tx-ref` is the audio
+  peak mapped to the DAC's full scale, i.e. the mic-gain knob. The C
+  transmitter's frames run at rms ~14000 and touch int16 full scale, so
+  the default is 32768; setting it lower clips the waveform against the
+  int8 rail and nothing decodes (an 18 dB overdrive during development
+  splattered ~9 % of the power out of band and killed every frame).
+- **Sample rate** must be an integer multiple of 12 kHz. HackRF's minimum
+  is 2 Msps, so 2.4 Msps (200x) is the natural choice.
+- **CPU**: the SDR path costs roughly 20x the virtual channel, so it runs
+  at about real time -- `--time-scale 2` is realistic for the loopback on
+  a desktop, not the 25x `driver.py` sustains.
+- **HackRF at HF is a weak receiver**: 8-bit ADC, no preselector, and the
+  narrowest analog filter is 1.75 MHz, so it digitises +-875 kHz of a
+  crowded band at once. Use a bandpass preselector for on-air receive.
+- **TX is ~10 dBm and unfiltered.** Bench work over coax and attenuators
+  first; on air needs a low-pass filter (harmonics), a licence, and
+  realistically an external PA.
+- **Clock**: a free-running HackRF is +-20 ppm (~140 Hz at 7 MHz), inside
+  the modem's +-375 Hz range, but EXTREME integrates coherently over
+  0.69 s symbols across a 44 s frame -- feed CLKIN from a 10 MHz
+  TCXO/GPSDO for the slow modes.
+
+`./sdr_smoke_test.sh` runs the two console stations over the loopback path
+end to end, and `sdr_bringup.py` exercises a real radio:
+
+```bash
+python3 sdr_bringup.py --list                 # devices + their --device string
+python3 sdr_bringup.py --rx --seconds 2       # levels, DC, spectrum, audio
+python3 sdr_bringup.py --tx --i-have-a-dummy-load
+```
+
+### Measured on a HackRF One
+
+Bring-up on real hardware confirmed the receive and transmit plumbing
+(exact 2.400000 Msps, no timeouts over 4.8 M samples, 0.009 % clipping,
+I/Q imbalance 0.00 dB, TX accepted every sample with air time matching to
+50 ms) and produced four fixes worth knowing about:
+
+- **Offset tuning is mandatory.** With the LO on the suppressed carrier
+  the DC/LO leakage lands inside the 3.5 kHz passband and the recovered
+  audio came out 98 % DC (DC 258.3 of an rms of 258.7). The device
+  reports no hardware DC correction and no AGC, so `--if-offset` now
+  defaults to 50 kHz on real hardware: the radio tunes below the carrier
+  and the driver's NCO puts the signal back, leaving the spike far
+  outside the decimation passband (DC 0.0 afterwards).
+- **Set the gain stages, not the aggregate.** SoapySDR's aggregate
+  `setGain` barely moved the level (32 -> 62 dB changed the I/Q rms by
+  3 %), while LNA/VGA/AMP individually span rms 0.010 -> 0.94. Defaults
+  are now `--lna 40 --vga 40 --amp 0`, worth 32 dB of working level
+  (audio rms 5 -> 197); raise `--vga` until `--rx` reports clipping.
+- **Wait for the transmit buffer to drain.** `writeStream` returns as
+  soon as samples are queued -- 0.5 s of a 1.18 s frame was still unsent
+  when it returned -- so switching straight back to receive truncated
+  every frame. The half-duplex switch now waits out the queued air time.
+- **Stream format is CF32**, not CS8; SoapySDR converts to the device's
+  native int8 itself.
+
+CPU is not a constraint: 4.4 % of one core for transmit and 3.1 % for
+receive per audio-second at 2.4 Msps.
+
+Two honest limitations from the same session: a band survey (0.7-13 MHz)
+found a medium-wave broadcaster 79.5 dB over the floor but *identical*
+noise at 5/7/9.6/13 MHz, i.e. HF sits at the HackRF's own noise floor
+rather than the atmospheric noise the link budget assumes -- a
+preselector and LNA are needed for real HF receive. And with one
+half-duplex radio the transmitted waveform cannot be verified by
+receiving it; that needs a second receiver (phase 3).
+
 ## Design notes
 
 - **Protocol time = samples received / 12 kHz.** Wall pacing (and

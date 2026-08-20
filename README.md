@@ -14,6 +14,11 @@ diagnostic and oscillator fine-tune endpoints. Measured footprint
 ≈57 KB flash / ≈453 KB RAM for all three modes — the full station fits
 the STM32H723 target ([cport/FEASIBILITY.md](cport/FEASIBILITY.md)).
 
+**Real radio: [demoapp/sdr_driver.py](demoapp/README.md)** — the same
+device interface over SSB on a HackRF One (or any SoapySDR device), with a
+hardware-free loopback mode that runs the whole SSB/resampling/int8 path
+so it can be tested and regression-checked without a radio.
+
 **Interactive demo: [demoapp/](demoapp/README.md)** — console messenger
 over a virtual HF channel (two station devices + config device), running
 the C fixed-point stack end to end in real time, with an audible mode
