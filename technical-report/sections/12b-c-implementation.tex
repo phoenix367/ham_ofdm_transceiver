@@ -380,6 +380,57 @@ has already absorbed the error the modem would otherwise estimate.
     \end{tabular}
 \end{table}
 
+Figure~\ref{fig:sdr_waterfall} is what those frames look like as the
+demodulator received them.  The analysis FFT is 128 bins at 12\,kHz,
+which is exactly the modem's own subcarrier grid, so every row of the
+waterfall is one OFDM bin and the structure of
+Section~\ref{sec:phy} is directly legible: the Newman tone comb
+striping the preamble, then the header, then the data block filling
+300--2400\,Hz.  The two NORMAL frames last about a second; the ROBUST
+frame occupies 7.35\,s for the same 27 bytes, which is what
+$16\times$ tiling costs and buys.  The region boundaries are not
+fitted --- they are computed from the decoded header's own modulation,
+code rate and length fields, and land on the measured burst to within
+15\,ms.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/sdr_waterfall.png}
+    \caption{Frames received over the air (\texttt{demoapp/sdr\_waterfall.py}
+             on \texttt{results/am\_rx\_offair.wav}): the whole capture
+             above, each frame close up below with its preamble, header
+             and data spans marked.}
+    \label{fig:sdr_waterfall}
+\end{figure}
+
+Figure~\ref{fig:sdr_waterfall} shows those frames as the demodulator
+received them.  The analysis FFT is 128 bins at 12\,kHz, exactly the
+modem's own subcarrier grid, so each row is one OFDM bin and the frame
+structure of Section~\ref{sec:phy} is directly legible: the Newman tone
+comb lighting only a few bins, the Zadoff--Chu symbol closing the
+preamble, then the header and the data block filling 300--2400\,Hz.
+The spans above each waterfall are computed rather than fitted --- from
+the mode's tone-field geometry and the decoded header's own modulation,
+code rate and length --- and they land on the measured burst to within
+15\,ms.  The comb's end is measurable independently: bin occupancy sits
+at 0.17 through the tone fields and jumps to 0.9 at 0.321\,s, against a
+predicted 0.320\,s.  It is worth noting that the ZC symbol occupies all
+23 carriers, so on a waterfall it resembles data even though it belongs
+to the preamble --- which is why it is drawn as its own span.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/sdr_waterfall.png}
+    \caption{Frames received over the air
+             (\texttt{demoapp/sdr\_waterfall.py} on
+             \texttt{results/am\_rx\_offair.wav}): the whole capture
+             above, each frame below with its measured structure.  The
+             ROBUST frame carries the same 27 bytes as its NORMAL
+             neighbours and occupies 7.35\,s doing it --- what
+             $16\times$ tiling costs, and buys.}
+    \label{fig:sdr_waterfall}
+\end{figure}
+
 Every frame transmitted was recovered, across two link modes and two
 modulations, with the mode identified from the preamble root alone ---
 the mechanism the whole adaptive ladder depends on, here exercised over

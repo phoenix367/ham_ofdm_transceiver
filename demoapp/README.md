@@ -234,6 +234,17 @@ exactly 0 Hz and 0 phase, and only then takes the real part -- classic
 synchronous detection, which also makes the generator's frequency error
 irrelevant.
 
+`sdr_waterfall.py` plots what the demodulator actually received
+(`results/sdr_waterfall.png`): the whole capture plus each frame close
+up, with the tone comb, ZC symbol, header and data spans computed from
+the decoded header rather than fitted. The analysis FFT is 128 bins at
+12 kHz -- the modem's own 93.75 Hz subcarrier grid -- so the Newman comb
+is directly visible lighting only a few bins. Two things that make the
+picture readable: `RxStats.start_sample` reports where the *header*
+starts, so the frame begins one preamble earlier, and the ZC symbol
+occupies all 23 carriers, so it looks like data unless drawn as part of
+the preamble.
+
 **Result** (recording kept as `results/am_rx_offair.wav`):
 
 | frame | payload | SNR off air |
