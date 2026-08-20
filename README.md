@@ -27,7 +27,7 @@ transfer over the burst protocol.
 
 **Technical report:
 [technical-report/OFDM_Transceiver_Technical_Report.pdf](technical-report/OFDM_Transceiver_Technical_Report.pdf)**
-(69 pages, committed; includes the measured transmit spectrum, drive-level
+(66 pages, committed; includes the measured transmit spectrum, drive-level
 sweep, receiver calibration and off-air decode from a HackRF One + tinySA Ultra) — rebuild with `make` inside
 [technical-report/](technical-report/README.md).
 

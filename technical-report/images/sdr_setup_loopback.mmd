@@ -1,15 +1,12 @@
 flowchart LR
-    subgraph HOST["One host, no radio"]
-        A1["ofdm_console<br/>station 1"]
-        subgraph DRV["sdr_driver.py --loopback"]
-            M1["SSB modulate<br/>Hilbert, interpolate,<br/>int8 quantise"]
-            CH["channel<br/>AWGN at snr_db<br/>half-duplex mute"]
-            D1["SSB demodulate<br/>decimate, Re()"]
-        end
-        A2["ofdm_console<br/>station 2"]
+    A1["ofdm_console<br/>station 1"]
+    subgraph DRV["sdr_driver.py --loopback  (no radio)"]
+        direction LR
+        M1["SSB modulate<br/>Hilbert, interpolate,<br/>int8 quantise"]
+        CH["channel<br/>AWGN at snr_db,<br/>half-duplex mute"]
+        D1["SSB demodulate<br/>decimate, Re()"]
+        M1 -->|"complex I/Q"| CH --> D1
     end
+    A2["ofdm_console<br/>station 2"]
     A1 -->|"12 kHz int16<br/>unix socket"| M1
-    M1 -->|"complex I/Q at<br/>the SDR rate"| CH
-    CH --> D1
     D1 -->|"12 kHz int16"| A2
-    A2 -.->|"replies take the same path"| M1
