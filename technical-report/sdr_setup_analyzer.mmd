@@ -1,0 +1,18 @@
+flowchart LR
+    subgraph TXM["Transmit measurement"]
+        H1["HackRF One<br/>TX, 2.4 Msps"]
+        SA1["tinySA Ultra<br/>spectrum analyser"]
+    end
+    subgraph RXM["Receive calibration"]
+        SA2["tinySA Ultra<br/>CAL output<br/>10 MHz, -25 dBm"]
+        AT["40 dB<br/>attenuator"]
+        H2["HackRF One<br/>RX, 2.4 Msps"]
+    end
+    PC1["sdr_bringup.py --tx<br/>sdr_drive_sweep.py"] --> H1
+    H1 -->|"coax"| SA1
+    SA1 -->|"USB: scan, level"| PC2["tinysa.py"]
+    PC3["sdr_rx_calibrate.py"] -->|"USB: caloutput"| SA2
+    SA2 --> AT --> H2
+    H2 -->|"USB: I/Q"| PC3
+    style TXM fill:#fff3e6,stroke:#d08b3b
+    style RXM fill:#eef7ee,stroke:#5ba35b

@@ -227,6 +227,21 @@ audio-band CFO the modem already tracks.  The DSP costs 4.4\,\% of one
 core to transmit and 3.1\,\% to receive per audio-second at 2.4\,Msps,
 so a laptop runs it comfortably in real time.
 
+Figure~\ref{fig:sdr_setup_loopback} shows the arrangement that needs no
+radio at all: the driver cross-connects two stations through the entire
+SSB chain --- Hilbert transform, interpolation, int8 quantisation,
+decimation and product detection --- so every line of the signal path is
+exercised, and the console apps above it cannot tell the difference.
+That is what the regression test uses.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images/sdr_setup_loopback.png}
+    \caption{Hardware-free loopback: two stations cross-connected
+             through the full SSB modulation and demodulation chain.}
+    \label{fig:sdr_setup_loopback}
+\end{figure}
+
 Bringing this up on a HackRF One produced four corrections that no
 amount of loopback testing would have found: the local oscillator must
 be \emph{offset tuned} (with it on the carrier, the DC leakage lands
@@ -237,6 +252,25 @@ individually (worth 32\,dB of working level); \texttt{writeStream} only
 \emph{queues} samples, so switching back to receive when it returns
 truncated the tail of every frame; and a killed process left the radio
 \emph{keyed} until a receive stream was opened.
+
+\subsubsection{Instrumented Measurements}
+
+The two measurements that follow share the arrangement of
+Figure~\ref{fig:sdr_setup_analyzer}: a tinySA Ultra on USB, used in
+both directions.  As an analyser it measures what the radio transmits;
+as a source --- through its calibration output, which is a reference
+tone at a documented level --- it measures what the receiver makes of a
+known input.  Both are scripted, so the numbers below are reproducible
+rather than read off a screen.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images/sdr_setup_analyzer.png}
+    \caption{Instrumented bench: the analyser measures the transmitter
+             (top), and its calibration output drives the receiver
+             through a 40\,dB pad (bottom).}
+    \label{fig:sdr_setup_analyzer}
+\end{figure}
 
 \subsubsection{The Transmitted Spectrum}
 
@@ -297,7 +331,66 @@ waveform imposes everywhere else in the chain.
     \label{fig:sdr_drive_sweep}
 \end{figure}
 
-What remains unverified is the other end of the link: one half-duplex
-radio cannot receive its own transmission, so proving that a receiver
-\emph{decodes} the signal off the air needs a second device.  The
-spectrum is correct and the level is known; the decode is future work.
+\subsubsection{Decoding Off the Air}
+
+A half-duplex radio cannot receive its own transmission, so the last
+question --- does a receiver actually \emph{decode} this over a real RF
+path? --- needs a separate transmitter.  Figure~\ref{fig:sdr_setup_ammod}
+shows the one used: a laptop's sound card plays a generated file into an
+AM modulator carried by an external generator at 7.000\,MHz, and the
+result reaches the SDR through a 40\,dB pad.
+
+AM demands a different detector, for a reason worth stating because it
+is a property of the waveform rather than an inconvenience.  The
+receiver is single-sideband: it tunes to a \emph{suppressed} carrier and
+takes the real part of the baseband.  Present it with a double-sideband
+signal and the lower sideband folds onto the upper one; worse, any
+frequency error between the generator and the SDR multiplies the audio
+by a slow cosine, splitting every subcarrier in two.  The test therefore
+recovers the carrier that AM conveniently provides, derotates by it so
+the carrier sits at exactly 0\,Hz and zero phase, and only then takes
+the real part.  That is classical synchronous detection, and it is why
+the decoded CFO in Table~\ref{tab:offair} reads zero: the carrier lock
+has already absorbed the error the modem would otherwise estimate.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/sdr_setup_ammod.png}
+    \caption{Off-air receive test: an external AM transmitter feeds the
+             SDR through a 40\,dB pad.}
+    \label{fig:sdr_setup_ammod}
+\end{figure}
+
+\begin{table}[H]
+    \centering
+    \caption{All three transmitted frames recovered over a 7\,MHz RF
+             path (\texttt{results/am\_rx\_offair.wav}).}
+    \label{tab:offair}
+    \small
+    \begin{tabular}{@{}llrr@{}}
+    \toprule
+    \textbf{Frame} & \textbf{Payload} & \textbf{Length} &
+    \textbf{SNR} \\
+    \midrule
+    NORMAL QPSK 1/2 & \texttt{RF TEST ONE}   & 1.0\,s & $+13.6$\,dB \\
+    NORMAL BPSK 1/3 & \texttt{RF TEST TWO}   & 1.8\,s & $+14.4$\,dB \\
+    ROBUST BPSK 1/3 & \texttt{RF TEST THREE} & 7.3\,s & $+8.5$\,dB \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Every frame transmitted was recovered, across two link modes and two
+modulations, with the mode identified from the preamble root alone ---
+the mechanism the whole adaptive ladder depends on, here exercised over
+real RF rather than in simulation.  ROBUST reports the lowest SNR by
+design: its $16\times$ tiling spreads the same energy over a longer
+symbol, so the per-symbol estimate falls while the decoded margin grows.
+
+Two honest qualifications.  The transmitter is an AM modulator rather
+than the SDR of the preceding sections, so this validates the receive
+chain over RF and not a complete transmit-to-receive loop, which still
+wants a second radio.  And a first, coarser scan of the same recording
+found only two of the three frames, because it advanced four seconds
+after each hit while the demodulator returns one frame per window ---
+the miss was in the measurement harness, not the link, which is exactly
+the kind of result worth re-checking before blaming the hardware.

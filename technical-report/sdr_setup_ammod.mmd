@@ -1,0 +1,18 @@
+flowchart LR
+    LAP["laptop<br/>sound card"]
+    GEN["signal generator<br/>7.000 MHz carrier"]
+    AM["AM modulator"]
+    AT["40 dB<br/>attenuator"]
+    HRF["HackRF One<br/>RX, 2.4 Msps"]
+    PC["sdr_am_test.py --receive<br/>synchronous AM detection<br/>then the OFDM demodulator"]
+    WAV["am_test.wav<br/>1 kHz tone + 3 frames<br/>48 kHz"]
+    WAV -->|"played"| LAP
+    LAP -->|"audio 300-2400 Hz"| AM
+    GEN -->|"carrier"| AM
+    AM -->|"double sideband<br/>+ carrier"| AT
+    AT -->|"coax"| HRF
+    HRF -->|"USB: I/Q"| PC
+    PC -->|"decoded"| OUT["RF TEST ONE / TWO / THREE"]
+    style AM fill:#fff3e6,stroke:#d08b3b
+    style PC fill:#eef5ff,stroke:#5b8bd0
+    style OUT fill:#eef7ee,stroke:#5ba35b
