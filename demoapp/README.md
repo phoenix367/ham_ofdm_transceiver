@@ -182,6 +182,43 @@ python3 sdr_bringup.py --tx --i-have-a-dummy-load --tx-mode extreme \
 short bursts, so the analyser sees the true occupied bandwidth instead
 of the splatter of a pulsed signal.)
 
+`tinysa.py` automates that measurement against a tinySA / tinySA Ultra
+on USB -- it sweeps with the transmitter off, starts a transmission,
+max-holds several sweeps, and writes a CSV and a plot:
+
+```bash
+python3 tinysa.py --measure-tx --sweep 6.94e6 7.01e6 --rbw 3 \
+    --freq 7.0e6 --vga 20 --save results/sdr_tx_spectrum
+```
+
+Measured that way (carrier 7.000 MHz, VGA 20, amp off, 3 kHz RBW;
+`results/sdr_tx_spectrum.csv` / `.png`):
+
+| quantity | measured |
+|---|---|
+| signal peak | −38.2 dBm at 7.00176 MHz |
+| −3 dB bandwidth | 2.42 kHz (design 2.1 kHz, plus 3 kHz RBW broadening) |
+| LO leakage spur at 6.95 MHz | −73.1 dBm = **−35 dBc** |
+| 2nd / 3rd / 4th harmonic | **−55 / −54 / −61 dBc** |
+| wideband floor, TX on vs off | −92.6 vs −108.7 dBm (+16 dB) |
+| signal above ambient | +61 dB |
+
+Two of those are worth acting on before anything goes on air. The
+harmonics at ~−55 dBc are the low-pass filter argument in numbers, and
+they will get worse as the drive is raised. The LO spur at −35 dBc,
+50 kHz from the signal, is the price of the offset tuning that keeps DC
+leakage out of the *receive* passband -- a transmit-side DAC offset
+calibration would remove it, and until then it is a spurious emission to
+be aware of.
+
+**A killed process used to leave the radio keyed.** Terminating the
+transmit process without shutting the stream down left the HackRF
+radiating at −37.7 dBm; opening a receive stream dropped it to
+−98.7 dBm, 61 dB lower. `sdr_bringup.py` now traps SIGTERM/SIGINT and
+unkeys in a `finally`, and `tinysa.py` stops the transmitter with SIGINT
+and then forces the radio into receive before trusting any baseline
+sweep. Worth remembering if you drive the radio from your own scripts.
+
 CPU is not a constraint: 4.4 % of one core for transmit and 3.1 % for
 receive per audio-second at 2.4 Msps.
 

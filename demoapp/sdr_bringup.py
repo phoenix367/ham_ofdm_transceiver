@@ -17,6 +17,7 @@ clipping, noise floor). This tool reports exactly those.
 """
 
 import argparse
+import signal
 import sys
 import time
 from pathlib import Path
@@ -196,11 +197,18 @@ def cmd_tx(args):
           f"{args.rate/1e6:.3f} Msps (modulated on the fly)")
 
     stream = dev.setupStream(d, S.SOAPY_SDR_CF32)
+
+    def _stop(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _stop)   # SIGTERM would otherwise kill
+    signal.signal(signal.SIGINT, _stop)    # us with the radio still keyed
+
     dev.activateStream(stream)
     step = 1200                      # 0.1 s of audio per block
     sent, t0 = 0, time.time()
     peak = 0.0
-    for a in range(0, len(audio), step):
+    try:
+      for a in range(0, len(audio), step):
         iq = mod(audio[a:a + step]) * (TX_PEAK / 32768.0) / 127.0
         peak = max(peak, float(np.max(np.abs(iq))))
         iq = iq.astype(np.complex64)
@@ -215,13 +223,19 @@ def cmd_tx(args):
                 break
             off += sr.ret
             sent += sr.ret
+    except KeyboardInterrupt:
+      print("  interrupted -- unkeying")
     handed = time.time() - t0
-    remain = air - (time.time() - t0)
-    if remain > 0:
-        time.sleep(remain)
-    time.sleep(0.05)
-    dev.deactivateStream(stream)
-    dev.closeStream(stream)
+    try:
+        remain = air - (time.time() - t0)
+        if remain > 0:
+            time.sleep(remain)
+        time.sleep(0.05)
+    finally:
+        # measured: a killed process left the HackRF radiating at -37.7 dBm
+        # until an RX stream was opened; always unkey.
+        dev.deactivateStream(stream)
+        dev.closeStream(stream)
     print(f"  sent {sent} samples ({sent/args.rate:.1f} s), peak "
           f"{peak:.3f} of full scale, host kept up: "
           f"{'yes' if handed <= air + 0.5 else 'NO -- underruns likely'}")
