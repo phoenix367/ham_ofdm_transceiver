@@ -524,6 +524,15 @@ int main(int argc, char **argv)
                     if (!rxs_push(g_rxs[m], chunk, n, &ev))
                         continue;
                     g_rx_events++;
+                    if (g_debug && ev.type != 1) {
+                        static const char *why[] = {
+                            "?", "header CRC", "bad ver", "data CRC" };
+                        printf("%s [%s] dbg t=%.1f %-12s mode=%d (%s)\n",
+                               tstamp(), g_name, now_t(), "RX_FAIL", m,
+                               why[ev.type >= -3 && ev.type < 0
+                                   ? -ev.type : 0]);
+                        fflush(stdout);
+                    }
                     if (ev.type == 1) {
                         int before = g_st.delivered_n;
                         g_rx_ok++;
@@ -574,13 +583,31 @@ int main(int argc, char **argv)
         }
 
         if (FD_ISSET(0, &rf)) {
-            static char line[512];
-            if (!fgets(line, sizeof(line), stdin))
+            /* raw read + our own line splitting: fgets() would pull the
+             * whole readable block into stdio's buffer and hand back only
+             * the first line, and select() cannot see what is already
+             * buffered in user space -- so any command typed (or piped)
+             * behind another one sat unprocessed until the *next* input
+             * arrived. */
+            static char inbuf[1024];
+            static size_t inlen;
+            ssize_t got = read(0, inbuf + inlen, sizeof(inbuf) - inlen - 1);
+            char *nl;
+            if (got <= 0)
                 break;
-            line[strcspn(line, "\n")] = 0;
-            handle_command(line);
-            printf("> ");
-            fflush(stdout);
+            inlen += (size_t)got;
+            inbuf[inlen] = 0;
+            while ((nl = memchr(inbuf, '\n', inlen)) != 0) {
+                size_t used = (size_t)(nl - inbuf) + 1;
+                *nl = 0;
+                handle_command(inbuf);
+                printf("> ");
+                fflush(stdout);
+                memmove(inbuf, inbuf + used, inlen - used);
+                inlen -= used;
+            }
+            if (inlen >= sizeof(inbuf) - 1)
+                inlen = 0;              /* overlong line: drop it */
         }
     }
     return 0;
