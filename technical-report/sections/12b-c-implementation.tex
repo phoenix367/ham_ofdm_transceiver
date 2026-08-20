@@ -209,3 +209,95 @@ identical at any scale.  The stop-and-wait inefficiency, the burst
 protocol's window bugs, the carrier-sense threshold and the rung-0
 fallback were all found by this infrastructure rather than by
 inspection.
+
+\subsection{From Simulation to a Radio}
+\label{sec:cport_sdr}
+
+The demonstration apps talk to a \emph{driver} over a socket rather than
+to hardware, which turns out to be the right seam for real radio: an SDR
+driver (\texttt{demoapp/sdr\_driver.py}) presenting the same devices puts
+the entire C stack on the air with nothing in \texttt{cport/} changed.
+It reproduces the SSB model of Section~\ref{sec:rf} sample by sample ---
+audio $\rightarrow$ analytic signal (the receiver's own 63-tap Hilbert
+design) $\rightarrow$ interpolation to the SDR rate $\rightarrow$ I/Q,
+and back, where taking the real part of the decimated baseband
+\emph{is} a product detector.  Tuning the radio to the suppressed
+carrier makes the two stations' LO error appear as exactly the
+audio-band CFO the modem already tracks.  The DSP costs 4.4\,\% of one
+core to transmit and 3.1\,\% to receive per audio-second at 2.4\,Msps,
+so a laptop runs it comfortably in real time.
+
+Bringing this up on a HackRF One produced four corrections that no
+amount of loopback testing would have found: the local oscillator must
+be \emph{offset tuned} (with it on the carrier, the DC leakage lands
+inside the 3.5\,kHz passband and the recovered audio was 98\,\% DC ---
+the device has neither hardware DC correction nor AGC); the aggregate
+gain control is inert and the LNA/VGA/AMP stages must be driven
+individually (worth 32\,dB of working level); \texttt{writeStream} only
+\emph{queues} samples, so switching back to receive when it returns
+truncated the tail of every frame; and a killed process left the radio
+\emph{keyed} until a receive stream was opened.
+
+\subsubsection{The Transmitted Spectrum}
+
+Figure~\ref{fig:sdr_tx_spectrum} is the waveform measured on a tinySA
+Ultra wired to the antenna port, captured by
+\texttt{demoapp/tinysa.py} (which sweeps with the transmitter off,
+keys it, and max-holds several sweeps).  The occupied band matches the
+design: a $-3$\,dB width of 2.42\,kHz against the 2.1\,kHz the
+numerology predicts, once the 3\,kHz resolution bandwidth is allowed
+for, sitting exactly where the carrier and 300--2400\,Hz audio band put
+it.  That single measurement validates the absolute tuning, the
+offset-tuning arithmetic, the drive scaling into the 8-bit DAC and the
+single-sideband modulation at once --- an error in any of them shows up
+as splatter or a mirror image.  Visible 50\,kHz below the signal is the
+LO leakage at $-35$\,dBc, the price of the offset tuning that keeps DC
+out of the \emph{receive} passband.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{images/sdr_tx_spectrum.png}
+    \caption{The transmitter measured on a tinySA Ultra: continuous
+             EXTREME OFDM at 2.4\,Msps, carrier 7.000\,MHz, 3\,kHz RBW.
+             The shaded band is the designed occupancy
+             (carrier\,$+$\,300\ldots2400\,Hz); the spur at 6.95\,MHz is
+             the offset-tuned local oscillator.}
+    \label{fig:sdr_tx_spectrum}
+\end{figure}
+
+\subsubsection{How Hard the Radio Can Be Driven}
+
+Figure~\ref{fig:sdr_drive_sweep} sweeps the transmit gain and measures,
+at each step, the fundamental, the shoulders 5--10\,kHz outside the
+occupied band, and the harmonics.  It should be read from the middle
+outwards: below VGA 16 the reported shoulders are the \emph{analyser's}
+noise floor rather than the transmitter's, because the fundamental is
+only $-58$\,dBm.  Above VGA 32 the degradation is real compression,
+provoked by the waveform's $\approx$8\,dB PAPR --- at full drive the
+shoulders reach $-22$\,dBc and the second harmonic $-38$\,dBc, both
+worse than the $-43$\,dBc usually demanded of spurious emissions.
+
+The asymmetry between the two impairments is the practical result: a
+low-pass filter removes the harmonics but does nothing about the
+shoulders, which are spectral regrowth a few kilohertz from the carrier
+and inside any filter's passband.  The usable window with this waveform
+is therefore about VGA 16--32, i.e.\ $-42$ to $-24$\,dBm, and real power
+has to come from a \emph{linear} external amplifier rather than from
+winding this one up --- the same linearity requirement the OFDM
+waveform imposes everywhere else in the chain.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/sdr_drive_sweep.png}
+    \caption{Drive-level sweep on the HackRF One
+             (\texttt{demoapp/sdr\_drive\_sweep.py}): output power, and
+             spectral purity relative to the fundamental, against
+             transmit gain.  Points below VGA 16 are limited by the
+             analyser's noise floor, not by the transmitter.}
+    \label{fig:sdr_drive_sweep}
+\end{figure}
+
+What remains unverified is the other end of the link: one half-duplex
+radio cannot receive its own transmission, so proving that a receiver
+\emph{decodes} the signal off the air needs a second device.  The
+spectrum is correct and the level is known; the decode is future work.
