@@ -162,6 +162,26 @@ I/Q imbalance 0.00 dB, TX accepted every sample with air time matching to
 - **Stream format is CF32**, not CS8; SoapySDR converts to the device's
   native int8 itself.
 
+The transmitted waveform itself was checked on a spectrum analyser
+connected to the antenna port (72 s of continuous EXTREME OFDM at
+2.4 Msps, VGA 20, amp off, carrier placed at 7.000 MHz with the LO
+offset-tuned 50 kHz away): a clean block from ~7.0000 to ~7.0025 MHz,
+matching the designed occupied bandwidth of 23 subcarriers at 93.75 Hz
+(carrier+300 .. carrier+2400 Hz), with no splatter beyond it. That
+confirms the absolute tuning and the offset-tuning NCO arithmetic, that
+the drive level is not over-driving the int8 DAC, and that the
+modulation really is single-sideband -- a drive or sideband error shows
+up as splatter or a mirror image. Reproduce with:
+
+```bash
+python3 sdr_bringup.py --tx --i-have-a-dummy-load --tx-mode extreme \
+    --repeat 4 --freq 6.95e6 --if-offset 50000 --vga 20 --amp 0
+```
+
+(`--tx-mode extreme` transmits one ~18 s *continuous* frame rather than
+short bursts, so the analyser sees the true occupied bandwidth instead
+of the splatter of a pulsed signal.)
+
 CPU is not a constraint: 4.4 % of one core for transmit and 3.1 % for
 receive per audio-second at 2.4 Msps.
 
@@ -169,9 +189,10 @@ Two honest limitations from the same session: a band survey (0.7-13 MHz)
 found a medium-wave broadcaster 79.5 dB over the floor but *identical*
 noise at 5/7/9.6/13 MHz, i.e. HF sits at the HackRF's own noise floor
 rather than the atmospheric noise the link budget assumes -- a
-preselector and LNA are needed for real HF receive. And with one
-half-duplex radio the transmitted waveform cannot be verified by
-receiving it; that needs a second receiver (phase 3).
+preselector and LNA are needed for real HF receive. And while the transmitted
+*spectrum* is confirmed clean and correctly placed, proving that a
+receiver actually decodes it off the air still needs a second radio --
+one half-duplex device cannot hear itself (phase 3).
 
 ## Design notes
 

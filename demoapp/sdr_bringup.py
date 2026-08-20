@@ -171,45 +171,62 @@ def cmd_tx(args):
     from ofdm_phy import Transceiver, Data, ModType, CCSpeed
 
     S, dev, d = _open(args, "tx")
-    frame = Transceiver().build_frame(
+    if args.tx_mode == "extreme":
+        # one EXTREME frame is ~38 s of *continuous* OFDM -- no frame
+        # boundaries, so a spectrum analyser sees the real occupied
+        # bandwidth rather than the splatter of a pulsed signal
+        from ofdm_phy import LinkMode
+        from ofdm_phy.modes import make_modem
+        trx = Transceiver(make_modem(LinkMode.EXTREME))
+    else:
+        trx = Transceiver()
+    frame = trx.build_frame(
         Data(reserved=123, payload=b"HACKRF TX BRINGUP"),
         mod=ModType.QPSK, spd=CCSpeed.R12)
+    if args.repeat > 1:
+        frame = np.tile(frame, args.repeat)
     audio = np.clip(frame / np.max(np.abs(frame)) * 32767, -32768, 32767)
     print(f"  test frame: {len(audio)} samples ({len(audio)/AUDIO_FS:.2f} s "
           f"of audio)")
 
     mod = SSBModulator(int(args.rate), args.if_offset)
-    step = 120
-    iq = np.concatenate([mod(audio[a:a + step])
-                         for a in range(0, len(audio), step)])
-    iq = iq * (TX_PEAK / 32768.0) / 127.0        # driver's drive scaling
-    print(f"  IQ: {len(iq)} samples, peak {np.max(np.abs(iq)):.3f} "
-          f"of full scale")
+    ratio = int(args.rate) // AUDIO_FS
+    air = len(audio) / AUDIO_FS
+    print(f"  streaming {air:.1f} s of air time at "
+          f"{args.rate/1e6:.3f} Msps (modulated on the fly)")
 
     stream = dev.setupStream(d, S.SOAPY_SDR_CF32)
     dev.activateStream(stream)
+    step = 1200                      # 0.1 s of audio per block
     sent, t0 = 0, time.time()
-    while sent < len(iq):
-        chunk = iq[sent:sent + 8192].astype(np.complex64)
-        sr = dev.writeStream(stream, [chunk], len(chunk), timeoutUs=int(1e6))
-        if sr.ret <= 0:
-            print(f"  !! writeStream returned {sr.ret}")
-            break
-        sent += sr.ret
-    handed_off = time.time() - t0
-    # writeStream only queues: it returns while the radio is still playing
-    # the buffer out. Deactivating now truncates the tail of the frame.
-    air = len(iq) / float(args.rate)
+    peak = 0.0
+    for a in range(0, len(audio), step):
+        iq = mod(audio[a:a + step]) * (TX_PEAK / 32768.0) / 127.0
+        peak = max(peak, float(np.max(np.abs(iq))))
+        iq = iq.astype(np.complex64)
+        off = 0
+        while off < len(iq):
+            sr = dev.writeStream(stream, [iq[off:off + 16384]],
+                                 min(16384, len(iq) - off),
+                                 timeoutUs=int(2e6))
+            if sr.ret <= 0:
+                print(f"  !! writeStream returned {sr.ret}")
+                off = len(iq)
+                break
+            off += sr.ret
+            sent += sr.ret
+    handed = time.time() - t0
     remain = air - (time.time() - t0)
     if remain > 0:
         time.sleep(remain)
     time.sleep(0.05)
     dev.deactivateStream(stream)
     dev.closeStream(stream)
-    print(f"  handed {sent}/{len(iq)} samples to the radio in "
-          f"{handed_off:.2f} s, then waited for the buffer to drain")
-    print(f"  air time {air:.2f} s, total {time.time()-t0:.2f} s "
-          f"({'ok' if abs(time.time()-t0-air) < 0.3 else 'timing off'})")
+    print(f"  sent {sent} samples ({sent/args.rate:.1f} s), peak "
+          f"{peak:.3f} of full scale, host kept up: "
+          f"{'yes' if handed <= air + 0.5 else 'NO -- underruns likely'}")
+    print(f"  total {time.time()-t0:.1f} s against {air:.1f} s of air time")
+
     print("\nTX bring-up complete.")
     return 0
 
@@ -232,7 +249,14 @@ def main():
     ap.add_argument("--seconds", type=float, default=2.0)
     ap.add_argument("--save", default=None,
                     help="write the demodulated audio as raw int16 12 kHz")
-    ap.add_argument("--i-have-a-dummy-load", action="store_true")
+    ap.add_argument("--i-have-a-dummy-load", action="store_true",
+                    help="required to transmit; a 50 ohm load, dummy load "
+                         "or instrument input -- not an antenna")
+    ap.add_argument("--tx-mode", choices=("normal", "extreme"),
+                    default="normal",
+                    help="extreme = one ~38 s continuous frame, the right "
+                         "signal for a spectrum measurement")
+    ap.add_argument("--repeat", type=int, default=1)
     args = ap.parse_args()
 
     if args.list:
