@@ -181,3 +181,64 @@ caveat: EXTREME's 0.69\,s coherent integration assumes
 $\lesssim$0.1\,Hz Doppler spread --- on disturbed or auroral paths
 ($\ge$1\,Hz) the coherent gain collapses at any power and ROBUST is
 the better choice, one more argument for adaptive mode selection.
+
+\subsubsection{Measured Against a Reference Source}
+\label{sec:link_budget_measured}
+
+Everything above is derived from a \emph{relative} sensitivity and an
+\emph{assumed} noise figure.  With the SDR receiver of
+Section~\ref{sec:cport_sdr} on the bench, the assumption can be
+replaced by a measurement: a tinySA's calibration output, a reference
+tone at a documented level, was fed into the radio through a 40\,dB
+attenuator and the receive chain characterised end to end
+(\texttt{demoapp/sdr\_rx\_calibrate.py};
+\texttt{results/sdr\_rx\_calibration.csv}).  At 10\,MHz with
+$-65$\,dBm at the antenna port:
+
+\begin{table}[H]
+    \centering
+    \caption{Receive chain measured against a reference source
+             (HackRF One, LNA 40\,dB).}
+    \label{tab:rx_calibration}
+    \small
+    \begin{tabular}{@{}lp{8.2cm}@{}}
+    \toprule
+    \textbf{Quantity} & \textbf{Measured} \\
+    \midrule
+    Frequency error & $-33.1$\,Hz at 10\,MHz $= -3.31$\,ppm, repeatable
+                      to 0.0\,Hz ($-23$\,Hz at 7\,MHz) \\
+    Linearity       & 1.002\,dB/dB over 16\,dB of gain, 0.03\,dB
+                      residual \\
+    Receiver noise  & $-95.5$\,dBm in the 6\,kHz reference band
+                      (NF $\approx$ 40\,dB) \\
+    \midrule
+    \multicolumn{2}{@{}l}{\textit{Absolute sensitivity} $=$ measured
+      noise floor $+$ the rung's required SNR:} \\
+    rung 0 \; EXTREME BPSK 1/3 \; 7.8\,bit/s   & $-113.4$\,dBm \\
+    rung 4 \; NORMAL BPSK 1/3 \; 117.6\,bit/s  & $-103.1$\,dBm \\
+    rung 12 \; NORMAL 16-QAM 3/4 \; 1059\,bit/s & $-90.8$\,dBm \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Two results matter for planning.  First, the receiver's own noise is
+\emph{not} what limits this link: against ITU-R~P.372 atmospheric noise
+in the same 6\,kHz band, external noise still dominates by $+9$\,dB at
+a quiet rural site, $+17$\,dB at a typical rural one and $+24$\,dB in
+residential noise --- so the externally-limited assumption behind the
+ranges above holds, and it holds with about 9\,dB of margin at the
+quietest sites.  That margin is precisely where a preselector and a
+low-noise amplifier begin to pay for themselves, and it is worth noting
+that the 40\,dB noise figure measured here belongs to a wideband,
+8-bit, unpreselected SDR --- an ordinary HF receiver is far better, so
+this is close to a worst case.
+
+Second, the frequency error is negligible for this waveform: 3.31\,ppm
+against an acquisition range that tolerates roughly 50\,ppm at 7\,MHz.
+A free-running SDR needs no external reference to \emph{acquire} a
+frame; a disciplined oscillator matters only for EXTREME's 0.69\,s
+coherent integration, where drift \emph{within} a 44\,s frame is the
+constraint rather than absolute accuracy.  The absolute levels in
+Table~\ref{tab:rx_calibration} inherit the calibration output's nominal
+$-25$\,dBm; the relative results --- linearity, frequency error, and
+the comparison against atmospheric noise --- do not.
