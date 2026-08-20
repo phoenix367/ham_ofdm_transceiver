@@ -211,6 +211,40 @@ leakage out of the *receive* passband -- a transmit-side DAC offset
 calibration would remove it, and until then it is a spurious emission to
 be aware of.
 
+### How hard can you drive it?
+
+`sdr_drive_sweep.py` keys the radio with continuous OFDM at each TX VGA
+setting and measures the fundamental, the shoulders 5-10 kHz outside the
+occupied band, and the 2nd/3rd harmonics
+(`results/sdr_drive_sweep.csv` / `.png`):
+
+| VGA | output | shoulders | 2nd harm. | 3rd harm. |
+|---|---|---|---|---|
+| 0 dB | −58.6 dBm | −42/−43 dBc | −36 dBc | −35 dBc |
+| 8 | −51.1 | −48/−49 | −42 | −42 |
+| **16** | **−41.6** | **−51/−48** | **−50** | **−52** |
+| 24 | −30.6 | −42/−42 | −56 | −63 |
+| 32 | −24.1 | −39/−38 | −51 | −66 |
+| 40 | −12.6 | −36/−27 | −48 | −64 |
+| 47 | −7.1 | **−22/−25** | **−38** | −47 |
+
+Read it from the middle outwards. The rows below VGA 16 are
+*measurement*-limited, not transmitter-limited: at −58 dBm the shoulders
+and harmonics being reported are the analyser's own noise floor. From
+VGA 24 upwards the degradation is real amplifier compression, and the
+waveform's ~8 dB PAPR is what provokes it: by VGA 47 the shoulders reach
+−22 dBc and the 2nd harmonic −38 dBc, both worse than the −43 dBc
+typically required of spurious emissions.
+
+The important asymmetry: **a low-pass filter fixes the harmonics but
+does nothing for the shoulders**, which are spectral regrowth a few kHz
+from the carrier, inside any filter's passband. So the useful operating
+window with this waveform is roughly **VGA 16-32 (−42 to −24 dBm)**,
+where shoulders stay below about −38 dBc. Anything approaching the
+HackRF's maximum is splattering on the neighbours regardless of what you
+bolt on the output -- if you want real power, take a clean −30 dBm from
+here into a *linear* external PA rather than winding this one up.
+
 **A killed process used to leave the radio keyed.** Terminating the
 transmit process without shutting the stream down left the HackRF
 radiating at −37.7 dBm; opening a receive stream dropped it to

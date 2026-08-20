@@ -80,10 +80,12 @@ class TinySA:
         for ln in raw.splitlines():
             parts = ln.split()
             if len(parts) >= 2:
-                try:
-                    fs.append(float(parts[0])); db.append(float(parts[1]))
-                except ValueError:
-                    pass
+                try:                       # parse both before appending,
+                    a, b = float(parts[0]), float(parts[1])
+                except ValueError:         # or a half-parsed line leaves
+                    continue               # the two arrays unequal
+                fs.append(a)
+                db.append(b)
         return np.asarray(fs), np.asarray(db)
 
     def trace(self, points=450, limit=30.0):
