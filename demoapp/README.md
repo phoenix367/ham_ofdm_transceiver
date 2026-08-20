@@ -211,6 +211,48 @@ leakage out of the *receive* passband -- a transmit-side DAC offset
 calibration would remove it, and until then it is a spurious emission to
 be aware of.
 
+### Decoding off the air
+
+The one thing the loopback could never prove is that a receiver recovers
+frames from a real RF signal -- one half-duplex radio cannot hear itself.
+An external transmitter closes that gap: a laptop sound card into an AM
+modulator fed by a 7 MHz generator, through a 40 dB pad into the SDR.
+
+```bash
+python3 sdr_am_test.py --make-wav results/am_test.wav   # play this
+python3 sdr_am_test.py --receive --carrier 7.0e6 --seconds 45
+```
+
+AM needs its own detector, and the reason is worth stating: our receiver
+is SSB, so it tunes to a *suppressed* carrier and takes the real part of
+the baseband. Feed that a double-sideband AM signal and the lower
+sideband folds straight onto the upper one, while any frequency error
+between the generator and the SDR multiplies the audio by a slow cosine
+that splits every subcarrier in two. `sdr_am_test.py` therefore recovers
+the carrier (AM supplies one), derotates by it so the carrier sits at
+exactly 0 Hz and 0 phase, and only then takes the real part -- classic
+synchronous detection, which also makes the generator's frequency error
+irrelevant.
+
+**Result** (recording kept as `results/am_rx_offair.wav`):
+
+| time | mode | SNR | CFO | payload |
+|---|---|---|---|---|
+| 1.5 s | NORMAL | +14.4 dB | −0.0 Hz | `RF TEST TWO` |
+| 17.5 s | ROBUST | +8.5 dB | +0.0 Hz | `RF TEST THREE` |
+
+Frames recovered from a real 7 MHz RF path, through the SDR, the
+decimation chain and the OFDM demodulator. The CFO reads zero because
+the carrier lock removes it. Note what this does and does not show: the
+*receive* chain is validated over RF, but the transmitter here is an AM
+modulator rather than our own SDR, so a full transmit-to-receive loop
+still wants a second radio.
+
+Set the modulation depth on the 1 kHz alignment tone the WAV starts
+with: it is generated at the same *peak* as the data frames, and the
+waveform's ~8 dB peak-to-average means a clipping modulator splatters it
+exactly as an over-driven transmitter would.
+
 ### How hard can you drive it?
 
 `sdr_drive_sweep.py` keys the radio with continuous OFDM at each TX VGA
