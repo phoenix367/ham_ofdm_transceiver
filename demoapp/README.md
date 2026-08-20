@@ -245,6 +245,48 @@ HackRF's maximum is splattering on the neighbours regardless of what you
 bolt on the output -- if you want real power, take a clean −30 dBm from
 here into a *linear* external PA rather than winding this one up.
 
+### Receiver calibration against a known source
+
+The tinySA's **CAL output** is a reference tone at a documented level, so
+feeding it into the SDR (here through a 40 dB pad) calibrates the receive
+chain in absolute terms -- `sdr_rx_calibrate.py`, results in
+`results/sdr_rx_calibration.csv`.  Note the free-running signal generator
+(`mode low output`) is *not* usable for this: its level setting had no
+measurable effect at the receiver across 56 dB, and it sweeps unless
+pinned to zero span.  The CAL output just works.
+
+At 10 MHz, −25 dBm nominal through 40 dB of pad (−65 dBm at the SDR):
+
+| measurement | result |
+|---|---|
+| frequency error | −33.1 Hz at 10 MHz = **−3.31 ppm**, repeatable to 0.0 Hz |
+| | i.e. −23 Hz at 7 MHz, against the modem's ±375 Hz acquisition range |
+| linearity (VGA stepped 14→30 dB) | slope **1.002 dB/dB**, residual 0.03 dB |
+| receiver noise, 6 kHz band | **−95.5 dBm** at the antenna port (NF ≈ 40 dB) |
+
+and hence the first *absolute* sensitivities in the project, rather than
+the relative SNR everything else is quoted in:
+
+| rung | mode | rate | sensitivity |
+|---|---|---|---|
+| 0 | EXTREME BPSK 1/3 | 7.8 bit/s | **−113.4 dBm** |
+| 4 | NORMAL BPSK 1/3 | 117.6 bit/s | −103.1 dBm |
+| 12 | NORMAL QAM16 3/4 | 1059 bit/s | −90.8 dBm |
+
+Two readings follow. The free-running HackRF's frequency error is
+**negligible** for this waveform -- 3.3 ppm against a design range that
+tolerates 50 -- so the CLKIN reference matters for EXTREME's coherent
+integration, not for acquisition. And the 40 dB noise figure is bad
+enough to matter but not fatal: against ITU-R P.372 atmospheric noise in
+a 6 kHz band, external noise still dominates by +9 dB at a quiet rural
+site, +17 dB typical rural and +24 dB in residential QRM. So the link
+budget's assumption of an externally noise-limited receiver holds --
+with only about 9 dB of margin at the quietest sites, where a
+preselector and LNA would start to pay for themselves.
+
+(The absolute numbers inherit the CAL output's −25 dBm nominal level;
+`--cal-dbm` corrects them all if your unit differs.)
+
 **A killed process used to leave the radio keyed.** Terminating the
 transmit process without shutting the stream down left the HackRF
 radiating at −37.7 dBm; opening a receive stream dropped it to
