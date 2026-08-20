@@ -236,14 +236,23 @@ irrelevant.
 
 **Result** (recording kept as `results/am_rx_offair.wav`):
 
-| time | mode | SNR | CFO | payload |
-|---|---|---|---|---|
-| 1.5 s | NORMAL | +14.4 dB | −0.0 Hz | `RF TEST TWO` |
-| 17.5 s | ROBUST | +8.5 dB | +0.0 Hz | `RF TEST THREE` |
+| frame | payload | SNR off air |
+|---|---|---|
+| NORMAL QPSK 1/2, 1.0 s | `RF TEST ONE` | +13.6 dB |
+| NORMAL BPSK 1/3, 1.8 s | `RF TEST TWO` | +14.4 dB |
+| ROBUST BPSK 1/3, 7.3 s | `RF TEST THREE` | +8.5 dB |
 
-Frames recovered from a real 7 MHz RF path, through the SDR, the
-decimation chain and the OFDM demodulator. The CFO reads zero because
-the carrier lock removes it. Note what this does and does not show: the
+**All three transmitted frames recovered** from a real 7 MHz RF path,
+across two link modes and two modulations, through the SDR, the
+decimation chain and the OFDM demodulator. The decoded CFO is zero
+because the carrier lock removes it. ROBUST reads a lower SNR by
+design: its 16x tiling spreads the same energy over a longer symbol, so
+the per-symbol estimate drops while the decoded margin grows.
+
+(A coarse first scan found only two of the three -- it advanced 4 s
+after each hit and \texttt{demod\_frame} returns one frame per window,
+so it stepped over the 1.0 s QPSK frame. Worth knowing if you write
+your own scanner: the miss was in the harness, not the link.) Note what this does and does not show: the
 *receive* chain is validated over RF, but the transmitter here is an AM
 modulator rather than our own SDR, so a full transmit-to-receive loop
 still wants a second radio.
