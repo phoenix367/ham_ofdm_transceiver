@@ -50,6 +50,9 @@ class FixedTransmitter:
         # Q15 domain as the IFFT output of Q15 constellation bins
         pre = np.concatenate([blk.real for blk in self._m.gen_preamble()])
         self.preamble_rom = np.round(pre * Q15_MAX).astype(np.int64)
+        # the ZC symbol alone (CP + sym_tile tiles) closes the preamble; a
+        # streamed burst re-emits just this block as a resync marker
+        self.zc_rom = self.preamble_rom[-self._m.symbol_len:]
 
         taps = firwin(LPF_TAPS, 3000.0, fs=self._m.sample_rate)
         self.lpf_q15 = np.round(taps * Q15_MAX).astype(np.int64)
@@ -128,8 +131,12 @@ class FixedTransmitter:
             chunks.append(self._modulate_symbol(row, HEADER_MAPPER))
         for row in self._encode_block(pkt_bits, data_codec, MAPPERS[mod]):
             chunks.append(self._modulate_symbol(row, MAPPERS[mod]))
-        signal = np.concatenate(chunks)
 
+        return self._finish(np.concatenate(chunks))
+
+    def _finish(self, signal: np.ndarray) -> np.ndarray:
+        """Clip, filter and scale -- shared by frames and bursts, and applied
+        over the WHOLE waveform (the clip threshold is a signal-wide RMS)."""
         # clip at RMS + ~6 dB (threshold = 2x RMS, integer sqrt of mean square)
         mean_sq = int(np.sum(signal * signal) // len(signal))
         thr = 2 * isqrt_i64(mean_sq)
@@ -139,3 +146,38 @@ class FixedTransmitter:
         filtered = rshift_round(np.convolve(clipped, self.lpf_q15, mode="same"), Q15)
 
         return sat(filtered << OUTPUT_GAIN_SHIFT, 16).astype(np.int16)
+
+    def build_stream(self, packets, mod: ModType = ModType.BPSK,
+                     spd: CCSpeed = CCSpeed.R13, resync_every: int = 4,
+                     fec: str = "cc") -> np.ndarray:
+        """Streamed burst: one preamble and one header for N equal blocks.
+
+        Fixed-point twin of Transceiver.build_stream (see docs/phy.md). The
+        ZC symbol re-emitted every `resync_every` blocks is the preamble's
+        own ZC block straight out of ROM -- no recomputation, which is the
+        whole point on an MCU.
+        """
+        assert len(packets) >= 1, "a stream needs at least one block"
+        bits = [p.encode() for p in packets]
+        pkt_bits = len(bits[0])
+        assert all(len(b) == pkt_bits for b in bits), \
+            "stream blocks must all encode to the same length"
+        assert pkt_bits <= 255, "packet exceeds the 8-bit header len field"
+        types = {PacketType.BEACON if isinstance(p, Beacon) else PacketType.DATA
+                 for p in packets}
+        assert len(types) == 1, "stream blocks must all be the same packet type"
+
+        header = Header(ver=2 if fec == "ldpc" else 1, typ=types.pop(),
+                        mod=mod, spd=spd, len=pkt_bits)
+        data_codec = LDPCCodec if fec == "ldpc" else CODECS[spd]
+
+        chunks = [self.preamble_rom]
+        for row in self._encode_block(header.encode(), HEADER_CODEC, HEADER_MAPPER):
+            chunks.append(self._modulate_symbol(row, HEADER_MAPPER))
+        for k, block_bits in enumerate(bits):
+            if resync_every and k and k % resync_every == 0:
+                chunks.append(self.zc_rom)
+            for row in self._encode_block(block_bits, data_codec, MAPPERS[mod]):
+                chunks.append(self._modulate_symbol(row, MAPPERS[mod]))
+
+        return self._finish(np.concatenate(chunks))

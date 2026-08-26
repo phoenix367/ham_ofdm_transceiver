@@ -25,7 +25,8 @@ from .papr import clip_and_filter
 from .ofdm import OFDMModem, TiledOFDMModem, FullOFDMModem, STFOFDMModem, freq_shift, DEFAULT_SAMPLE_RATE
 from .channel import simulate_channel
 from .modes import LinkMode, ModeSpec, MODE_SPECS, make_modem, select_mode
-from .transceiver import Transceiver, RxStats
+from .transceiver import (Transceiver, RxStats, BlockStats, StreamStats,
+                          STREAM_RESYNC_EVERY)
 from .link import LADDER, LinkControl, LinkController
 from .station import LinkStation
 from .ldpc import LDPCCodec

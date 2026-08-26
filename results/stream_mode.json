@@ -1,0 +1,49 @@
+{
+  "experiment": "streamed bursts vs per-frame preambles",
+  "mode": "NORMAL",
+  "modulation": "QPSK",
+  "fec": "conv K=7 rate 1/2",
+  "payload_bytes": 27,
+  "blocks_per_burst": 20,
+  "resync_every_blocks": 4,
+  "n_bursts_per_point": 300,
+  "snr_grid_db": [
+    -5.5,
+    -5.0,
+    -4.5,
+    -4.0
+  ],
+  "snr_convention": "noise in the 6 kHz Nyquist band",
+  "channel": "simulate_channel: offset 300, CFO +3 Hz plus the model's quadratic drift, AWGN, article multipath",
+  "seed_scheme": "np.random.default_rng([37, snr_index]); the same generator feeds both arms in turn",
+  "layout_samples": {
+    "preamble": 4384,
+    "header": 3264,
+    "block": 9248,
+    "resync": 544,
+    "n_resync": 4,
+    "data_symbols": 17,
+    "total": 194784
+  },
+  "burst_seconds": {
+    "streamed": 16.231999999999974,
+    "per_frame": 28.16000000000243
+  },
+  "speedup": 1.734844751109073,
+  "sensitivity_cost_db": 0.08264518355780548,
+  "blocks_delivered": {
+    "streamed": [
+      2396,
+      3893,
+      5060,
+      5654
+    ],
+    "per_frame": [
+      2668,
+      4260,
+      5158,
+      5693
+    ]
+  },
+  "blocks_per_point": 6000
+}

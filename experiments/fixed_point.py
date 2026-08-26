@@ -252,6 +252,42 @@ def main():
         except Exception as exc:
             check(f"fixed {mode.name} decode @ {snr} dB", False, repr(exc))
 
+    # --- streamed bursts ----------------------------------------------------
+    # the fixed burst builder must agree with the float one on structure
+    # (a 1-block burst IS a frame) and the burst receiver must walk the
+    # blocks without cascading
+    from ofdm_phy import ModType, CCSpeed  # noqa: F811 (local, as above)
+    blocks = [Data(reserved=5 + i, payload=bytes(range(i, i + 12)))
+              for i in range(6)]
+    one = ftx.build_stream(blocks[:1], mod=ModType.QPSK, spd=CCSpeed.R12,
+                           resync_every=0)
+    frame_one = ftx.build_frame(blocks[0], mod=ModType.QPSK, spd=CCSpeed.R12)
+    check("fixed 1-block burst is bit-identical to a frame",
+          np.array_equal(one, frame_one))
+
+    ftrx = Transceiver(make_modem(LinkMode.NORMAL))
+    flt = ftrx.build_stream(blocks, mod=ModType.QPSK, spd=CCSpeed.R12,
+                            resync_every=2)
+    fix = ftx.build_stream(blocks, mod=ModType.QPSK, spd=CCSpeed.R12,
+                           resync_every=2)
+    check("fixed and float bursts are the same length", len(flt) == len(fix))
+    rho = float(np.corrcoef(np.asarray(flt, float),
+                            np.asarray(fix, float))[0, 1])
+    check("fixed burst waveform correlation > 0.999", rho > 0.999,
+          f"{rho:.5f}")
+
+    rxb = simulate_channel(fix.astype(np.float64), 900, 20.0, FS, snr_db=8,
+                           rng=rng)
+    try:
+        got, hdr_b, info = frx.receive_stream(to_int16(rxb), n_blocks=len(blocks),
+                                              resync_every=2)
+        ok = sum(1 for g, b in zip(got, blocks) if g == b)
+        check("fixed burst receive delivers every block", ok == len(blocks),
+              f"{ok}/{len(blocks)}, {len(info['resyncs'])} resyncs, "
+              f"cfo {info['cfo_hz']:+.1f} Hz")
+    except Exception as exc:
+        check("fixed burst receive delivers every block", False, repr(exc))
+
     print(f"\n{PASSED} passed, {FAILED} failed")
     sys.exit(1 if FAILED else 0)
 

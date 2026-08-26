@@ -29,6 +29,64 @@ Header (25 bits): `ver(2) | typ(3) | mod(2) | spd(2) | len(8) | CRC-8`.
 (≤255). Preamble tone and ZC bins carry gain (×√5.75 and ×2) so the whole
 frame has uniform per-sample power — detection sensitivity depends on it.
 
+## Streaming bursts
+
+`Transceiver.build_stream` / `demod_stream` pay the fixed cost once for a
+whole burst instead of once per packet:
+
+```mermaid
+flowchart LR
+    P["preamble<br/>tones + ZC"] --> H["header"] --> B0["blk 0"] -->
+    Z["ZC resync<br/>every 4 blocks"] --> B1["blk 1"] --> B2["…"]
+```
+
+Every block shares the packet type, size, modulation and code rate — that is
+what lets one header describe all of them. Measured fixed cost per frame:
+
+| | tones | ZC | header | fixed total |
+|---|---|---|---|---|
+| NORMAL | 0.320 s | 0.045 s | 0.272 s | 0.637 s |
+| ROBUST | 1.280 s | 0.173 s | 1.040 s | 2.49 s |
+| EXTREME | 5.120 s | 0.685 s | 4.112 s | 9.92 s |
+
+For 20 × 27-byte NORMAL packets that is **1.73× the throughput for 0.08 dB**
+of sensitivity (`experiments/stream_mode.py`, 6000 blocks per SNR point).
+The cost is carrying one preamble-derived CFO estimate across the burst
+instead of re-estimating per frame; it grows with burst length, measuring
+≈0.35 dB for a 5-block EXTREME burst (on 200 blocks/point, so a wider error
+bar), where 1.21× is a poor trade for dB that expensive.
+
+Three things worth knowing:
+
+- **The ZC resync is not what holds the stream together.** An open-loop
+  24 s stream (`--resync 0`) decodes at the same PER: the per-symbol
+  frequency search and the pilot channel estimate do all the tracking. The
+  ZC is there for sample-clock offset (a 32-sample CP slips in ~133 s at
+  20 ppm — irrelevant for a 13 s NORMAL burst, mandatory for EXTREME) and so
+  a receiver that missed the opening preamble can re-enter mid-burst.
+- **Resync uses `max_cfo=0`**, like the composite detector and for the same
+  reason: a stream already knows its CFO, and widening the ZC scan
+  re-introduces the time-frequency ambiguity (~1 dB). A lock outside the
+  plausibility window is discarded so a spurious correlation cannot walk the
+  stream off its grid.
+- **Failures do not cascade.** Block offsets are deterministic, so a block
+  that fails CRC costs exactly that block; its raw LLRs are kept in
+  `BlockStats.llrs` for chase combining on the retransmission.
+
+The block *count* is not in the waveform — the link layer signals it, or
+`demod_stream(n_blocks=None)` decodes until the samples run out. Rate is
+frozen for the burst (no per-block header), which is the real price on a
+fading channel and the reason to keep bursts bounded.
+
+All three layers carry it: float (`Transceiver.build_stream` /
+`demod_stream`), fixed (`FixedTransmitter.build_stream` /
+`FixedReceiver.receive_stream`) and C (`tx_build_burst` /
+`rxd_receive_burst`, bit-exact against the fixed model via the `TX_BURST_*`
+golden vectors). Conv FEC only. One invariant that bites: the clip
+threshold is a **whole-waveform** RMS, so a burst is not the concatenation
+of separately built frames — a 1-block burst with no resync is bit-identical
+to a frame, which both suites assert.
+
 ## Transmit chain
 
 ```mermaid

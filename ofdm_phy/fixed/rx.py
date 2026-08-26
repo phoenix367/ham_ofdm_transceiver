@@ -569,6 +569,123 @@ class FixedReceiver:
         return np.sign(l_cal_q2) * self.RECAL_ROM[idx]
 
     # --------------------------------------------------------------- receive
+    # ZC resync plausibility window: a lock further than this from the
+    # nominal block boundary is a spurious correlation, not drift
+    def _resync_win(self):
+        return max(4 * self.cp, self.symbol_len // 8)
+
+    def _stream_resync(self, i_arr, q_arr, pos, cfo_word, index, resyncs):
+        """Re-lock timing and residual CFO on an interleaved ZC symbol.
+
+        Unlike the float chain the signal is never bulk-derotated here --
+        the fixed receiver carries `cfo_word` and derotates per symbol -- so
+        the resync derotates only the search window, exactly as `_detect`
+        does for the opening preamble, and folds the residual back into
+        cfo_word.
+        """
+        win = self._resync_win()
+        nominal = pos + self.symbol_len
+        a = max(0, pos - win)
+        b = pos + self.symbol_len + win
+        if b <= len(i_arr):
+            wi, wq = NCO.derotate(i_arr[a:b], q_arr[a:b], cfo_word)
+            det = self._detect_zc(wi, wq)
+            if det is not None and abs(a + det[0] - nominal) <= win:
+                resyncs.append((index, a + det[0] - nominal, det[1]))
+                # the CFO changed, so the slew-limited per-symbol tracker's
+                # previous hypothesis is stale
+                self._last_hyp = None
+                return a + det[0], cfo_word + det[1]
+        return nominal, cfo_word
+
+    def receive_stream(self, samples, n_blocks=None, resync_every=4,
+                       prev_llrs=None):
+        """Fixed-point twin of Transceiver.demod_stream.
+
+        Returns (packets, header, info) where packets[k] is None for a block
+        that failed CRC and info carries start, cfo, the resync log and the
+        per-block LLRs (kept on failure, for chase combining).
+        """
+        i_arr, q_arr = self.hilbert.analytic(np.asarray(samples, dtype=np.int64))
+
+        det = self._detect(i_arr, q_arr)
+        if det is None:
+            raise DemodError("no preamble")
+        start, cfo_word = det
+        self._last_hyp = None
+
+        pad = np.zeros(self.symbol_len, dtype=np.int64)
+        i_arr = np.concatenate([i_arr, pad])
+        q_arr = np.concatenate([q_arr, pad])
+
+        n_hdr = -(-HEADER_CODEC.calc_cc_elements(Header.PACKET_SIZE) //
+                  (self._m.data_carriers_len * HEADER_MAPPER.MU))
+        try:
+            h64, scale_h = self._demod_block(i_arr, q_arr, start, cfo_word,
+                                             n_hdr, HEADER_MAPPER)
+            hdr_bits = self._decode_block(self._quantize6(h64), HEADER_CODEC,
+                                          Header.PACKET_SIZE)
+            header = Header.decode(hdr_bits, check_crc=True)
+        except DemodError:
+            raise
+        except Exception as exc:
+            raise DemodError("head") from exc
+
+        codec = LDPCCodec if header.ver == 2 else CODECS[header.spd]
+        mapper = MAPPERS[header.mod]
+        n_data = -(-codec.calc_cc_elements(header.len) //
+                   (self._m.data_carriers_len * mapper.MU))
+        block_len = n_data * self.symbol_len
+        alpha_q12 = fit_shift = None
+        if self.calibrate and mapper.MU <= 2:
+            alpha_q12, fit_shift = self._fit_alpha_q12(h64, hdr_bits)
+
+        packets, block_llrs, resyncs = [], [], []
+        pos = start + n_hdr * self.symbol_len
+        k = 0
+        while n_blocks is None or k < n_blocks:
+            if resync_every and k and k % resync_every == 0:
+                pos, cfo_word = self._stream_resync(i_arr, q_arr, pos,
+                                                    cfo_word, k, resyncs)
+            if pos + block_len > len(i_arr):
+                break
+            d64, scale_d = self._demod_block(i_arr, q_arr, pos, cfo_word,
+                                             n_data, mapper)
+            if alpha_q12 is not None:
+                llrs = self._calibrated_llrs(d64, scale_d, alpha_q12,
+                                             scale_h + fit_shift)
+            else:
+                llrs = self._quantize_data(d64, mapper.MU)
+
+            def attempt(stream):
+                b = self._decode_block(stream, codec, header.len)
+                return PACKET_CLASSES[header.typ].decode(b, check_crc=True)
+
+            packet = None
+            try:
+                packet = attempt(llrs)
+            except Exception:
+                pass
+            prev = prev_llrs.get(k) if prev_llrs else None
+            if packet is None and prev is not None and len(prev) == len(llrs):
+                try:
+                    packet = attempt(llrs + prev)
+                except Exception:
+                    pass
+            packets.append(packet)
+            block_llrs.append(None if packet is not None else llrs)
+            pos += block_len
+            k += 1
+
+        while n_blocks is not None and len(packets) < n_blocks:
+            packets.append(None)
+            block_llrs.append(None)
+
+        info = dict(start=start, cfo_hz=phase_word_to_hz(cfo_word, self.fs),
+                    resyncs=resyncs, llrs=block_llrs,
+                    ok=sum(1 for p in packets if p is not None))
+        return packets, header, info
+
     def receive(self, samples, prev_data_llrs=None):
         """samples: int16 audio. Returns (packet, header, start, cfo_hz).
 

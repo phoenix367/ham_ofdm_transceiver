@@ -83,5 +83,26 @@ except Exception as exc:
     print(f"[FAIL] auto-mode RX: {exc}")
     results.append(False)
 
+# streamed burst: one preamble + one header for 8 packets, ZC resync every 4
+blocks = [Data(reserved=123, payload=bytes([65 + k]) * 27) for k in range(8)]
+trx = Transceiver(make_modem(LinkMode.NORMAL))
+sig = trx.build_stream(blocks, mod=ModType.QPSK, spd=CCSpeed.R12)
+rx_sig = simulate_channel(sig, time_shift=700, freq_shift_hz=-35.0,
+                          sample_rate=12000, snr_db=-2, rng=rng)
+try:
+    got, sst = trx.demod_stream(rx_sig, n_blocks=len(blocks))
+    ok = got == blocks
+    per_frame = sum(len(trx.build_frame(b, mod=ModType.QPSK, spd=CCSpeed.R12))
+                    for b in blocks) / 12000
+    print(f"[{'PASS' if ok else 'FAIL'}] streamed burst @ -2 dB: "
+          f"{sst.ok_count}/{len(blocks)} blocks, {len(sig)/12000:.2f} s vs "
+          f"{per_frame:.2f} s per-frame ({per_frame*12000/len(sig):.2f}x)")
+    print(f"        start={sst.start_sample} cfo={sst.cfo_hz:+.2f}Hz "
+          f"SNR={sst.snr_db:+.2f}dB resyncs={len(sst.resyncs)}")
+    results.append(ok)
+except Exception as exc:
+    print(f"[FAIL] streamed burst: {type(exc).__name__}: {exc}")
+    results.append(False)
+
 print(f"\n{sum(results)}/{len(results)} cases passed")
 sys.exit(0 if all(results) else 1)

@@ -376,6 +376,50 @@ What makes the low-SNR modes work (each necessary, found empirically):
 `select_mode(snr_db)` implements the adaptation policy (mode + modulation +
 coding rate for an expected SNR).
 
+### Streamed bursts (`build_stream` / `demod_stream`)
+
+Every frame pays for its own preamble and header — 0.637 s at NORMAL, 2.49 s
+at ROBUST, 9.92 s at EXTREME — which is 24% of a full 27-byte frame and 74%
+of a short one at the top rung. `Transceiver.build_stream` pays it once for a
+whole burst instead:
+
+```
+[preamble][header][blk 0][ZC][blk 1][blk 2][blk 3][ZC][blk 4]…
+```
+
+All blocks share the packet type, size, modulation and code rate, so one
+header describes them all; a ZC symbol every 4 blocks refreshes timing and
+residual CFO. Measured against the same packets sent as independent frames
+(`experiments/stream_mode.py`, article channel):
+
+| | air time | goodput | sensitivity |
+|---|---|---|---|
+| 20 × 27 B, per-frame | 28.16 s | 153 bit/s | reference |
+| 20 × 27 B, streamed | 16.23 s | 266 bit/s | 0.08 dB worse |
+
+(300 bursts = 6000 blocks per SNR point, −5.5…−4.0 dB.) The dB is the price
+of carrying one preamble-derived CFO estimate across the burst rather than
+re-estimating per frame, and it grows with burst length — a 5-block EXTREME
+burst measured ≈0.35 dB on a much smaller sample (200 blocks/point), where
+1.21× is a poor trade. Three properties that
+took measurement rather than reasoning to establish:
+
+- **The ZC resync is not holding the stream together.** With resync disabled
+  entirely a 24 s stream decodes at the same PER — the per-symbol frequency
+  search and the pilot channel estimate already do all the tracking. The ZC
+  earns its place on sample-clock offset (the 32-sample CP slips in ~133 s at
+  20 ppm) and as a mid-burst re-entry point for a receiver that missed the
+  opening preamble.
+- **Failures do not cascade**: block offsets are deterministic, so a failed
+  CRC costs one block, and its raw LLRs are kept in `BlockStats.llrs` for
+  chase combining (measured 1/12 → 11/12 blocks on one retransmission).
+- **Rate is frozen for the burst.** No per-block header means no mid-burst
+  rate change, which is the real cost on a fading channel and the reason to
+  keep bursts bounded.
+
+The block count is not carried in the waveform — the link layer signals it,
+or `demod_stream(n_blocks=None)` decodes until the samples run out.
+
 ### Link adaptation & QoS (`ofdm_phy/link.py`)
 
 Two-station protocol layer (`experiments/link_adaptation.py` simulates it
