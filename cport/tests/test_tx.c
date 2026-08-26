@@ -78,6 +78,40 @@ int main(void)
     TX_CASE(ROBUST_BPSK);
     TX_CASE(EXTREME_BPSK);
 
+    /* streamed burst: must match the fixed model sample for sample */
+    {
+        int want = tx_burst_len((link_mode_t)TX_BURST_MODE, TX_BURST_PKT_BITS,
+                                (mod_type_t)TX_BURST_MOD,
+                                (cc_rate_t)TX_BURST_SPD, TX_BURST_N,
+                                TX_BURST_RESYNC);
+        int n = tx_build_burst((link_mode_t)TX_BURST_MODE, TX_BURST_BITS,
+                               TX_BURST_PKT_BITS, TX_BURST_N, PKT_TYP_DATA,
+                               (mod_type_t)TX_BURST_MOD,
+                               (cc_rate_t)TX_BURST_SPD, TX_BURST_RESYNC,
+                               g_frame);
+        int head_ok = n >= 64 && memcmp(g_frame, TX_BURST_HEAD,
+                                        sizeof(TX_BURST_HEAD)) == 0;
+        check("tx burst length prediction", want == TX_BURST_LEN);
+        check("tx burst BURST bit-exact",
+              n == TX_BURST_LEN && head_ok &&
+              fnv64(g_frame, n) == TX_BURST_HASH);
+    }
+    /* a one-block burst with no resync IS a frame -- same samples */
+    {
+        static int16_t frame[600000];
+        int a = tx_build_burst((link_mode_t)TX_BURST_MODE, TX_BURST_BITS,
+                               TX_BURST_PKT_BITS, 1, PKT_TYP_DATA,
+                               (mod_type_t)TX_BURST_MOD,
+                               (cc_rate_t)TX_BURST_SPD, 0, g_frame);
+        int b = tx_build_frame((link_mode_t)TX_BURST_MODE, TX_BURST_BITS,
+                               TX_BURST_PKT_BITS, PKT_TYP_DATA,
+                               (mod_type_t)TX_BURST_MOD,
+                               (cc_rate_t)TX_BURST_SPD, frame);
+        check("1-block burst == frame",
+              a == b && a > 0 && memcmp(g_frame, frame,
+                                        sizeof(int16_t) * (size_t)a) == 0);
+    }
+
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

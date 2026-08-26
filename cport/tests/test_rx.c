@@ -86,6 +86,46 @@ int main(void)
     RX_CASE(ROBUST_BPSK);
     RX_CASE(EXTREME_BPSK);
 
+    /* streamed burst: detect + header once, then N blocks at deterministic
+     * offsets with ZC resyncs in between */
+    {
+        rxd_t r;
+        rxd_header_t h;
+        int ok[TX_BURST_N], start = -1, n_resync = -1, rc, k, all = 1;
+        int64_t cfo = 0;
+        int n = tx_build_burst((link_mode_t)TX_BURST_MODE, TX_BURST_BITS,
+                               TX_BURST_PKT_BITS, TX_BURST_N, PKT_TYP_DATA,
+                               (mod_type_t)TX_BURST_MOD,
+                               (cc_rate_t)TX_BURST_SPD, TX_BURST_RESYNC,
+                               g_samples + 700);
+        memset(g_samples, 0, 700 * sizeof(int16_t));
+        rxd_init(&r, (link_mode_t)TX_BURST_MODE);
+        rc = rxd_receive_burst(&r, g_samples, 700 + n, TX_BURST_N,
+                               TX_BURST_RESYNC, &h, g_bits, ok, &start, &cfo,
+                               &n_resync);
+        for (k = 0; k < TX_BURST_N; k++)
+            if (!ok[k])
+                all = 0;
+        check("rx burst: every block delivered",
+              rc == TX_BURST_N && all && h.mod == TX_BURST_MOD &&
+              h.spd == TX_BURST_SPD);
+        check("rx burst: payload bits bit-exact",
+              memcmp(g_bits, TX_BURST_BITS,
+                     (size_t)(TX_BURST_N * TX_BURST_PKT_BITS)) == 0);
+        check("rx burst: every ZC resync locked",
+              n_resync == (TX_BURST_N - 1) / TX_BURST_RESYNC);
+        if (rc != TX_BURST_N)
+            printf("  burst: rc=%d start=%d resyncs=%d\n", rc, start,
+                   n_resync);
+
+        /* a truncated recording must lose only the tail blocks */
+        rc = rxd_receive_burst(&r, g_samples, 700 + n / 2, TX_BURST_N,
+                               TX_BURST_RESYNC, &h, g_bits, ok, &start, &cfo,
+                               &n_resync);
+        check("rx burst: truncated tail reported as misses",
+              rc > 0 && rc < TX_BURST_N && ok[0] && !ok[TX_BURST_N - 1]);
+    }
+
     {
         rxd_t r;
         rxd_header_t h;

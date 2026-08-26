@@ -49,4 +49,12 @@ int rxs_push(rxs_t *r, const int16_t *chunk, int n, rxs_event_t *ev);
 /* end-of-stream: pad one symbol of silence (the model's tail-slip pad) */
 int rxs_flush(rxs_t *r, rxs_event_t *ev);
 
+/* streamed bursts: after an event whose packet says more blocks follow
+ * (the link layer's marker -- the PHY does not read packet payloads),
+ * arm the decoder to take the next block from the deterministic offset
+ * after the one just finished instead of hunting for a preamble.
+ * resync_every must match the transmitter's. Returns 0 if there is no
+ * block boundary to continue from. */
+int rxs_continue_burst(rxs_t *r, int resync_every);
+
 #endif /* OFDM_RX_STREAM_H */

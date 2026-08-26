@@ -54,4 +54,22 @@ int rxd_receive_genie_harq(rxd_t *r, const int16_t *samples, int n_samples,
                            const int64_t *prev_llrs, int prev_n,
                            int64_t *llrs_out, int *llrs_n_out);
 
+/* streamed burst receive -- twin of tx_build_burst (docs/phy.md).
+ * Detects and decodes the header ONCE, then walks n_blocks data blocks at
+ * deterministic offsets, re-locking timing and CFO on the ZC symbols the
+ * transmitter interleaves every `resync_every` blocks (0 = none).
+ *
+ *   pkt_bits : n_blocks * PKT_BITS_FROM_HDR(typ, len) bits, block-major
+ *   ok_flags : per-block CRC result (1 = delivered); may be NULL
+ *
+ * Returns the number of blocks delivered (0..n_blocks), or -1 header CRC,
+ * -2 unsupported ver (bursts are conv-only), -4 no preamble lock. A block
+ * that fails costs only itself -- the next offset is deterministic.
+ * No HARQ yet: per-block chase combining lands with the link-layer
+ * integration (the float chain already carries it, see BlockStats.llrs). */
+int rxd_receive_burst(rxd_t *r, const int16_t *samples, int n_samples,
+                      int n_blocks, int resync_every, rxd_header_t *hdr,
+                      uint8_t *pkt_bits, int *ok_flags, int *start_out,
+                      int64_t *cfo_word_out, int *n_resync_out);
+
 #endif /* OFDM_RX_DEMOD_H */

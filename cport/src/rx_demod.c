@@ -463,6 +463,31 @@ int rxd_log2_q4(int64_t v)
 }
 
 /* demod + decode with g_i/g_q already filled and tail-padded */
+/* header stage: demodulate and decode the header symbols at `start`.
+ * Shared by the frame and burst receivers -- a burst pays for it once.
+ * Returns 0, -1 on header CRC, -2 on an unsupported ver. */
+static int header_stage(rxd_t *r, int start, int64_t cfo_word,
+                        rxd_header_t *hdr, uint8_t *hdr_bits, int64_t *h64,
+                        int64_t *q64, int *scale_h, int *n_hdr_out)
+{
+    int n_hdr = (conv_cc_elements(CC_R13, HEADER_BITS) + N_DATA_CARRIERS - 1)
+                / N_DATA_CARRIERS;
+
+    *n_hdr_out = n_hdr;
+    *scale_h = demod_block(r, start, cfo_word, n_hdr, 1, h64);
+    rxd_quantize(h64, n_hdr * N_DATA_CARRIERS, 6, q64);
+    rxd_decode_block(q64, n_hdr * N_DATA_CARRIERS, CC_R13, 0, HEADER_BITS,
+                     hdr_bits);
+    if (header_decode(hdr_bits, &hdr->ver, &hdr->typ, &hdr->mod, &hdr->spd,
+                      &hdr->len) != 0)
+        return -1;
+    if (hdr->ver != 1 && hdr->ver != 2)
+        return -2;
+    if (hdr->typ == PKT_TYP_EXT_DATA && hdr->ver == 2)
+        return -2; /* EXT frames are conv-only */
+    return 0;
+}
+
 static int receive_common(rxd_t *r, int start, int64_t cfo_word,
                           rxd_header_t *hdr, uint8_t *pkt_bits,
                           const int64_t *prev_llrs, int prev_n,
@@ -474,25 +499,16 @@ static int receive_common(rxd_t *r, int start, int64_t cfo_word,
     static uint8_t coded[MAX_LLRS];
     uint8_t hdr_bits[HEADER_BITS];
     int n_hdr, n_data, cap, mu, coded_len, pos, use_ldpc, n_llr;
-    int bits_count, scale_h, scale_d, ok, combined = 0;
+    int bits_count, scale_h, scale_d, ok, combined = 0, rc;
 
     r->last_hyp = -1;
     r->last_harq_combined = 0;
 
-    n_hdr = (conv_cc_elements(CC_R13, HEADER_BITS) + N_DATA_CARRIERS - 1)
-            / N_DATA_CARRIERS;
-    scale_h = demod_block(r, start, cfo_word, n_hdr, 1, h64);
-    rxd_quantize(h64, n_hdr * N_DATA_CARRIERS, 6, q64);
-    rxd_decode_block(q64, n_hdr * N_DATA_CARRIERS, CC_R13, 0, HEADER_BITS,
-                 hdr_bits);
-    if (header_decode(hdr_bits, &hdr->ver, &hdr->typ, &hdr->mod, &hdr->spd,
-                      &hdr->len) != 0)
-        return -1;
-    if (hdr->ver != 1 && hdr->ver != 2)
-        return -2;
+    rc = header_stage(r, start, cfo_word, hdr, hdr_bits, h64, q64, &scale_h,
+                      &n_hdr);
+    if (rc != 0)
+        return rc;
     use_ldpc = hdr->ver == 2;
-    if (hdr->typ == PKT_TYP_EXT_DATA && use_ldpc)
-        return -2; /* EXT frames are conv-only */
     bits_count = PKT_BITS_FROM_HDR(hdr->typ, hdr->len);
 
     mu = hdr->mod == 2 ? 4 : (hdr->mod == 1 ? 2 : 1);
@@ -607,6 +623,146 @@ int rxd_receive_genie_harq(rxd_t *r, const int16_t *samples, int n_samples,
     fill_analytic(r, samples, n_samples);
     return receive_common(r, start, cfo_word, hdr, pkt_bits,
                           prev_llrs, prev_n, llrs_out, llrs_n_out);
+}
+
+/* --- streamed bursts ---------------------------------------------------
+ * Resync window: a ZC block plus the plausibility margin either side.
+ * Sized for ROBUST (2600 samples, 41.6 kB of int64 I/Q) rather than
+ * EXTREME, which would need 164 kB against a 453 kB three-mode RAM budget
+ * -- and streaming at EXTREME is a bad trade anyway (0.35 dB for 1.21x,
+ * see docs/phy.md). An EXTREME burst therefore runs its resyncs open
+ * loop: burst_resync falls back to the nominal offset when the window
+ * does not fit, and n_resync_out reports the shortfall. Raise this if you
+ * really want EXTREME resyncs. */
+#ifndef RXD_RESYNC_MAX
+#define RXD_RESYNC_MAX (CP_LEN + SYM_TILE_ROBUST * FFT_BINS \
+                        + 2 * ((CP_LEN + SYM_TILE_ROBUST * FFT_BINS) / 8))
+#endif
+
+static int resync_win(const rxd_t *r)
+{
+    int w = r->symbol_len / 8;
+    return w > 4 * CP_LEN ? w : 4 * CP_LEN;
+}
+
+/* Re-lock timing and residual CFO on an interleaved ZC symbol. The
+ * receiver never bulk-derotates -- it carries cfo_word and derotates per
+ * symbol -- so only the search window is derotated here, exactly as the
+ * composite detector does for the opening preamble, and the residual is
+ * folded back into cfo_word. A lock outside the plausibility window is a
+ * spurious correlation and is discarded: letting it through would walk the
+ * whole burst off its grid. */
+static int burst_resync(rxd_t *r, int pos, int n_total, int64_t *cfo_word,
+                        int *n_resync)
+{
+    static int64_t wi[RXD_RESYNC_MAX], wq[RXD_RESYNC_MAX];
+    int win = resync_win(r);
+    int nominal = pos + r->symbol_len;
+    int a = pos - win < 0 ? 0 : pos - win;
+    int b = pos + r->symbol_len + win;
+    int t, d;
+    int64_t w;
+
+    if (b > n_total || b - a > RXD_RESYNC_MAX)
+        return nominal;
+    nco_derotate(g_i + a, g_q + a, b - a, *cfo_word, 0, wi, wq);
+    if (rx_detect_zc_window(r->mode, wi, wq, b - a, &t, &w) != 0)
+        return nominal;
+    d = a + t - nominal;
+    if (d > win || d < -win)
+        return nominal;
+    *cfo_word += w;
+    r->last_hyp = -1; /* the CFO moved: the slew tracker's guess is stale */
+    (*n_resync)++;
+    return a + t;
+}
+
+int rxd_receive_burst(rxd_t *r, const int16_t *samples, int n_samples,
+                      int n_blocks, int resync_every, rxd_header_t *hdr,
+                      uint8_t *pkt_bits, int *ok_flags, int *start_out,
+                      int64_t *cfo_word_out, int *n_resync_out)
+{
+    static int64_t h64[MAX_LLRS], d64[MAX_LLRS], q64[MAX_LLRS];
+    static int8_t ref[MAX_LLRS];
+    static uint8_t coded[MAX_LLRS];
+    uint8_t hdr_bits[HEADER_BITS];
+    int start, n_hdr, n_data, cap, mu, coded_len, pos, n_llr, bits_count;
+    int scale_h, scale_d, k, rc, delivered = 0, n_resync = 0, n_total;
+    int64_t cfo_word, alpha = 0;
+    int fit_shift = 0;
+
+    if (n_blocks < 1)
+        return -1;
+    hilbert_analytic(samples, n_samples, g_i, g_q);
+    if (rx_detect(r->mode, g_i, g_q, n_samples, &start, &cfo_word) != 0)
+        return -4;
+    n_total = n_samples + r->symbol_len;
+    memset(g_i + n_samples, 0, sizeof(int64_t) * (size_t)r->symbol_len);
+    memset(g_q + n_samples, 0, sizeof(int64_t) * (size_t)r->symbol_len);
+    if (start_out)
+        *start_out = start;
+
+    r->last_hyp = -1;
+    r->last_harq_combined = 0;
+    rc = header_stage(r, start, cfo_word, hdr, hdr_bits, h64, q64, &scale_h,
+                      &n_hdr);
+    if (rc != 0)
+        return rc;
+    if (hdr->ver == 2)
+        return -2; /* bursts are conv-only (see tx.h) */
+    bits_count = PKT_BITS_FROM_HDR(hdr->typ, hdr->len);
+
+    mu = hdr->mod == 2 ? 4 : (hdr->mod == 1 ? 2 : 1);
+    cap = N_DATA_CARRIERS * mu;
+    coded_len = conv_cc_elements((cc_rate_t)hdr->spd, bits_count);
+    n_data = (coded_len + cap - 1) / cap;
+    n_llr = n_data * cap;
+
+    /* the header's known bits calibrate the LLR scale for every block */
+    if (r->calibrate && mu <= 2) {
+        int ncod = conv_encoded_len(CC_R13, HEADER_BITS);
+        conv_encode(CC_R13, hdr_bits, HEADER_BITS, coded);
+        rxd_known_ref(coded, ncod, N_DATA_CARRIERS, ref);
+        alpha = rxd_fit_alpha_q12(h64, ref, ncod, &fit_shift);
+    }
+
+    pos = start + n_hdr * r->symbol_len;
+    for (k = 0; k < n_blocks; k++) {
+        uint8_t *out_bits = pkt_bits + (size_t)k * bits_count;
+        int ok;
+
+        if (resync_every > 0 && k > 0 && k % resync_every == 0)
+            pos = burst_resync(r, pos, n_total, &cfo_word, &n_resync);
+        if (pos + n_data * r->symbol_len > n_total) {
+            /* recording ran out; remaining blocks are misses. Zero their
+             * output so a caller that ignores ok_flags cannot mistake
+             * leftover bits for a decode. */
+            memset(out_bits, 0, (size_t)bits_count);
+            if (ok_flags)
+                ok_flags[k] = 0;
+            continue;
+        }
+
+        scale_d = demod_block(r, pos, cfo_word, n_data, mu, d64);
+        if (alpha > 0)
+            rxd_calibrated_llrs(d64, n_llr, scale_d, alpha,
+                                scale_h + fit_shift, q64);
+        else
+            rxd_quantize(d64, n_llr, mu == 4 ? 8 : 6, q64);
+        rxd_decode_block(q64, n_llr, (cc_rate_t)hdr->spd, 0, bits_count,
+                         out_bits);
+        ok = data_check_crc(out_bits, bits_count) == 0;
+        if (ok_flags)
+            ok_flags[k] = ok;
+        delivered += ok;
+        pos += n_data * r->symbol_len;
+    }
+
+    if (cfo_word_out)
+        *cfo_word_out = cfo_word;
+    if (n_resync_out)
+        *n_resync_out = n_resync;
+    return delivered;
 }
 
 int rxd_receive(rxd_t *r, const int16_t *samples, int n_samples,

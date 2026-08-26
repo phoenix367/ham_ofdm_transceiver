@@ -162,6 +162,120 @@ int tx_frame_len(link_mode_t mode, int pkt_bits_n, mod_type_t mod,
     return tx_frame_len_ex(mode, pkt_bits_n, mod, spd, 0);
 }
 
+int tx_burst_len(link_mode_t mode, int pkt_bits_n, mod_type_t mod,
+                 cc_rate_t spd, int n_blocks, int resync_every)
+{
+    const tx_mode_t *mc = &MODES[mode];
+    int symbol_len = CP_LEN + mc->sym_tile * FFT_BINS;
+    int n_resync = resync_every > 0 ? (n_blocks - 1) / resync_every : 0;
+
+    if (n_blocks < 1)
+        return -1;
+    return tx_frame_len(mode, pkt_bits_n, mod, spd)
+           + (n_blocks - 1) * data_syms(pkt_bits_n, mod, spd, 0) * symbol_len
+           + n_resync * symbol_len;
+}
+
+/* the ZC symbol alone (CP = tile tail, then sym_tile tiles) -- the same
+ * ROM block that closes the preamble, re-emitted as a resync marker */
+static void emit_zc(const tx_mode_t *mc, int64_t *sig, int *pos)
+{
+    int s, k;
+    for (k = FFT_BINS - CP_LEN; k < FFT_BINS; k++)
+        sig[(*pos)++] = mc->zc[k];
+    for (s = 0; s < mc->sym_tile; s++)
+        for (k = 0; k < FFT_BINS; k++)
+            sig[(*pos)++] = mc->zc[k];
+}
+
+/* clip at RMS + ~6 dB, Q15 low-pass, static x8 gain -- over the WHOLE
+ * waveform (the clip threshold is a signal-wide RMS, so a burst is not
+ * the concatenation of separately finished frames) */
+static void finish(int total, int16_t *out)
+{
+    int64_t sum_sq = 0, mean_sq, thr;
+    int k;
+
+    for (k = 0; k < total; k++)
+        sum_sq += g_sig[k] * g_sig[k];
+    mean_sq = sum_sq / total;
+    thr = 2 * isqrt_i64(mean_sq);
+    for (k = 0; k < total; k++) {
+        if (g_sig[k] > thr)
+            g_sig[k] = thr;
+        else if (g_sig[k] < -thr)
+            g_sig[k] = -thr;
+    }
+
+    for (k = 0; k < total; k++) {
+        int64_t acc = 0;
+        int j;
+        for (j = 0; j < TX_LPF_N; j++) {
+            int idx = k + (TX_LPF_N - 1) / 2 - j;
+            if (idx >= 0 && idx < total)
+                acc += (int64_t)TX_LPF_TAPS[j] * g_sig[idx];
+        }
+        out[k] = sat16(rshift_round(acc, Q15) << OUTPUT_GAIN_SHIFT);
+    }
+}
+
+/* preamble: tone field A (2*tiles frames of a 32-sample block), tone
+ * field B (tiles frames of a 64-sample block), then the ZC symbol */
+static void emit_preamble(const tx_mode_t *mc, int64_t *sig, int *pos)
+{
+    int k;
+    for (k = 0; k < 2 * mc->tone_tiles * FFT_BINS; k++)
+        sig[(*pos)++] = mc->tone_a[k & 31];
+    for (k = 0; k < mc->tone_tiles * FFT_BINS; k++)
+        sig[(*pos)++] = mc->tone_b[k & 63];
+    emit_zc(mc, sig, pos);
+}
+
+int tx_build_burst(link_mode_t mode, const uint8_t *blocks, int pkt_bits_n,
+                   int n_blocks, int typ, mod_type_t mod, cc_rate_t spd,
+                   int resync_every, int16_t *out)
+{
+    static uint8_t rows[TX_MAX_CODED];
+    uint8_t hdr_bits[HEADER_BITS];
+    const tx_mode_t *mc = &MODES[mode];
+    int total = tx_burst_len(mode, pkt_bits_n, mod, spd, n_blocks,
+                             resync_every);
+    int capacity = N_DATA_CARRIERS * mod_mu(mod);
+    int pos = 0, s, b, n_syms;
+
+    {
+        int max_bits = typ == PKT_TYP_EXT_DATA ? 36 + 8 * 255 : 255;
+        if (n_blocks < 1 || pkt_bits_n > max_bits || total < 0
+            || total > TX_MAX_SAMPLES)
+            return -1;
+    }
+
+    emit_preamble(mc, g_sig, &pos);
+
+    /* one header for the whole burst: every block shares typ/len/mod/spd */
+    header_encode(1, typ, (int)mod, (int)spd,
+                  typ == PKT_TYP_EXT_DATA ? (pkt_bits_n - 36) / 8 : pkt_bits_n,
+                  hdr_bits);
+    n_syms = encode_block(hdr_bits, HEADER_BITS, CC_R13, 0, N_DATA_CARRIERS,
+                          rows);
+    for (s = 0; s < n_syms; s++)
+        modulate_symbol(rows + s * N_DATA_CARRIERS, MOD_BPSK, mc->sym_tile,
+                        g_sig, &pos);
+
+    for (b = 0; b < n_blocks; b++) {
+        if (resync_every > 0 && b > 0 && b % resync_every == 0)
+            emit_zc(mc, g_sig, &pos);
+        n_syms = encode_block(blocks + (size_t)b * pkt_bits_n, pkt_bits_n,
+                              spd, 0, capacity, rows);
+        for (s = 0; s < n_syms; s++)
+            modulate_symbol(rows + s * capacity, mod, mc->sym_tile, g_sig,
+                            &pos);
+    }
+
+    finish(total, out);
+    return total;
+}
+
 int tx_build_frame_ex(link_mode_t mode, const uint8_t *pkt_bits,
                       int pkt_bits_n, int typ, mod_type_t mod, cc_rate_t spd,
                       int use_ldpc, int16_t *out)
@@ -171,8 +285,7 @@ int tx_build_frame_ex(link_mode_t mode, const uint8_t *pkt_bits,
     const tx_mode_t *mc = &MODES[mode];
     int total = tx_frame_len_ex(mode, pkt_bits_n, mod, spd, use_ldpc);
     int capacity = N_DATA_CARRIERS * mod_mu(mod);
-    int pos = 0, s, k, n_syms;
-    int64_t sum_sq = 0, mean_sq, thr;
+    int pos = 0, s, n_syms;
 
     {
         int max_bits = typ == PKT_TYP_EXT_DATA ? 36 + 8 * 255 : 255;
@@ -182,15 +295,7 @@ int tx_build_frame_ex(link_mode_t mode, const uint8_t *pkt_bits,
             return -1; /* EXT frames are conv-only (LDPC K=256) */
     }
 
-    for (k = 0; k < 2 * mc->tone_tiles * FFT_BINS; k++)
-        g_sig[pos++] = mc->tone_a[k & 31];
-    for (k = 0; k < mc->tone_tiles * FFT_BINS; k++)
-        g_sig[pos++] = mc->tone_b[k & 63];
-    for (k = FFT_BINS - CP_LEN; k < FFT_BINS; k++)
-        g_sig[pos++] = mc->zc[k]; /* cyclic prefix = tile tail */
-    for (s = 0; s < mc->sym_tile; s++)
-        for (k = 0; k < FFT_BINS; k++)
-            g_sig[pos++] = mc->zc[k];
+    emit_preamble(mc, g_sig, &pos);
 
     header_encode(use_ldpc ? 2 : 1, typ, (int)mod, (int)spd,
                   typ == PKT_TYP_EXT_DATA ? (pkt_bits_n - 36) / 8
@@ -206,29 +311,7 @@ int tx_build_frame_ex(link_mode_t mode, const uint8_t *pkt_bits,
     for (s = 0; s < n_syms; s++)
         modulate_symbol(rows + s * capacity, mod, mc->sym_tile, g_sig, &pos);
 
-    /* clip at RMS + ~6 dB (threshold = 2x RMS via integer sqrt) */
-    for (k = 0; k < total; k++)
-        sum_sq += g_sig[k] * g_sig[k];
-    mean_sq = sum_sq / total;
-    thr = 2 * isqrt_i64(mean_sq);
-    for (k = 0; k < total; k++) {
-        if (g_sig[k] > thr)
-            g_sig[k] = thr;
-        else if (g_sig[k] < -thr)
-            g_sig[k] = -thr;
-    }
-
-    /* Q15 low-pass FIR, 'same' alignment, then static x8 gain */
-    for (k = 0; k < total; k++) {
-        int64_t acc = 0;
-        int j;
-        for (j = 0; j < TX_LPF_N; j++) {
-            int idx = k + (TX_LPF_N - 1) / 2 - j;
-            if (idx >= 0 && idx < total)
-                acc += (int64_t)TX_LPF_TAPS[j] * g_sig[idx];
-        }
-        out[k] = sat16(rshift_round(acc, Q15) << OUTPUT_GAIN_SHIFT);
-    }
+    finish(total, out);
     return total;
 }
 

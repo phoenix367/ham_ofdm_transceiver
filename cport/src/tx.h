@@ -25,4 +25,21 @@ int tx_build_frame_ex(link_mode_t mode, const uint8_t *pkt_bits,
                       int pkt_bits_n, int typ, mod_type_t mod, cc_rate_t spd,
                       int use_ldpc, int16_t *out);
 
+/* --- streamed bursts (docs/phy.md "Streaming bursts") -------------------
+ * One preamble and one header for n_blocks equal-size packets, with the
+ * preamble's ZC block re-emitted every `resync_every` blocks (0 = never)
+ * to refresh timing and residual CFO. Amortizes the fixed cost that a
+ * per-frame preamble pays every time: 1.73x for 20 x 27-byte NORMAL
+ * packets, at 0.08 dB. Conv FEC only -- LDPC bursts have no use case
+ * (the block sizes that make streaming pay are above LDPC's K=256). */
+int tx_burst_len(link_mode_t mode, int pkt_bits_n, mod_type_t mod,
+                 cc_rate_t spd, int n_blocks, int resync_every);
+
+/* blocks: n_blocks * pkt_bits_n packet bits, contiguous, all the same
+ * type and size (that is what lets one header describe them all).
+ * Returns the sample count (== tx_burst_len) or -1 on a bad argument. */
+int tx_build_burst(link_mode_t mode, const uint8_t *blocks, int pkt_bits_n,
+                   int n_blocks, int typ, mod_type_t mod, cc_rate_t spd,
+                   int resync_every, int16_t *out);
+
 #endif /* OFDM_TX_H */

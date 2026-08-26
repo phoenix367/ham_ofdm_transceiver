@@ -462,6 +462,32 @@ def gen_vectors():
                 f"#define TX_{tag}_HASH UINT64_C({fnv64_i16(sig)})",
                 carr(f"TX_{tag}_HEAD", sig[:64], "int16_t")]
 
+    # --- streamed burst (tx_build_burst / rxd_receive_burst) ---------------
+    # one preamble + one header for N equal blocks, ZC resync every R.
+    # The C builder must match the fixed model sample for sample: the clip
+    # threshold is a whole-waveform RMS, so a burst is NOT the concatenation
+    # of separately built frames.
+    burst_blocks = [Data(reserved=5 + i, payload=bytes(range(i, i + 12)))
+                    for i in range(6)]
+    burst_mode, burst_mod, burst_spd, burst_resync = (
+        LinkMode.NORMAL, ModType.QPSK, CCSpeed.R12, 2)
+    if burst_mode not in txs:
+        txs[burst_mode] = FixedTransmitter(burst_mode)
+    bsig = txs[burst_mode].build_stream(burst_blocks, mod=burst_mod,
+                                        spd=burst_spd,
+                                        resync_every=burst_resync)
+    bbits = np.concatenate([b.encode() for b in burst_blocks])
+    out += [carr("TX_BURST_BITS", bbits, "uint8_t"),
+            f"#define TX_BURST_MODE {list(LinkMode).index(burst_mode)}",
+            f"#define TX_BURST_MOD {burst_mod.value}",
+            f"#define TX_BURST_SPD {burst_spd.value}",
+            f"#define TX_BURST_N {len(burst_blocks)}",
+            f"#define TX_BURST_RESYNC {burst_resync}",
+            f"#define TX_BURST_PKT_BITS {len(burst_blocks[0].encode())}",
+            f"#define TX_BURST_LEN {len(bsig)}",
+            f"#define TX_BURST_HASH UINT64_C({fnv64_i16(bsig)})",
+            carr("TX_BURST_HEAD", bsig[:64], "int16_t")]
+
     # --- genie-synced RX demod cases ---------------------------------------
     # clean frames are rebuilt in C by the (bit-exact) C TX, so only the
     # detection genie (start, cfo_word) and expected bits are dumped

@@ -48,6 +48,11 @@ struct rxs_state {
     int64_t best_eval_blk; /* when the argmax was last improved */
     int64_t cw; /* coarse tone word */
     int sym_idx, n_hdr, n_data, mu, cap, use_ldpc;
+    /* streamed bursts: data_base is the first symbol of the CURRENT
+     * block, so continuing a burst is a matter of stepping it on */
+    int64_t data_base;
+    int blk_idx, burst_resync;
+    int64_t burst_resume_abs;
     int64_t last_eval_blk;
     int64_t ring_hwm; /* deepest raw lookback (incl. FIR history) */
     rxd_header_t hdr;
@@ -520,14 +525,17 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                 r->n_data = (coded_len + r->cap - 1) / r->cap;
             }
             r->sym_idx = 0;
+            r->data_base = r->start_abs
+                           + (int64_t)r->n_hdr * r->demod.symbol_len;
+            r->blk_idx = 0;
+            r->burst_resume_abs = 0;
             r->st = S_DATA;
             continue;
         }
         case S_DATA: {
             static int64_t si[STREAM_MAX_SYM], sq[STREAM_MAX_SYM];
-            int64_t pos = r->start_abs
-                          + (int64_t)(r->n_hdr + r->sym_idx)
-                                * r->demod.symbol_len;
+            int64_t pos = r->data_base
+                          + (int64_t)r->sym_idx * r->demod.symbol_len;
             int win_buf[5], win_n = 0;
             const int *window = 0;
             int k;
@@ -550,9 +558,15 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                 continue;
             {
                 int rc = finish_frame(r, ev);
-                rearm(r, r->start_abs
-                             + (r->n_hdr + r->n_data)
-                                   * (int64_t)r->demod.symbol_len);
+                int64_t end = r->data_base
+                              + (int64_t)r->n_data * r->demod.symbol_len;
+                /* remember where this block ended: if the caller
+                 * recognises the frame as part of a streamed burst it
+                 * calls rxs_continue_burst() before pushing more samples,
+                 * and the next block is decoded from here without
+                 * re-detecting a preamble */
+                r->burst_resume_abs = end;
+                rearm(r, end);
                 return rc;
             }
         }
@@ -587,4 +601,28 @@ int rxs_flush(rxs_t *r, rxs_event_t *ev)
         left -= n;
     }
     return got;
+}
+
+int rxs_continue_burst(rxs_t *r, int resync_every)
+{
+    int64_t base;
+
+    if (r->burst_resume_abs <= 0)
+        return 0;
+    base = r->burst_resume_abs;
+    r->burst_resume_abs = 0;
+    r->blk_idx++;
+    /* the transmitter inserts its ZC block before every resync_every-th
+     * block; step over it. This receiver does not re-lock on it the way
+     * the frame-at-once path does -- one more documented divergence,
+     * benign here because bursts are NORMAL-only (BURST_MIN_RUNG) and an
+     * open-loop NORMAL stream was measured to hold far longer than any
+     * burst lasts. */
+    if (resync_every > 0 && r->blk_idx % resync_every == 0)
+        base += r->demod.symbol_len;
+    r->data_base = base;
+    r->burst_resync = resync_every;
+    r->sym_idx = 0;
+    r->st = S_DATA;
+    return 1;
 }

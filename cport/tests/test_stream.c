@@ -133,6 +133,45 @@ int main(void)
         report_cfo("ldpc", ev.cfo_word, RX_LDPC_CFO_WORD);
     }
 
+    /* streamed burst through the streaming receiver: one preamble, then
+     * rxs_continue_burst() walks the remaining blocks */
+    {
+        rxs_t *r;
+        rxs_event_t ev;
+        int n = tx_build_burst((link_mode_t)TX_BURST_MODE, TX_BURST_BITS,
+                               TX_BURST_PKT_BITS, TX_BURST_N, PKT_TYP_DATA,
+                               (mod_type_t)TX_BURST_MOD,
+                               (cc_rate_t)TX_BURST_SPD, TX_BURST_RESYNC,
+                               g_samples + 700);
+        int pos = 0, blocks = 0, exact = 1, total = 700 + n + 700;
+        memset(g_samples, 0, 700 * sizeof(int16_t));
+        memset(g_samples + 700 + n, 0, 700 * sizeof(int16_t));
+        r = rxs_open((link_mode_t)TX_BURST_MODE, 0);
+        while (pos < total && blocks < TX_BURST_N) {
+            int c = 160;
+            if (c > total - pos)
+                c = total - pos;
+            if (rxs_push(r, g_samples + pos, c, &ev)) {
+                if (ev.type == 1) {
+                    if (memcmp(ev.bits,
+                               TX_BURST_BITS
+                                   + (size_t)blocks * TX_BURST_PKT_BITS,
+                               TX_BURST_PKT_BITS) != 0)
+                        exact = 0;
+                    blocks++;
+                    /* the link layer would read its streamed marker here */
+                    if (blocks < TX_BURST_N)
+                        rxs_continue_burst(r, TX_BURST_RESYNC);
+                }
+            }
+            pos += c;
+        }
+        check("stream burst: all blocks decoded in order",
+              blocks == TX_BURST_N);
+        check("stream burst: payload bits bit-exact", exact);
+        printf("  burst: %d/%d blocks, %d samples\n", blocks, TX_BURST_N, n);
+    }
+
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
