@@ -51,7 +51,9 @@ diagnostic event stream: every TX/RX, timeout, rung change with the
 controller inputs that caused it, and burst state transition), `status`
 (rung, SNR, CFO, queues, channel busy, plus the full link-controller
 snapshot: cap, peer request/report, loss streak, request/rx age,
-learned rung offset), `stats` (frame counters), `quit`.
+learned rung offset), `stats` (frame counters),
+`stream on|off` (streamed burst windows — one preamble for a whole
+selective-repeat window, or one per fragment; useful for A/B), `quit`.
 
 Bulk transfers use the burst-ARQ extension (window of 8 frames per
 bitmap acknowledgment) at NORMAL rungs and above — a file no longer
@@ -60,7 +62,16 @@ size scales with the engage-time rung (200 bytes at rung ≥ 10, 100 at
 ≥ 7, else 25) using extended `PKT_TYP_EXT_DATA` frames, so a good
 channel amortizes the ~0.64 s preamble+header over up to 200 payload
 bytes instead of 25: the smoke test's 5 KB file went from 211
-transmitted frames (legacy) to ~45. The 3 KB part size keeps every
+transmitted frames (legacy) to ~45. A third layer sits on top:
+`burst_stream = 1` sends a whole window behind **one** preamble and
+header instead of one preamble per fragment, which is where the
+remaining fixed cost goes when fragments are small. It degrades safely
+— the packets are byte-identical to per-frame fragments, so a peer that
+cannot follow a stream still decodes its first block, replies (the ack
+request rides on the first block as well as the last), and the sender
+reverts to per-frame bursts for the rest of the transfer. Measured on a
+14 KB file over a +20 dB channel: **187 transmissions per-frame vs 76
+streamed**, both bit-exact. The 3 KB part size keeps every
 part inside the burst protocol's 127-fragment cap, so large files
 never silently fall back to stop-and-wait (they did before this split
 existed). Below NORMAL rungs the station still uses legacy
@@ -372,7 +383,19 @@ one half-duplex device cannot hear itself (phase 3).
 ## Design notes
 
 - **Protocol time = samples received / 12 kHz.** Wall pacing (and
-  `--time-scale`) never skews timeouts or air-time estimates.
+  `--time-scale`) never skews timeouts or air-time estimates — *provided
+  the host keeps up*. If it cannot, the two stations' clocks drift apart
+  rather than merely running slow: a station that is mostly transmitting
+  is cheap and stays current, while one decoding three streaming
+  receivers falls behind, so the transmitter's reply timer can expire
+  before the receiver has reached the end of the burst in its own
+  timeline. Measured on an 8-core desktop with a 14 KB file transfer:
+  22 spurious timeouts at `--time-scale 25`, **zero** at `--time-scale 8`,
+  with every one of them on the transmitting station and none on the
+  receiver. That signature — all timeouts on one side, none on the other,
+  each followed immediately by the reply arriving — means the harness is
+  too fast for the host, not that the protocol is broken. Lower the time
+  scale before chasing it.
 - **`--audio` makes the sound card the pacing clock**: the driver's
   blocking stereo writes replace the sleep-based scheduler, so playback
   and the channel are sample-locked by construction (forces real time;

@@ -9,7 +9,9 @@
  * samples, so the driver's time_scale changes wall speed only.
  *
  * Commands:  send <text>      queue an interactive text message
- *            sendfile <path>  transfer a file (bulk class, <= ~4 KB)
+ *            sendfile <path>  transfer a file (bulk class; deflated
+ *                             first, so the on-air size is what the
+ *                             queue depth limits)
  *            bulk <n>         queue an n-byte test pattern (bulk class)
  *            status           connection status (rung, SNR, CFO, queues)
  *            stats            frame counters
@@ -29,14 +31,29 @@
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
+#include <zlib.h>
 
 /* app-level envelope: files travel as
  *   \x01 FILE: <name> \0 <part_idx> <n_parts> <data>
  * split into parts small enough for one burst-ARQ transfer each
- * (127 fragments x 25 bytes); parts arrive in order (FIFO bulk queue) */
+ * (127 fragments x 25 bytes); parts arrive in order (FIFO bulk queue).
+ *
+ * Magic \x02 is the same envelope carrying a DEFLATE stream: the file is
+ * compressed once, whole, and the compressed bytes are what get split
+ * into parts -- compressing each 3 KB part separately would throw away
+ * most of the ratio. A distinct magic (rather than a flag inside the
+ * envelope) means a peer that predates compression sees an unknown
+ * message instead of misparsing a valid-looking one.
+ *
+ * Compression lives here, at the application layer, exactly as Winlink's
+ * B2F does it: cport/ stays dependency-free and MCU-portable. An
+ * embedded build would swap zlib for miniz or heatshrink; the wire
+ * format is plain DEFLATE either way. */
 #define FILE_MAGIC 0x01
+#define FILE_MAGIC_Z 0x02
 #define FILE_TAG "FILE:"
 #define FILE_PART_DATA 3000
+#define FILE_MAX_SRC (1 << 19) /* 512 KB source cap before compression */
 
 #include "../cport/src/link.h"
 #include "../cport/src/station.h"
@@ -64,6 +81,8 @@ static double g_last_snr = -99.0, g_last_cfo;
 static int g_rx_ok, g_rx_events;
 
 static int16_t g_frame[600000];
+/* streamed bursts: blocks still expected on each mode's receiver */
+static int g_burst_left[3], g_burst_miss[3];
 
 /* ---------------- PHY glue ---------------- */
 
@@ -78,6 +97,19 @@ static int phy_build(void *ctx, const uint8_t *bits, int n, int typ,
                           ladder_mod(rung), ladder_spd(rung), out);
 }
 
+static int phy_build_burst(void *ctx, const uint8_t *blocks, int pkt_n,
+                           int n_blocks, int typ, int rung, int resync_every,
+                           int16_t *out, int out_cap)
+{
+    (void)ctx;
+    if (tx_burst_len(ladder_mode(rung), pkt_n, ladder_mod(rung),
+                     ladder_spd(rung), n_blocks, resync_every) > out_cap)
+        return -1;
+    return tx_build_burst(ladder_mode(rung), blocks, pkt_n, n_blocks, typ,
+                          ladder_mod(rung), ladder_spd(rung), resync_every,
+                          out);
+}
+
 static int phy_receive_unused(void *ctx, const int16_t *s, int n,
                               uint8_t *b, int *bn, double *snr, double *cfo,
                               int *hc, const int64_t *pl, int pn,
@@ -86,6 +118,29 @@ static int phy_receive_unused(void *ctx, const int16_t *s, int n,
     (void)ctx; (void)s; (void)n; (void)b; (void)bn; (void)snr; (void)cfo;
     (void)hc; (void)pl; (void)pn; (void)lo; (void)ln;
     return -1; /* the app decodes via the streaming receiver instead */
+}
+
+/* Is this decoded packet part of a streamed burst? Reads the link
+ * layer's marker (bit 7 of the burst sub-header's index byte); the PHY
+ * itself never looks inside a payload. */
+static int frame_is_streamed(const uint8_t *bits, int nbits, int *ack_req)
+{
+    lc_word_t lc;
+    uint32_t reserved = 0;
+    int i, v = 0;
+
+    if ((nbits - 36) / 8 < BURST_SUBHDR)
+        return 0;
+    for (i = 0; i < 20; i++)
+        reserved = (reserved << 1) | (bits[i] & 1);
+    lc_unpack(reserved, &lc);
+    if (lc.flags != FLAG_BURST_DATA)
+        return 0;
+    for (i = 0; i < 8; i++)
+        v = (v << 1) | (bits[20 + i] & 1);
+    if (ack_req) /* sub-header byte 1, bit 7 */
+        *ack_req = bits[20 + 8] & 1;
+    return (v & BURST_SUB_STREAMED) != 0;
 }
 
 /* ---------------- helpers ---------------- */
@@ -254,11 +309,38 @@ static void show_stats(void)
 
 static struct {
     char path[300];
-    int next_part, n_parts, total;
+    int next_part, n_parts, total, out_total, zipped;
+    z_stream z;
     FILE *f;
 } g_rxfile;
 
-static void store_file(const uint8_t *msg, int len)
+/* feed one part through the inflater, writing whatever comes out.
+ * Returns 1 at end of stream, 0 mid-stream, -1 on a corrupt stream. */
+static int inflate_part(const uint8_t *in, int n)
+{
+    unsigned char out[16384];
+    int rc = Z_OK;
+
+    g_rxfile.z.next_in = (Bytef *)in;
+    g_rxfile.z.avail_in = (uInt)n;
+    do {
+        size_t got;
+        g_rxfile.z.next_out = out;
+        g_rxfile.z.avail_out = (uInt)sizeof(out);
+        rc = inflate(&g_rxfile.z, Z_NO_FLUSH);
+        if (rc != Z_OK && rc != Z_STREAM_END && rc != Z_BUF_ERROR)
+            return -1;
+        got = sizeof(out) - g_rxfile.z.avail_out;
+        if (got && fwrite(out, 1, got, g_rxfile.f) != got)
+            return -1;
+        g_rxfile.out_total += (int)got;
+        if (rc == Z_BUF_ERROR)
+            break; /* no progress possible: needs more input */
+    } while (g_rxfile.z.avail_out == 0);
+    return rc == Z_STREAM_END ? 1 : 0;
+}
+
+static void store_file(const uint8_t *msg, int len, int zipped)
 {
     const char *name = (const char *)msg + 1 + strlen(FILE_TAG);
     const uint8_t *meta;
@@ -289,6 +371,21 @@ static void store_file(const uint8_t *msg, int len)
         g_rxfile.next_part = 0;
         g_rxfile.n_parts = n_parts;
         g_rxfile.total = 0;
+        g_rxfile.out_total = 0;
+        if (g_rxfile.zipped)
+            inflateEnd(&g_rxfile.z); /* a dropped transfer left one open */
+        g_rxfile.zipped = zipped;
+        if (zipped) {
+            memset(&g_rxfile.z, 0, sizeof(g_rxfile.z));
+            if (inflateInit(&g_rxfile.z) != Z_OK) {
+                printf("\n%s [%s] << file '%s': inflateInit failed\n> ",
+                       tstamp(), g_name, name);
+                fclose(g_rxfile.f);
+                g_rxfile.f = 0;
+                g_rxfile.zipped = 0;
+                return;
+            }
+        }
         if (!g_rxfile.f) {
             printf("\n%s [%s] << file '%s': cannot write %s\n> ", tstamp(),
                    g_name, name, g_rxfile.path);
@@ -307,18 +404,45 @@ static void store_file(const uint8_t *msg, int len)
         return;
     }
 
-    fwrite(meta + 2, 1, (size_t)data_len, g_rxfile.f);
+    if (g_rxfile.zipped) {
+        int rc = inflate_part(meta + 2, data_len);
+        if (rc < 0) {
+            printf("\n%s [%s] << file '%s': corrupt compressed stream, "
+                   "transfer dropped\n> ", tstamp(), g_name, name);
+            inflateEnd(&g_rxfile.z);
+            g_rxfile.zipped = 0;
+            fclose(g_rxfile.f);
+            g_rxfile.f = 0;
+            return;
+        }
+    } else {
+        fwrite(meta + 2, 1, (size_t)data_len, g_rxfile.f);
+        g_rxfile.out_total += data_len;
+    }
     g_rxfile.total += data_len;
     g_rxfile.next_part++;
     if (g_rxfile.next_part >= g_rxfile.n_parts) {
+        if (g_rxfile.zipped) {
+            inflateEnd(&g_rxfile.z);
+            g_rxfile.zipped = 0;
+        }
         fclose(g_rxfile.f);
         g_rxfile.f = 0;
-        printf("\n%s [%s] << file '%s' (%d bytes, %d parts) stored as "
-               "%s\n> ", tstamp(), g_name, name, g_rxfile.total, n_parts,
-               g_rxfile.path);
+        if (g_rxfile.total != g_rxfile.out_total)
+            printf("\n%s [%s] << file '%s' (%d bytes, %d parts, %d B on "
+                   "air = %.2fx compression) stored as %s\n> ", tstamp(),
+                   g_name, name, g_rxfile.out_total, n_parts,
+                   g_rxfile.total,
+                   (double)g_rxfile.out_total / (double)g_rxfile.total,
+                   g_rxfile.path);
+        else
+            printf("\n%s [%s] << file '%s' (%d bytes, %d parts) stored as "
+                   "%s\n> ", tstamp(), g_name, name, g_rxfile.out_total,
+                   n_parts, g_rxfile.path);
     } else {
         printf("\n%s [%s] << file '%s': part %d/%d (%d bytes so far)\n> ",
-               tstamp(), g_name, name, part + 1, n_parts, g_rxfile.total);
+               tstamp(), g_name, name, part + 1, n_parts,
+               g_rxfile.out_total);
     }
 }
 
@@ -328,9 +452,10 @@ static void handle_delivered(int before)
     for (i = before; i < g_st.delivered_n; i++) {
         const uint8_t *m = g_st.delivered[i];
         int len = g_st.delivered_len[i];
-        if (len > 1 + (int)strlen(FILE_TAG) && m[0] == FILE_MAGIC
+        if (len > 1 + (int)strlen(FILE_TAG)
+            && (m[0] == FILE_MAGIC || m[0] == FILE_MAGIC_Z)
             && !memcmp(m + 1, FILE_TAG, strlen(FILE_TAG))) {
-            store_file(m, len);
+            store_file(m, len, m[0] == FILE_MAGIC_Z);
         } else {
             printf("\n%s [%s] << message (%d bytes): ", tstamp(), g_name,
                    len);
@@ -345,13 +470,18 @@ static void handle_delivered(int before)
         g_st.delivered_n = 0;
 }
 
+static int g_compress = 1; /* deflate files before transmitting */
+
 static void cmd_sendfile(const char *path)
 {
     static uint8_t env[ST_MSG_MAX];
+    static uint8_t src[FILE_MAX_SRC], zbuf[FILE_MAX_SRC];
+    const uint8_t *body;
     const char *base = strrchr(path, '/');
     FILE *f = fopen(path, "rb");
     long fsz;
-    int head, n_parts, p, q_free;
+    uLongf zlen = 0;
+    int head, n_parts, p, q_free, magic = FILE_MAGIC, body_len;
 
     base = base ? base + 1 : path;
     if (!f) {
@@ -361,46 +491,73 @@ static void cmd_sendfile(const char *path)
     fseek(f, 0, SEEK_END);
     fsz = ftell(f);
     fseek(f, 0, SEEK_SET);
-
-    head = 1 + (int)strlen(FILE_TAG) + (int)strlen(base) + 1 + 2;
-    n_parts = fsz <= 0 ? 1 : (int)((fsz + FILE_PART_DATA - 1)
-                                   / FILE_PART_DATA);
-    q_free = ST_MAX_MSGS - g_st.qcount[QOS_BULK];
-    if (n_parts > 255 || n_parts > q_free) {
-        printf("%s [%s] sendfile: %s is %ld bytes = %d parts, but only %d "
-               "queue slots free (max %d bytes now)\n", tstamp(), g_name,
-               path, fsz, n_parts, q_free, q_free * FILE_PART_DATA);
+    if (fsz < 0 || fsz > FILE_MAX_SRC) {
+        printf("%s [%s] sendfile: %s is %ld bytes, cap is %d\n", tstamp(),
+               g_name, path, fsz, FILE_MAX_SRC);
         fclose(f);
         return;
     }
+    if (fsz > 0 && fread(src, 1, (size_t)fsz, f) != (size_t)fsz) {
+        printf("%s [%s] sendfile: read error\n", tstamp(), g_name);
+        fclose(f);
+        return;
+    }
+    fclose(f);
 
-    env[0] = FILE_MAGIC;
+    /* compress the whole file once; keep it only if it actually shrank
+     * (already-compressed payloads inflate slightly under deflate) */
+    body = src;
+    body_len = (int)fsz;
+    if (g_compress && fsz > 0) {
+        zlen = compressBound((uLong)fsz);
+        if (zlen <= sizeof(zbuf)
+            && compress2(zbuf, &zlen, src, (uLong)fsz, 9) == Z_OK
+            && (long)zlen < fsz) {
+            body = zbuf;
+            body_len = (int)zlen;
+            magic = FILE_MAGIC_Z;
+        }
+    }
+
+    head = 1 + (int)strlen(FILE_TAG) + (int)strlen(base) + 1 + 2;
+    n_parts = body_len <= 0 ? 1
+                            : (body_len + FILE_PART_DATA - 1) / FILE_PART_DATA;
+    q_free = ST_MAX_MSGS - g_st.qcount[QOS_BULK];
+    if (n_parts > 255 || n_parts > q_free) {
+        printf("%s [%s] sendfile: %s is %ld bytes (%d on air) = %d parts, "
+               "but only %d queue slots free (max %d bytes now)\n", tstamp(),
+               g_name, path, fsz, body_len, n_parts, q_free,
+               q_free * FILE_PART_DATA);
+        return;
+    }
+
+    env[0] = (uint8_t)magic;
     memcpy(env + 1, FILE_TAG, strlen(FILE_TAG));
     memcpy(env + 1 + strlen(FILE_TAG), base, strlen(base) + 1);
     for (p = 0; p < n_parts; p++) {
-        int dlen = (int)(fsz - (long)p * FILE_PART_DATA);
+        int dlen = body_len - p * FILE_PART_DATA;
         if (dlen > FILE_PART_DATA)
             dlen = FILE_PART_DATA;
         if (dlen < 0)
             dlen = 0;
         env[head - 2] = (uint8_t)p;
         env[head - 1] = (uint8_t)n_parts;
-        if (fread(env + head, 1, (size_t)dlen, f) != (size_t)dlen) {
-            printf("%s [%s] sendfile: read error\n", tstamp(), g_name);
-            fclose(f);
-            return;
-        }
+        memcpy(env + head, body + (size_t)p * FILE_PART_DATA, (size_t)dlen);
         if (station_submit(&g_st, env, head + dlen, QOS_BULK) != 0) {
             printf("%s [%s] sendfile: queue full at part %d\n", tstamp(),
                    g_name, p + 1);
-            fclose(f);
             return;
         }
     }
-    fclose(f);
-    printf("%s [%s] queued file '%s' (%ld bytes, %d part%s, burst-ARQ "
-           "bulk)\n", tstamp(), g_name, base, fsz, n_parts,
-           n_parts == 1 ? "" : "s");
+    if (magic == FILE_MAGIC_Z)
+        printf("%s [%s] queued file '%s' (%ld bytes -> %d on air, %.2fx, "
+               "%d part%s, burst-ARQ bulk)\n", tstamp(), g_name, base, fsz,
+               body_len, (double)fsz / (double)body_len, n_parts,
+               n_parts == 1 ? "" : "s");
+    else
+        printf("%s [%s] queued file '%s' (%ld bytes, %d part%s, burst-ARQ "
+               "bulk)\n", tstamp(), g_name, base, fsz, n_parts,
+               n_parts == 1 ? "" : "s");
 }
 
 /* oscillator fine-tune actuator: the virtual channel has no trimmable
@@ -442,6 +599,25 @@ static void handle_command(char *line)
     } else if (!strcmp(line, "debug off")) {
         g_debug = 0;
         printf("%s [%s] diagnostic event stream OFF\n", tstamp(), g_name);
+    } else if (!strncmp(line, "window ", 7)) {
+        int w = atoi(line + 7);
+        if (w < 0)
+            w = 0;
+        if (w > BURST_STREAM_MAX)
+            w = BURST_STREAM_MAX;
+        g_st.burst_window = w;
+        printf("%s [%s] burst window = %d fragment%s per acknowledgment "
+               "(stream cap %d)\n", tstamp(), g_name, w,
+               w == 1 ? "" : "s", BURST_STREAM_MAX);
+    } else if (!strcmp(line, "compress on")
+               || !strcmp(line, "compress off")) {
+        g_compress = line[9] == 'o' && line[10] == 'n';
+        printf("%s [%s] file compression %s\n", tstamp(), g_name,
+               g_compress ? "ON (deflate)" : "OFF");
+    } else if (!strcmp(line, "stream on") || !strcmp(line, "stream off")) {
+        g_st.burst_stream = line[7] == 'o' && line[8] == 'n';
+        printf("%s [%s] streamed burst windows %s\n", tstamp(), g_name,
+               g_st.burst_stream ? "ON" : "OFF (one preamble per fragment)");
     } else if (!strncmp(line, "tune ", 5)) {
         double d = station_freq_trim(&g_st, atof(line + 5));
         printf("%s [%s] manual LO trim: applied %+.1f Hz, total %+.1f Hz\n",
@@ -463,7 +639,11 @@ static void handle_command(char *line)
 int main(int argc, char **argv)
 {
     struct sockaddr_un sa;
-    station_phy_t phy = { 0, phy_build, phy_receive_unused };
+    /* receive_burst stays NULL: this app decodes with the streaming
+     * receiver, which continues a burst through rxs_continue_burst()
+     * rather than re-running a whole recording */
+    station_phy_t phy = { 0, phy_build, phy_receive_unused,
+                          phy_build_burst, 0 };
     int16_t chunk[4096];
 
     if (argc < 2) {
@@ -483,7 +663,10 @@ int main(int argc, char **argv)
     }
 
     station_init(&g_st, &phy, (uint64_t)getpid());
-    g_st.burst_window = 8; /* selective-repeat bursts for bulk transfers */
+    /* the ceiling is what the buffers allow; the station picks the
+     * actual window from what the channel delivers (ST_EV_BURST_WIN) */
+    g_st.burst_window = BURST_STREAM_MAX;
+    g_st.burst_stream = 1; /* ...sent behind one preamble when possible */
     /* AFC endpoint: the s1-device station anchors (frequency
      * reference), the other side trims */
     station_set_freq_trim(&g_st, lo_trim, 0, 150.0,
@@ -521,9 +704,54 @@ int main(int argc, char **argv)
                 int m;
                 for (m = 0; m < 3; m++) {
                     rxs_event_t ev;
-                    if (!rxs_push(g_rxs[m], chunk, n, &ev))
+                    if (!rxs_push(g_rxs[m], chunk, n, &ev)) {
                         continue;
+                    }
                     g_rx_events++;
+                    /* A streamed burst: keep taking blocks from the
+                     * deterministic offsets instead of hunting for the
+                     * next preamble.
+                     *
+                     * Knowing where to STOP is the whole game. While the
+                     * receiver is stepping through blocks it is not
+                     * running the preamble detector, so chasing blocks
+                     * that were never sent makes it deaf to the peer's
+                     * next transmission for one block-time each. The
+                     * transmitter marks the last block of a burst with
+                     * the ack request, so that is the stop signal; the
+                     * FIRST block carries it too (for peers that cannot
+                     * stream at all), hence the "not the first" test. A
+                     * consecutive-failure bound catches the case where
+                     * the last block itself did not decode. */
+                    {
+                        int ackreq = 0, streamed;
+                        streamed = ev.type == 1
+                                   && frame_is_streamed(ev.bits,
+                                                        ev.pkt_bits_n,
+                                                        &ackreq);
+                        if (streamed && g_burst_left[m] == 0) {
+                            g_burst_left[m] = BURST_STREAM_MAX - 1;
+                            g_burst_miss[m] = 0;
+                        } else if (streamed) {
+                            g_burst_miss[m] = 0;
+                            if (ackreq)
+                                g_burst_left[m] = 0; /* burst complete */
+                            else
+                                g_burst_left[m]--;
+                        } else if (g_burst_left[m] > 0) {
+                            /* a block we could not decode: keep going so
+                             * one bad block does not cost the tail, but
+                             * not forever */
+                            if (++g_burst_miss[m] >= 2)
+                                g_burst_left[m] = 0;
+                            else
+                                g_burst_left[m]--;
+                        }
+                        if (g_burst_left[m] > 0
+                            && !rxs_continue_burst(g_rxs[m],
+                                                   BURST_STREAM_RESYNC))
+                            g_burst_left[m] = 0;
+                    }
                     if (g_debug && ev.type != 1) {
                         static const char *why[] = {
                             "?", "header CRC", "bad ver", "data CRC" };

@@ -4,7 +4,11 @@
 CC      = gcc
 # larger station buffers than the MCU-modest cport defaults: file
 # transfers up to ~4 KB per message
-CFLAGS  = -std=c99 -Wall -Wextra -O2 -DST_MSG_MAX=4096 -DST_ASM_MAX=8192
+# BURST_STREAM_MAX raised from the MCU-modest cport default of 8: it
+# sizes two static buffers (~4.7 kB per block), and the measured win is
+# real -- a 14 KB transfer goes from 9 transmissions to 6.
+CFLAGS  = -std=c99 -Wall -Wextra -O2 -DST_MSG_MAX=4096 -DST_ASM_MAX=8192 \
+          -DBURST_STREAM_MAX=16
 BUILD   = build
 CPORT   = ../cport
 
@@ -22,7 +26,7 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 $(BUILD)/ofdm_console: app.c $(CSRC) $(CPORT)/src/rom_tables.h | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ app.c $(CSRC) -lm
+	$(CC) $(CFLAGS) -o $@ app.c $(CSRC) -lm -lz
 
 clean:
 	rm -rf $(BUILD)
