@@ -6,6 +6,7 @@ CFLAGS  = -std=c99 -Wall -Wextra -Werror -O2
 BUILD   = build
 
 SRC     = src/fft.c src/dsp.c src/bits.c src/conv.c src/packets.c src/tx.c \
+          src/broadcast.c \
           src/rx_demod.c src/rx_detect.c src/rx_stream.c src/ldpc.c \
           src/link.c src/station.c
 GEN     = src/rom_tables.h src/rom_modes.h tests/test_vectors.h
@@ -38,18 +39,24 @@ $(BUILD)/test_stream: tests/test_stream.c $(SRC) $(GEN) | $(BUILD)
 	    src/rx_detect.c src/ldpc.c src/tx.c src/packets.c src/bits.c \
 	    src/conv.c src/fft.c src/dsp.c
 
+$(BUILD)/test_broadcast: tests/test_broadcast.c $(SRC) $(GEN) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tests/test_broadcast.c src/broadcast.c \
+	    src/rx_demod.c src/rx_detect.c src/ldpc.c src/tx.c src/packets.c \
+	    src/bits.c src/conv.c src/fft.c src/dsp.c src/link.c src/station.c -lm
+
 $(BUILD)/test_rx: tests/test_rx.c $(SRC) $(GEN) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tests/test_rx.c src/rx_demod.c src/rx_detect.c src/rx_stream.c src/ldpc.c \
           src/link.c src/station.c \
 	    src/tx.c src/packets.c src/bits.c src/conv.c src/fft.c src/dsp.c
 
-test: $(BUILD)/test_primitives $(BUILD)/test_bits $(BUILD)/test_tx $(BUILD)/test_rx $(BUILD)/test_stream $(BUILD)/test_link
+test: $(BUILD)/test_primitives $(BUILD)/test_bits $(BUILD)/test_tx $(BUILD)/test_rx $(BUILD)/test_stream $(BUILD)/test_link $(BUILD)/test_broadcast
 	./$(BUILD)/test_primitives
 	./$(BUILD)/test_bits
 	./$(BUILD)/test_tx
 	./$(BUILD)/test_rx
 	./$(BUILD)/test_stream
 	./$(BUILD)/test_link
+	./$(BUILD)/test_broadcast
 
 clean:
 	rm -rf $(BUILD)

@@ -488,6 +488,39 @@ def gen_vectors():
             f"#define TX_BURST_HASH UINT64_C({fnv64_i16(bsig)})",
             carr("TX_BURST_HEAD", bsig[:64], "int16_t")]
 
+    # --- broadcast group (bc_receive / ofdm_phy.broadcast) -----------------
+    # One group of a broadcast: the transmitter needs no new code -- a group
+    # IS tx_build_burst over PKT_TYP_DATA frames -- so the vector proves the
+    # C waveform matches the fixed model for the broadcast FRAMING too.
+    from ofdm_phy.broadcast import BroadcastTx, PT_TELEMETRY
+    bc_group, bc_fb = 4, 26
+    bctx = BroadcastTx(LinkMode.NORMAL, ModType.QPSK, CCSpeed.R12,
+                       group=bc_group, frame_bytes=bc_fb, chain="fixed")
+    bc_payload = bytes((i * 29 + 5) & 0xFF for i in range(95))
+    bc_groups = bctx.build(bc_payload, ptype=PT_TELEMETRY)
+    bc_sig = bc_groups[0]
+    bc_frames = []
+    off, plan = 0, bctx._plan(len(bc_payload))
+    for fi, take in enumerate(plan[0]):
+        body = bc_payload[off:off + take]
+        off += take
+        flags = 0x80 if fi == 0 else 0
+        if fi == len(plan[0]) - 1 and len(plan) == 1:
+            flags |= 0x40
+        bc_frames.append(bctx._pack(flags, fi, body,
+                                    PT_TELEMETRY if fi == 0 else None))
+    bc_bits = np.concatenate([f.encode() for f in bc_frames])
+    out += [carr("BC_BITS", bc_bits, "uint8_t"),
+            f"#define BC_GROUP {bc_group}",
+            f"#define BC_PKT_BITS_N {len(bc_frames[0].encode())}",
+            f"#define BC_MOD {ModType.QPSK.value}",
+            f"#define BC_SPD {CCSpeed.R12.value}",
+            f"#define BC_LEN {len(bc_sig)}",
+            f"#define BC_HASH UINT64_C({fnv64_i16(bc_sig)})",
+            carr("BC_PAYLOAD", np.frombuffer(bc_payload, dtype=np.uint8),
+                 "uint8_t"),
+            f"#define BC_PAYLOAD_N {len(bc_payload)}"]
+
     # --- genie-synced RX demod cases ---------------------------------------
     # clean frames are rebuilt in C by the (bit-exact) C TX, so only the
     # detection genie (start, cfo_word) and expected bits are dumped

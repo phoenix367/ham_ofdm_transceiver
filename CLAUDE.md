@@ -166,6 +166,22 @@ Cross-module invariants that are easy to break:
   miniz/heatshrink. Measured 2.82x on a 14 KB config file, which is
   ~1.4x fewer transmissions end to end (acks and the ladder bootstrap do
   not compress).
+- The fixed detector's residual CFO uses TWO lags (`fixed/rx.py`
+  `_detect_newman`, `cport/src/rx_detect.c` `rx_residual_word`) — keep
+  them in step. The lag-N phase wraps beyond +-fs/2N = +-46.9 Hz, which
+  is exactly ONE coarse bin, and the coarse mask-shift search is a 4%
+  near-tie between adjacent bins; a one-bin miss then makes the residual
+  wrap and land 93.75 Hz out, which cyclically shifts the ZC correlation
+  ~34 samples past the 32-sample CP and kills the frame. Cost ~8% of ALL
+  acquisitions (ARQ hid it by retransmitting). The lag-N/2 phase is
+  unambiguous over +-fs/N and picks the right lag-N cycle. Do not remove
+  it, and do not "fix" this in `_detect_zc` — the ZC stage was always
+  answering correctly for the frequency it was given.
+- Mixing float and fixed receivers: the fixed chain's detector returns
+  positions in ANALYTIC index space, offset by the 31-sample Hilbert
+  group delay. It cancels inside `FixedReceiver.receive()` but any
+  caller that detects in one space and slices/advances in the other
+  accumulates 31 samples per step.
 - `demoapp` at `--time-scale 25` outruns an 8-core host: protocol time is
   sample-derived, so the two stations' clocks drift APART (the mostly-
   transmitting side stays current, the decoding side lags) and the

@@ -14,6 +14,9 @@
  * bits) -> payloads up to 255 bytes; conv FEC only (LDPC K=256 is too
  * small). C-stack extension beyond the article's format. */
 #define PKT_TYP_EXT_DATA 5
+/* broadcast (non-ARQ): Data-shaped, but the reserved field is NOT a link
+ * control word and the frame must never reach the ARQ reassembler */
+#define PKT_TYP_BCAST 6
 
 /* packet bit count from a decoded header (type-dependent len units) */
 #define PKT_BITS_FROM_HDR(typ, len) \

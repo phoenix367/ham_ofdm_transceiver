@@ -87,6 +87,72 @@ threshold is a **whole-waveform** RMS, so a burst is not the concatenation
 of separately built frames — a 1-block burst with no resync is bit-identical
 to a frame, which both suites assert.
 
+## Broadcast (non-ARQ)
+
+`ofdm_phy/broadcast.py`. Speech and telemetry cannot wait for a
+retransmission, so broadcast is streaming with the acknowledgment
+machinery subtracted — no ack request, no window, no selective repeat,
+no reply timer — plus the one thing a burst does not need: a way for a
+listener who was not there at the start to join.
+
+```
+[preamble][header][f0 SYNC][f1][f2][f3]   <- one group
+[preamble][header][f0 SYNC][f1][f2][f3]   <- the next
+```
+
+Every group re-sends the preamble and a SYNC frame carrying the payload
+descriptor, so a receiver acquires at the next group boundary instead of
+waiting for the broadcast to end. Framing is **two bytes**:
+
+| field | bits | why |
+|---|---|---|
+| SYNC | 1 | opens a group; descriptor follows |
+| EOS | 1 | last frame of the broadcast |
+| seq | 6 | loss statistics only — never retransmission |
+| length | 8 | valid payload bytes in *this* frame |
+
+Deliberately not RTP, whose 12-byte header would be 91 ms of air time at
+the top rung. No timestamp (delay here is deterministic, so a frame's
+position in the stream *is* its timestamp), no SSRC, no per-packet
+payload type. The per-frame length costs ~4% and buys a property that
+matters when nothing is repeated: every frame is self-delimiting, so
+losing the EOS frame does not mis-size the payload.
+
+Measured (`experiments/broadcast_demo.py`, 200 B, group 4):
+
+| | 100% delivered | 90%+ | falls apart |
+|---|---|---|---|
+| speech, rung 12 (QAM16 3/4) | +9.5 dB | +5 dB | +2 dB |
+| telemetry, rung 7 (QPSK 1/2) | +1.5 dB | −3 dB | −6 dB |
+
+A receiver tuning in half-way through the first group of seven recovers
+**90% of the remainder** — it cannot get back what it never heard.
+
+Two things worth knowing before touching this:
+
+- **The detector needs a slice bounded on BOTH sides**, holding exactly
+  one preamble. `detect_preamble` takes a global argmax, so given
+  several groups it locks the strongest, not the first, and every group
+  before it is silently lost — 300 samples of lead-in was enough to skip
+  one. Starting the slice on a preamble is not sufficient; searching
+  forward for the next preamble to find the far edge does not work
+  either, because from inside a group the detector false-locks on data.
+  The bound is geometry: `preamble + header + blocks`. The first decode
+  necessarily runs unbounded, so the receiver learns the extent from it
+  and then **restarts the walk** with the bound in place.
+- **LLR recalibration is on by default** and matters more here than in
+  ARQ, because an unrecoverable frame is simply gone: telemetry at
+  −4.5 dB went from 30.6% to 69.8% of payload recovered. Gated to
+  MU≤2, so 16-QAM speech is untouched.
+
+Broadcast runs on all three chains (`chain="float"` / `"fixed"`, and
+`cport/src/broadcast.c`). Building it exposed a defect in the integer
+detector worth ~8% of *all* acquisitions — a lag-N residual that wraps
+at exactly one coarse bin — which ARQ had been hiding by
+retransmitting; see the technical report §10.7. After the fix the
+integer chain matches float on delivery and is ahead at the lowest
+SNRs.
+
 ## Transmit chain
 
 ```mermaid

@@ -104,5 +104,39 @@ except Exception as exc:
     print(f"[FAIL] streamed burst: {type(exc).__name__}: {exc}")
     results.append(False)
 
+# broadcast (non-ARQ): nothing is retransmitted, so the measures are
+# what fraction arrives and whether a late listener can join at all
+from ofdm_phy.broadcast import BroadcastTx, BroadcastRx, PT_TELEMETRY
+
+bc_payload = bytes((i * 37 + 11) & 0xFF for i in range(300))
+btx = BroadcastTx(LinkMode.NORMAL, ModType.QPSK, CCSpeed.R12, group=4)
+bgroups = btx.build(bc_payload, ptype=PT_TELEMETRY)
+bair = np.concatenate(bgroups).astype(float)
+try:
+    rx_bc = simulate_channel(bair, time_shift=400, freq_shift_hz=20.0,
+                             sample_rate=12000, snr_db=6, rng=rng)
+    got, bst = BroadcastRx(LinkMode.NORMAL, group=4).receive(rx_bc)
+    ok = got == bc_payload and bst.saw_eos and bst.ptype == PT_TELEMETRY
+    print(f"[{'PASS' if ok else 'FAIL'}] broadcast @ +6 dB: {bst.report()}")
+    results.append(ok)
+except Exception as exc:
+    print(f"[FAIL] broadcast: {type(exc).__name__}: {exc}")
+    results.append(False)
+
+try:  # a receiver that tunes in half-way through group 1
+    cut = len(bgroups[0]) // 2
+    late = simulate_channel(bair[cut:], time_shift=400, freq_shift_hz=20.0,
+                            sample_rate=12000, snr_db=6, rng=rng)
+    lgot, lst = BroadcastRx(LinkMode.NORMAL, group=4).receive(late)
+    # it cannot recover group 1 -- nothing is retransmitted -- but it
+    # must acquire on a later group rather than hearing nothing at all
+    ok = lst.groups >= len(bgroups) - 2 and bc_payload.endswith(lgot[-40:])
+    print(f"[{'PASS' if ok else 'FAIL'}] broadcast late join: "
+          f"{lst.report()}, {len(lgot)}/{len(bc_payload)} B")
+    results.append(ok)
+except Exception as exc:
+    print(f"[FAIL] broadcast late join: {type(exc).__name__}: {exc}")
+    results.append(False)
+
 print(f"\n{sum(results)}/{len(results)} cases passed")
 sys.exit(0 if all(results) else 1)

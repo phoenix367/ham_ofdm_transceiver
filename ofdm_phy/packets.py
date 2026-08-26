@@ -23,6 +23,12 @@ class PacketCRCMissmatch(Exception):
 class PacketType(Enum):
     BEACON = 0
     DATA = 4
+    # Broadcast (non-ARQ) frames are Data-shaped but must never be fed to
+    # the ARQ reassembler: in a Data frame the 20-bit reserved field is
+    # the link-control word, while a broadcast leaves it zero and carries
+    # its own framing in the payload. A distinct type codepoint keeps the
+    # two apart on the wire.
+    BCAST = 6
 
 
 class ModType(Enum):
@@ -276,4 +282,5 @@ class Data(PacketCRC16):
 PACKET_CLASSES = {
     PacketType.BEACON: Beacon,
     PacketType.DATA: Data,
+    PacketType.BCAST: Data,  # same layout, different meaning
 }

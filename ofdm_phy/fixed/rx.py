@@ -203,14 +203,39 @@ class FixedReceiver:
         sample_index = off * B
         coarse_word = sh * self.word_per_fine_bin
 
-        # residual CFO: lag-N phase of the derotated first tone field
+        # Residual CFO from the tone field's periodicity. Two lags, and
+        # the short one is not optional:
+        #
+        # The lag-N phase is the precise estimate but wraps beyond
+        # +-fs/2N = +-46.9 Hz, which is exactly one coarse bin. The coarse
+        # mask-shift search is a near-tie between adjacent bins (measured:
+        # 4% apart), so noise picks the neighbour often enough to matter --
+        # and when it does, the residual has to supply more than 46.9 Hz,
+        # wraps, and the total lands a full bin (93.75 Hz) away. That
+        # cyclically shifts the Zadoff-Chu correlation by ~34 samples,
+        # past the 32-sample cyclic prefix, and the frame is lost. It cost
+        # ~8% of all acquisitions before this.
+        #
+        # The lag-N/2 phase is unambiguous over +-fs/N = +-93.75 Hz --
+        # wide enough to cover a one-bin coarse error -- so it selects
+        # which lag-N cycle is the right one. The float chain gets the
+        # same disambiguation from a full-block FFT peak; this is the
+        # integer-cheap equivalent.
         seg_i = i_arr[sample_index: sample_index + 2 * T * N]
         seg_q = q_arr[sample_index: sample_index + 2 * T * N]
         di, dq = NCO.derotate(seg_i, seg_q, coarse_word)
-        rr = int(np.sum(di[:-N] * di[N:] + dq[:-N] * dq[N:]))
-        ri = int(np.sum(di[:-N] * dq[N:] - dq[:-N] * di[N:]))
-        angle_word, _ = cordic_atan2(ri, rr)
-        residual_word = _div_round(angle_word, N)
+
+        def _lag_word(lag):
+            rr = int(np.sum(di[:-lag] * di[lag:] + dq[:-lag] * dq[lag:]))
+            ri = int(np.sum(di[:-lag] * dq[lag:] - dq[:-lag] * di[lag:]))
+            ang, _ = cordic_atan2(ri, rr)
+            return _div_round(ang, lag)
+
+        residual_word = _lag_word(N)
+        coarse_res = _lag_word(N // 2)
+        ambig = PHASE_ONE // N               # one lag-N cycle, = fs/N Hz
+        k = _div_round(coarse_res - residual_word, ambig)
+        residual_word += k * ambig
 
         return sample_index, coarse_word + residual_word
 
@@ -640,7 +665,7 @@ class FixedReceiver:
         if self.calibrate and mapper.MU <= 2:
             alpha_q12, fit_shift = self._fit_alpha_q12(h64, hdr_bits)
 
-        packets, block_llrs, resyncs = [], [], []
+        packets, block_llrs, block_snrs, resyncs = [], [], [], []
         pos = start + n_hdr * self.symbol_len
         k = 0
         while n_blocks is None or k < n_blocks:
@@ -659,20 +684,30 @@ class FixedReceiver:
 
             def attempt(stream):
                 b = self._decode_block(stream, codec, header.len)
-                return PACKET_CLASSES[header.typ].decode(b, check_crc=True)
+                return (PACKET_CLASSES[header.typ].decode(b, check_crc=True),
+                        b)
 
-            packet = None
+            packet = data_bits = None
             try:
-                packet = attempt(llrs)
+                packet, data_bits = attempt(llrs)
             except Exception:
                 pass
             prev = prev_llrs.get(k) if prev_llrs else None
             if packet is None and prev is not None and len(prev) == len(llrs):
                 try:
-                    packet = attempt(llrs + prev)
+                    packet, data_bits = attempt(llrs + prev)
                 except Exception:
                     pass
+            # per-block SNR: a broadcast receiver has no acknowledgment to
+            # send, so this estimate IS the whole reception report
+            snr = None
+            if packet is not None and mapper.MU <= 2:
+                cap_d = self._m.data_carriers_len * mapper.MU
+                ref_d = self._known_ref(
+                    codec.encode(data_bits.astype(np.uint8)), cap_d)
+                snr = self._estimate_snr_db([(d64, ref_d, cap_d)])
             packets.append(packet)
+            block_snrs.append(snr)
             block_llrs.append(None if packet is not None else llrs)
             pos += block_len
             k += 1
@@ -680,9 +715,10 @@ class FixedReceiver:
         while n_blocks is not None and len(packets) < n_blocks:
             packets.append(None)
             block_llrs.append(None)
+            block_snrs.append(None)
 
         info = dict(start=start, cfo_hz=phase_word_to_hz(cfo_word, self.fs),
-                    resyncs=resyncs, llrs=block_llrs,
+                    resyncs=resyncs, llrs=block_llrs, snrs=block_snrs,
                     ok=sum(1 for p in packets if p is not None))
         return packets, header, info
 

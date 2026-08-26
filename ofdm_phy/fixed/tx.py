@@ -149,7 +149,7 @@ class FixedTransmitter:
 
     def build_stream(self, packets, mod: ModType = ModType.BPSK,
                      spd: CCSpeed = CCSpeed.R13, resync_every: int = 4,
-                     fec: str = "cc") -> np.ndarray:
+                     fec: str = "cc", typ=None) -> np.ndarray:
         """Streamed burst: one preamble and one header for N equal blocks.
 
         Fixed-point twin of Transceiver.build_stream (see docs/phy.md). The
@@ -166,6 +166,10 @@ class FixedTransmitter:
         types = {PacketType.BEACON if isinstance(p, Beacon) else PacketType.DATA
                  for p in packets}
         assert len(types) == 1, "stream blocks must all be the same packet type"
+        # a caller may override the advertised type -- broadcast frames are
+        # Data-shaped but must not reach the ARQ reassembler
+        if typ is not None:
+            types = {typ}
 
         header = Header(ver=2 if fec == "ldpc" else 1, typ=types.pop(),
                         mod=mod, spd=spd, len=pkt_bits)

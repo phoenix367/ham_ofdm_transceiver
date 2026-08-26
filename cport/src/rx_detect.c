@@ -43,17 +43,48 @@ static int64_t div_round_signed(int64_t a, int64_t b)
     return a >= 0 ? (a + b / 2) / b : -((-a + b / 2) / b);
 }
 
-/* lag-N phase estimate of a derotated segment -> residual phase word */
-int64_t rx_lag_n_word(const int64_t *di, const int64_t *dq, int n)
+/* phase estimate of a derotated segment at an arbitrary lag */
+static int64_t lag_word(const int64_t *di, const int64_t *dq, int n, int lag)
 {
     int64_t rr = 0, ri = 0, ang, mag;
     int k;
-    for (k = 0; k < n - FFT_BINS; k++) {
-        rr += di[k] * di[k + FFT_BINS] + dq[k] * dq[k + FFT_BINS];
-        ri += di[k] * dq[k + FFT_BINS] - dq[k] * di[k + FFT_BINS];
+    for (k = 0; k < n - lag; k++) {
+        rr += di[k] * di[k + lag] + dq[k] * dq[k + lag];
+        ri += di[k] * dq[k + lag] - dq[k] * di[k + lag];
     }
     cordic_atan2(ri, rr, &ang, &mag);
-    return div_round_signed(ang, FFT_BINS);
+    return div_round_signed(ang, lag);
+}
+
+/* lag-N phase estimate of a derotated segment -> residual phase word */
+int64_t rx_lag_n_word(const int64_t *di, const int64_t *dq, int n)
+{
+    return lag_word(di, dq, n, FFT_BINS);
+}
+
+/* Residual CFO with the lag-N cycle resolved by a shorter lag.
+ *
+ * The lag-N phase is precise but wraps beyond +-fs/2N = +-46.9 Hz, which
+ * is exactly one coarse bin -- and the coarse mask-shift search is a
+ * near-tie between adjacent bins (measured 4% apart), so noise picks the
+ * neighbour often enough to matter. When it does, the residual must
+ * supply more than 46.9 Hz, wraps, and the total lands a full bin
+ * (93.75 Hz) out. That cyclically shifts the Zadoff-Chu correlation by
+ * ~34 samples, past the 32-sample cyclic prefix, and the frame dies of
+ * ISI: measured at ~8% of ALL acquisitions before this. The lag-N/2
+ * phase is unambiguous over +-fs/N, wide enough to cover a one-bin
+ * coarse error, so it picks the right cycle. (The float chain does the
+ * same job with a full-block FFT peak; this is the integer-cheap twin.)
+ * Keep this in step with ofdm_phy/fixed/rx.py::_detect_newman. */
+static int64_t rx_residual_word(const int64_t *di, const int64_t *dq, int n)
+{
+    int64_t fine = lag_word(di, dq, n, FFT_BINS);
+    int64_t coarse = lag_word(di, dq, n, FFT_BINS / 2);
+    int64_t ambig = (int64_t)1 << PHASE_BITS;
+    int64_t k;
+    ambig /= FFT_BINS;                    /* one lag-N cycle */
+    k = div_round_signed(coarse - fine, ambig);
+    return fine + k * ambig;
 }
 
 static int64_t g_pows[MAX_BLOCKS * DET_B_MAX];
@@ -192,7 +223,7 @@ static int detect_newman(const det_mode_t *d, const int64_t *i_arr,
                      0u /* python derotates the slice from phase 0 */,
                      g_seg_i, g_seg_q);
         *start_out = sample_index;
-        *word_out = coarse_word + rx_lag_n_word(g_seg_i, g_seg_q, seg_n);
+        *word_out = coarse_word + rx_residual_word(g_seg_i, g_seg_q, seg_n);
     }
     return 0;
 }

@@ -227,7 +227,7 @@ class Transceiver:
     def build_stream(self, packets: typing.Sequence[typing.Union[Beacon, Data]],
                      mod: ModType = ModType.BPSK, spd: CCSpeed = CCSpeed.R13,
                      resync_every: int = STREAM_RESYNC_EVERY,
-                     clip: bool = True, fec: str = "cc") -> np.ndarray:
+                     clip: bool = True, fec: str = "cc", typ=None) -> np.ndarray:
         """One preamble and one header, then N data blocks back to back.
 
             [preamble][header][blk 0][ZC][blk 1]..[ZC][blk k]..
@@ -257,6 +257,10 @@ class Transceiver:
         types = {PacketType.BEACON if isinstance(p, Beacon) else PacketType.DATA
                  for p in packets}
         assert len(types) == 1, "stream blocks must all be the same packet type"
+        # a caller may override the advertised type -- broadcast frames are
+        # Data-shaped but must not reach the ARQ reassembler
+        if typ is not None:
+            types = {typ}
 
         header = Header(ver=2 if fec == "ldpc" else 1, typ=types.pop(), mod=mod,
                         spd=spd, len=pkt_bits)

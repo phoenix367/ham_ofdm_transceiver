@@ -33,6 +33,7 @@ flowchart TD
 | `fixed_qam16_sweep.py [--trials N]` | QAM16 rung sensitivities, fixed vs float RX A/B | ~2 min |
 | `coarse_search_ab.py [--trials N]` | gated two-stage freq search vs full grid: PER waterfalls, float+fixed, parity-asserted | ~20 min |
 | `stream_mode.py [--trials N] [--blocks N] [--resync N]` | streamed bursts vs per-frame preambles: delivery + goodput, fitted dB cost | ~5 min |
+| `broadcast_demo.py [--trials N]` | non-ARQ delivery vs SNR for speech and telemetry rungs, plus a late-joining receiver | ~6 min |
 | `rf_channel.py` | RF layer validation (6 checks) | ~1 min |
 | `afc_netting.py` | AFC convergence + trim-budget/anchor scenarios | ~3 min |
 | `link_adaptation.py` | controller-level two-station sim over a fading timeline | ~2 min |
