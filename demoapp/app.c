@@ -60,6 +60,7 @@
 #include "../cport/src/tx.h"
 #include "../cport/src/rx_stream.h"
 #include "../cport/src/packets.h"
+#include "../cport/src/broadcast.h"
 
 #define FS 12000.0
 #define BUSY_WIN 480        /* 40 ms carrier-sense window */
@@ -83,6 +84,19 @@ static int g_rx_ok, g_rx_events;
 static int16_t g_frame[600000];
 /* streamed bursts: blocks still expected on each mode's receiver */
 static int g_burst_left[3], g_burst_miss[3];
+/* broadcast (non-ARQ): frames still expected in the current group, and
+ * the reassembly buffer. Each group carries its own preamble, so the
+ * streaming receiver finds group STARTS unaided -- only the frames after
+ * the first need rxs_continue_burst. Note the causal receiver has none of
+ * the global-argmax trouble the buffer-based walk has: it commits to a
+ * preamble as samples arrive and never sees two at once. */
+static int g_bc_left[3];
+static int g_bc_group = 4;
+static uint8_t g_bc_asm[8192];
+static int g_bc_len, g_bc_frames, g_bc_lost, g_bc_last_seq = -1;
+static int16_t g_bc_air[600000];
+static int g_bc_pending;   /* samples queued for transmission */
+static int g_bc_sent;
 
 /* ---------------- PHY glue ---------------- */
 
@@ -470,6 +484,80 @@ static void handle_delivered(int before)
         g_st.delivered_n = 0;
 }
 
+/* Queue a broadcast: one preamble+header per group of BC frames, framing
+ * as ofdm_phy/broadcast.py (SYNC|EOS|seq, then this frame's length). */
+static void cmd_broadcast(const char *text, int rung);
+
+static void cmd_broadcast(const char *text, int rung)
+{
+    static uint8_t blocks[8 * 2600];
+    uint8_t payload[26];
+    int fb = 26, cap0 = 26 - 3, cap = 26 - 2;
+    int len = (int)strlen(text), off = 0, seq = 0, total = 0;
+
+    if (len <= 0)
+        return;
+    g_bc_pending = g_bc_sent = 0;
+    while (off < len) {
+        int nf = 0, pkt_n = 0, first = 1, n;
+        while (nf < g_bc_group && off < len) {
+            int take = (first ? cap0 : cap);
+            int flags = first ? 0x80 : 0;
+            if (take > len - off)
+                take = len - off;
+            if (off + take >= len)
+                flags |= 0x40; /* EOS */
+            memset(payload, 0, sizeof(payload));
+            payload[0] = (uint8_t)(flags | (seq & 0x3F));
+            payload[1] = (uint8_t)take;
+            if (first)
+                payload[2] = BC_PT_TELEMETRY;
+            memcpy(payload + (first ? 3 : 2), text + off, (size_t)take);
+            pkt_n = data_encode(0, payload, fb, blocks + (size_t)nf * 2600);
+            off += take;
+            seq++;
+            nf++;
+            first = 0;
+        }
+        {   /* pack contiguously at the packet stride the builder wants */
+            static uint8_t packed[8 * 2600];
+            int i;
+            for (i = 0; i < nf; i++)
+                memcpy(packed + (size_t)i * pkt_n, blocks + (size_t)i * 2600,
+                       (size_t)pkt_n);
+            n = tx_build_burst(ladder_mode(rung), packed, pkt_n, nf,
+                               PKT_TYP_BCAST, ladder_mod(rung),
+                               ladder_spd(rung), BURST_STREAM_RESYNC,
+                               g_bc_air + g_bc_pending);
+        }
+        if (n <= 0) {
+            /* The group did not fit the transmit buffer -- at the slow
+             * rungs one EXTREME frame is already 20 s of air, so four of
+             * them behind a single preamble is far past it. Shrink the
+             * group and retry; a group of one is still a valid broadcast,
+             * it just stops amortizing the preamble. */
+            if (g_bc_group > 1) {
+                g_bc_group /= 2;
+                printf("%s [%s] broadcast: group too long at rung %d, "
+                       "retrying with %d frame(s) per group\n", tstamp(),
+                       g_name, rung, g_bc_group);
+                g_bc_pending = 0;
+                cmd_broadcast(text, rung);
+                return;
+            }
+            printf("%s [%s] broadcast: will not fit at rung %d -- let the "
+                   "ladder climb first\n", tstamp(), g_name, rung);
+            g_bc_pending = 0;
+            return;
+        }
+        g_bc_pending += n;
+        total++;
+    }
+    printf("%s [%s] broadcast queued: %d bytes in %d group(s), %.1f s air "
+           "at rung %d (non-ARQ, nothing will be repeated)\n", tstamp(),
+           g_name, len, total, (double)g_bc_pending / FS, rung);
+}
+
 static int g_compress = 1; /* deflate files before transmitting */
 
 static void cmd_sendfile(const char *path)
@@ -609,6 +697,9 @@ static void handle_command(char *line)
         printf("%s [%s] burst window = %d fragment%s per acknowledgment "
                "(stream cap %d)\n", tstamp(), g_name, w,
                w == 1 ? "" : "s", BURST_STREAM_MAX);
+    } else if (!strncmp(line, "broadcast ", 10)) {
+        cmd_broadcast(line + 10, g_st.stats.last_rung >= 0
+                                     ? g_st.stats.last_rung : 7);
     } else if (!strcmp(line, "compress on")
                || !strcmp(line, "compress off")) {
         g_compress = line[9] == 'o' && line[10] == 'n';
@@ -761,7 +852,58 @@ int main(int argc, char **argv)
                                    ? -ev.type : 0]);
                         fflush(stdout);
                     }
-                    if (ev.type == 1) {
+                    if (ev.type == 1 && ev.hdr.typ == PKT_TYP_BCAST) {
+                        /* Broadcast: Data-shaped but NOT station traffic --
+                         * its reserved field is not a link-control word, so
+                         * it must never reach the ARQ reassembler. */
+                        const uint8_t *b = ev.bits;
+                        int plen = (ev.pkt_bits_n - 36) / 8, j, v;
+                        int flags = 0, seq = 0, dlen = 0, head = 2;
+                        for (j = 0, v = 0; j < 8; j++)
+                            v = (v << 1) | (b[20 + j] & 1);
+                        flags = v & ~0x3F;
+                        seq = v & 0x3F;
+                        for (j = 0, v = 0; j < 8; j++)
+                            v = (v << 1) | (b[28 + j] & 1);
+                        dlen = v;
+                        if (flags & 0x80) {
+                            head = 3;
+                            g_bc_left[m] = g_bc_group - 1;
+                        } else if (g_bc_left[m] > 0) {
+                            g_bc_left[m]--;
+                        }
+                        if (g_bc_last_seq >= 0) {
+                            int gap = (seq - g_bc_last_seq - 1) & 0x3F;
+                            if (gap > 0 && gap < 32)
+                                g_bc_lost += gap;
+                        }
+                        g_bc_last_seq = seq;
+                        g_bc_frames++;
+                        if (dlen > plen - head)
+                            dlen = plen - head;
+                        for (j = 0; j < dlen
+                             && g_bc_len < (int)sizeof(g_bc_asm); j++) {
+                            int bb, val = 0;
+                            for (bb = 0; bb < 8; bb++)
+                                val = (val << 1)
+                                      | (b[20 + 8 * (head + j) + bb] & 1);
+                            g_bc_asm[g_bc_len++] = (uint8_t)val;
+                        }
+                        if (g_bc_left[m] > 0
+                            && !rxs_continue_burst(g_rxs[m],
+                                                   BURST_STREAM_RESYNC))
+                            g_bc_left[m] = 0;
+                        if (flags & 0x40) {
+                            printf("\n%s [%s] << broadcast: %d bytes, "
+                                   "%d frames, %d lost, snr %+.1f dB\n",
+                                   tstamp(), g_name, g_bc_len, g_bc_frames,
+                                   g_bc_lost, ev.snr_db);
+                            printf("    \"%.*s\"\n> ", g_bc_len, g_bc_asm);
+                            fflush(stdout);
+                            g_bc_len = g_bc_frames = g_bc_lost = 0;
+                            g_bc_last_seq = -1;
+                        }
+                    } else if (ev.type == 1) {
                         int before = g_st.delivered_n;
                         g_rx_ok++;
                         g_last_snr = ev.snr_db;
@@ -788,7 +930,18 @@ int main(int argc, char **argv)
                     fflush(stdout);
                     prev_busy = busy;
                 }
-                int nf = station_poll_tx(&g_st, now_t(), busy,
+                int nf = 0;
+                if (g_bc_pending > 0 && !busy && !g_txing) {
+                    /* a broadcast owns the channel for its duration: there
+                     * is no acknowledgment to wait for and nothing to
+                     * retransmit, so it just goes out */
+                    nf = g_bc_pending;
+                    memcpy(g_frame, g_bc_air, (size_t)nf * sizeof(int16_t));
+                    g_bc_pending = 0;
+                    g_bc_sent = 1;
+                }
+                if (nf == 0)
+                    nf = station_poll_tx(&g_st, now_t(), busy,
                                          g_frame, 600000);
                 if (nf > 0) {
                     ssize_t off = 0;
