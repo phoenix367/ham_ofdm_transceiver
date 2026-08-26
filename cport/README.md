@@ -57,6 +57,97 @@ file drops from 211 to 45 transmitted frames. Costs that an MCU build
 without EXT can drop back down: `CONV_MAX_STEPS` 272 → 2112 (Viterbi
 dep ~50 KB + traceback ~133 KB), `MAX_LLRS` 1024 → 8192.
 
+**Streamed bursts** (`tx_build_burst` / `rxd_receive_burst`): the other
+half of the same amortization argument as EXT frames. EXT makes one frame
+carry more; streaming makes N frames share one preamble and one header —
+`[preamble][header][blk 0][ZC][blk 1]…`, with the preamble's own ZC block
+re-emitted every `resync_every` blocks to refresh timing and residual CFO.
+All blocks must share type, size, modulation and rate (that is what lets a
+single header describe them) and the block count is not in the waveform —
+the caller signals it. Measured on the float chain: **1.73× for 20 × 27-byte
+NORMAL packets at 0.08 dB** (`experiments/stream_mode.py`); ~0.35 dB at
+EXTREME, which is why the recommendation is NORMAL rungs only. Conv-FEC
+only. C burst waveforms are bit-exact against the fixed model
+(`TX_BURST_*` vectors), and `rxd_receive_burst` decodes every block with
+its ZC resyncs locked.
+
+`station.c` uses it for the burst window (`burst_stream = 1`): a whole
+selective-repeat window goes out as one transmission instead of
+`burst_window` separate frames. The packets are byte-identical to
+per-frame burst fragments — bit 7 of the sub-header's index byte is the
+only new thing on the wire — so **a receiver without streaming support
+still decodes the first block** of every burst as an ordinary fragment,
+which is what makes the fallback safe rather than fatal. A stream carries
+only full-size fragments; the short tail always travels as its own frame,
+because the receiver learns the message length from that fragment's own
+length. Measured in `test_link.c`: a 250-byte transfer at 25-byte
+fragments takes **4 transmissions streamed vs 13 after fallback**, both
+bit-exact.
+
+Three ways back to per-frame bursts, each ending the transfer's
+streaming for good (`ST_EV_BURST_SOFF` says which): the PHY refuses to
+build (`ST_SOFF_BUILD`), two windows come back with a bitmap acking at
+most one fragment (`ST_SOFF_NOACK` — the signature of a peer decoding
+only block 0), or two streamed windows time out (`ST_SOFF_TIMEOUT`).
+
+Only NOACK is a statement about the **peer**, and it is the only one
+remembered across transfers (`peer_stream_ok`): a receiver that cannot
+follow a stream will not learn to between transfers, so re-discovering
+it costs two wasted windows every time. TIMEOUT and BUILD describe the
+channel and the local buffers, and deliberately do NOT stick — measured,
+a fading channel raises `ST_SOFF_TIMEOUT` against a peer that streams
+perfectly well, and making that sticky would disable streaming for the
+session on a capable link. Nor is the peer verdict permanent: a deep
+fade can forge the NOACK signature, so streaming is re-probed after
+`PEER_STREAM_RETRY` (8) transfers. The
+ack request rides on the burst's **first** block as well as its last, so
+a peer that cannot follow the stream still answers and the sender learns
+by bitmap rather than by waiting out a timeout.
+
+Two receivers, two continuations: the frame-at-once path re-runs the
+recording through `rxd_receive_burst` (and re-locks on each ZC), while
+the streaming receiver steps to the next block with
+`rxs_continue_burst()` and steps *over* the ZC without re-locking — a
+documented divergence that is benign because bursts are NORMAL-only
+(`BURST_MIN_RUNG`) and an open-loop NORMAL stream holds far longer than
+any burst lasts. No per-block HARQ yet (the float chain has it) — open
+thread. RAM: the resync search window is sized for ROBUST (41.6 kB); an
+EXTREME burst resyncs open loop rather than spend 164 kB, and
+`n_resync_out` reports the shortfall.
+
+**Burst window sized to the transfer** (`station.c`, `btx.win`): the
+window is chosen once at engage as `min(operator ceiling, buffer cap,
+fragment count)`, then clipped by an air-time cap
+(`BURST_WIN_MAX_AIR_S`, 30 s) so one transmission can never outlast a
+plausible fade — everything in a streamed window is exposed before any
+of it is acked. Sizing it to the transfer is what makes a short transfer
+cost exactly one acknowledgment, which is the LTP/CFDP "deferred NAK"
+endpoint reached with a constant rather than new wire format. Measured
+on a 14 KB file: window 4 → 14 transmissions, 8 → 9, 16 → **6**.
+
+Resizing the window *during* a transfer was implemented and then
+reverted on the evidence. Halving it on each streamed-window timeout
+(instead of striking out of streaming) collapsed it 16→8→4→2→1 with no
+path back — it only grew on a fully-acked window, which never happens in
+a fade — and produced **196 transmissions with 72 timeouts against 134
+and 9** for the strike-out path. When a fade is what breaks a burst, the
+right answer is to stop streaming, not to stream less. On a clean
+channel the two were identical (6 transmissions each), so the dynamic
+half bought nothing anywhere.
+
+**Adaptive reply timer** (`station.c`, RFC 6298 shape + Karn's rule): the
+ack budget used to be a fixed `turnaround + timeout_margin` guess on top
+of a computed air time, with the peer's reply rung *guessed* as "my
+request minus 2". The budget now splits along what is knowable: the
+reply's **air time stays computed exactly** (`estimate_air_time` — it
+swings 40x across the ladder, so smoothing it would be nonsense), while
+the **overhead** — peer turnaround, decode time, carrier-sense wait,
+scheduling, and the error in that rung guess — is measured and smoothed
+(srtt/rttvar, K=4). Karn's rule keeps ambiguous exchanges out of the
+estimator, and a timeout doubles the timer until a clean exchange clears
+it. Measured in `test_link.c`: a 2.30 s bootstrap guess converges to
+0.40 s against a peer that really takes 0.40 s.
+
 **External oscillator fine-tune endpoint** (`station_set_freq_trim` /
 `station_freq_trim` / `station_freq_trim_total`): registers the LO
 actuator (VCTCXO DAC, PLL word, CAT clarifier) that the AFC netting

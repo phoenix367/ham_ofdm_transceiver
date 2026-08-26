@@ -23,6 +23,8 @@ Everything runs through the local venv (`./venv/bin/python`); install deps with
   result (Figures 23-24), multiprocess sweep; ~2 min at 120 trials on 8 cores.
   Use `--trials 10` as a quick regression check of the whole chain.
 - `./venv/bin/python experiments/ota_demo.py` — multi-packet stream decode demo.
+- `./venv/bin/python experiments/stream_mode.py [--trials N]` — streamed
+  bursts vs per-frame preambles (delivery, goodput, fitted dB cost).
 - `./venv/bin/python experiments/fec_comparison.py`,
   `experiments/viterbi_recal.py`, `experiments/ldpc_recal.py`,
   `experiments/llr_shape.py`, `experiments/extreme_recal.py`,
@@ -93,6 +95,84 @@ Cross-module invariants that are easy to break:
   a measured contrast gate; don't remove the full-grid fallback — the
   quarter-length coarse argmax alone costs ~0.5 dB at the EXTREME edge
   (A/B: `experiments/coarse_search_ab.py`, parity-asserted).
+- Streaming (`build_stream`/`demod_stream`, `stream_layout`) amortizes the
+  per-frame preamble+header over a burst. Invariants: every block must have
+  the same packet type, size, mod and rate (one header describes all — the
+  builder asserts it); the block COUNT is not in the waveform (the link layer
+  signals it, or `n_blocks=None` decodes to the end of the samples); the ZC
+  resync calls `detect_zc_preamble(..., max_cfo=0)` for the same reason the
+  composite detector does, and a lock outside the ±`win` plausibility window
+  must be discarded or a spurious correlation walks the stream off its grid.
+  The resync is NOT what keeps the stream coherent (open-loop 24 s streams
+  decode identically) — it is there for sample-clock drift and mid-burst
+  re-entry. Costs 0.08 dB at NORMAL for 1.73x (measured, 6000 blocks/point)
+  and ~0.35 dB at EXTREME for 1.21x (200 blocks/point); use it at NORMAL
+  rungs, not at EXTREME. Three twins to keep in sync: float
+  (`transceiver.py`), fixed (`fixed/tx.py` `build_stream`, `fixed/rx.py`
+  `receive_stream`) and C (`tx_build_burst`/`rxd_receive_burst`, golden
+  `TX_BURST_*` vectors). Conv-FEC only. The clip threshold is a
+  WHOLE-waveform RMS, so a burst is not the concatenation of separately
+  built frames — a 1-block burst with no resync is bit-identical to a
+  frame, and both test suites assert it. In C the resync window buffer is
+  sized for ROBUST on purpose (EXTREME would cost 164 kB of the 453 kB
+  budget); an EXTREME burst resyncs open loop and `n_resync_out` shows it.
+- Streamed burst windows (`station.c`, `burst_stream = 1`) put a whole
+  selective-repeat window in one transmission. Invariants: the packets
+  stay byte-identical to per-frame fragments (bit 7 of the sub-header
+  index byte is the only marker), so a peer without streaming still
+  decodes block 0 — that property IS the fallback; a stream carries only
+  full-size fragments, because the receiver derives the message length
+  from the last fragment's own length (`brx.last_len`); the ack request
+  rides on the FIRST block as well as the last, so a peer that cannot
+  follow the stream still replies and the sender falls back by bitmap
+  (`ST_SOFF_NOACK`) instead of by timeout. Every timeout of a streamed
+  window is a strike even the forgiven first one — forgiveness is about
+  not poisoning the rate controller, not about the evidence. Two
+  receivers continue a burst differently: `rxd_receive_burst` re-runs the
+  recording and re-locks each ZC; `rxs_continue_burst` (streaming, what
+  `demoapp/app.c` uses) steps over the ZC without re-locking. The
+  streaming continuation MUST know where to stop — while stepping through
+  blocks the receiver is not running the preamble detector, so chasing
+  blocks that were never sent makes it deaf for one block-time each (a
+  measured ~12 s hole that ate the peer's next burst and produced an
+  endless retransmit loop). The stop signal is the ack-request bit on the
+  burst's last block, "set AND not the first block of this stream"
+  (the first carries it too, for peers that cannot stream), plus a
+  consecutive-failure bound for when that last block is itself lost.
+- `ST_SOFF_NOACK` is the ONLY streaming failure that is a peer property,
+  and the only one remembered across transfers (`peer_stream_ok`,
+  re-probed after `PEER_STREAM_RETRY`). `ST_SOFF_TIMEOUT`/`ST_SOFF_BUILD`
+  describe the channel and local buffers and must stay per-transfer — a
+  fading channel raises TIMEOUT against a peer that streams fine, so
+  making it sticky would kill streaming on a capable link.
+- The burst window (`btx.win`) is fixed at engage: min(ceiling, buffer
+  cap, fragment count), clipped by `BURST_WIN_MAX_AIR_S`. Do NOT add
+  dynamic resizing — it was implemented and reverted: halving the window
+  per streamed-window timeout gave 196 tx / 72 timeouts on a fading
+  channel vs 134 / 9 for striking out of streaming, because the window
+  collapses to 1 and only grows on a fully-acked window (which never
+  happens in a fade). A fade means stop streaming, not stream less.
+- The reply timer (`station.c` `rto_*`) splits the budget: the reply's air
+  time is computed exactly by `estimate_air_time` (it swings 40x across
+  the ladder), and only the OVERHEAD is smoothed RFC-6298-style. Karn's
+  rule gates the sampling (`rto_ambiguous` set on timeout) and a timeout
+  doubles `rto_backoff` until a clean exchange resets it. Do not smooth
+  the air-time term, and do not sample an exchange that followed a
+  retransmission.
+- File transfers are DEFLATEd whole before splitting into parts
+  (`demoapp/app.c`, magic 0x02 vs 0x01) — per-part compression would
+  throw the ratio away. Compression lives in the app, not `cport/`, so
+  the C port stays dependency-free; an MCU build swaps zlib for
+  miniz/heatshrink. Measured 2.82x on a 14 KB config file, which is
+  ~1.4x fewer transmissions end to end (acks and the ladder bootstrap do
+  not compress).
+- `demoapp` at `--time-scale 25` outruns an 8-core host: protocol time is
+  sample-derived, so the two stations' clocks drift APART (the mostly-
+  transmitting side stays current, the decoding side lags) and the
+  transmitter times out before the receiver has finished the burst.
+  Signature: every timeout on one station, zero on the other, each
+  followed at once by the reply. Measured 22 timeouts at 25x, 0 at 8x on
+  the same transfer. Drop the time scale before debugging a timeout.
 - `link.py` (controller/ladder/LC word) and `station.py` (full station: QoS
   queues, ARQ, simplex channel access) are the link layer;
   `experiments/simplex_session.py` is their system test. Invariants: seq

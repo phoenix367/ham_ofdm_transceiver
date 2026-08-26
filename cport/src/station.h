@@ -37,9 +37,57 @@
 #define FLAG_BURST_DATA (FLAG_NO_DATA | FLAG_PRIO_STREAM)   /* 6 */
 #define FLAG_BURST_ACK (FLAG_NO_DATA | FLAG_LAST_FRAGMENT)  /* 3 */
 #define BURST_FRAG_SIZE 25   /* minimum fragment size (low rungs) */
-#define BURST_SUBHDR 3       /* [frag_idx][ack_req<<7|total][frag_size] */
+#define BURST_SUBHDR 3       /* [streamed<<7|frag_idx][ack_req<<7|total][frag_size] */
 #define BURST_MAX_FRAGS 127
 #define BURST_MIN_RUNG 4     /* engage at NORMAL rungs and above */
+
+/* streamed bursts: a whole window behind ONE preamble+header instead of
+ * one preamble per fragment (docs/phy.md). Bit 7 of the sub-header's
+ * index byte marks a fragment as part of a stream -- frag_idx only ever
+ * needs 7 bits (BURST_MAX_FRAGS 127), and the packet bytes are otherwise
+ * unchanged, so a receiver without streaming support still decodes the
+ * first block of the burst as an ordinary fragment. */
+#define BURST_SUB_STREAMED 0x80
+#ifndef BURST_STREAM_RESYNC
+#define BURST_STREAM_RESYNC 4  /* ZC resync period, in blocks */
+#endif
+/* blocks per stream. Sizes two static buffers (TX packet bits ~2.1 kB
+ * each, RX reassembly 2.6 kB each), so raising it costs ~4.7 kB/block --
+ * check FEASIBILITY.md's RAM budget before turning it up on an MCU. */
+#ifndef BURST_STREAM_MAX
+#define BURST_STREAM_MAX 8
+#endif
+#define BURST_STREAM_MIN 2     /* below this a stream saves nothing */
+/* consecutive streamed windows that deliver ~nothing before the station
+ * gives up and reverts to per-frame bursts for the rest of the transfer */
+#define BURST_STREAM_STRIKES 2
+
+/* One acknowledgment covers a whole window, so a single transmission
+ * must never outlast a plausible fade -- everything in it is exposed
+ * before any of it is acked. This caps the window by air time whatever
+ * else asks for. */
+#define BURST_WIN_MAX_AIR_S 30.0
+
+/* why a station stopped streaming (ST_EV_BURST_SOFF payload) */
+#define ST_SOFF_BUILD   1  /* the PHY refused to build the burst */
+#define ST_SOFF_NOACK   2  /* windows streamed, ~nothing came back acked */
+#define ST_SOFF_TIMEOUT 3  /* streamed windows kept timing out */
+
+/* Only ST_SOFF_NOACK is a statement about the PEER: a bitmap that acks
+ * one fragment out of a window of eight is what a receiver unable to
+ * follow a stream looks like, and that does not change between
+ * transfers. ST_SOFF_TIMEOUT and ST_SOFF_BUILD are statements about the
+ * CHANNEL and the local buffers, so they stay per-transfer -- measured:
+ * a fading channel produces ST_SOFF_TIMEOUT against a peer that streams
+ * perfectly well, and remembering that would disable streaming forever
+ * on a capable link.
+ *
+ * The peer verdict is not permanent either: a deep fade can forge the
+ * NOACK signature, so streaming is probed again after this many burst
+ * transfers. Wrong "peer cannot stream" costs one window per retry
+ * period; a peer that really cannot costs two windows per period
+ * instead of two per transfer. */
+#define PEER_STREAM_RETRY 8
 
 /* per-transfer fragment size, fixed at engage time (uniform size ->
  * random-access placement at idx*frag_size). Larger fragments ride
@@ -61,6 +109,20 @@ typedef struct {
                    double *snr_db, double *cfo_hz, int *harq_combined,
                    const int64_t *prev_llrs, int prev_n,
                    int64_t *llrs_out, int *llrs_n);
+
+    /* OPTIONAL streamed bursts. Either may be NULL -- the station then
+     * uses per-frame bursts, which is also where it falls back to when a
+     * stream stops delivering. build_burst emits n_blocks equal-size
+     * packets behind one preamble+header (returns samples, <=0 on
+     * refusal); receive_burst decodes as many blocks as the buffer holds,
+     * writing pkt_bits block-major and one CRC flag per block, and
+     * returns the block count examined (<0 = no lock). */
+    int (*build_burst)(void *ctx, const uint8_t *blocks, int pkt_n,
+                       int n_blocks, int typ, int rung, int resync_every,
+                       int16_t *out, int out_cap);
+    int (*receive_burst)(void *ctx, const int16_t *s, int n, int max_blocks,
+                         int resync_every, uint8_t *pkt_bits, int *pkt_bits_n,
+                         int *ok_flags, double *snr_db, double *cfo_hz);
 } station_phy_t;
 
 typedef struct {
@@ -95,6 +157,13 @@ typedef struct {
      * window for the bulk stream (send burst_window frames, then one
      * bitmap acknowledgment) */
     int burst_window;
+    /* stream whole windows behind one preamble when the PHY offers
+     * build_burst/receive_burst. Opt-in: 0 keeps the per-frame burst
+     * behaviour (and is what every window degrades to on failure). */
+    int burst_stream;
+    /* peer capability, remembered across transfers (see
+     * PEER_STREAM_RETRY): 1 = believed able to follow streamed bursts */
+    int peer_stream_ok, peer_stream_retry;
     struct {
         int active, id, n, last_len, window_left, cursor;
         int frag_size; /* uniform per transfer */
@@ -102,6 +171,18 @@ typedef struct {
         uint8_t acked[16];
         uint8_t sent[16]; /* sent in the current window (no re-send
                              within a window before the ack arrives) */
+        /* streaming state: stream_ok goes to 0 for the rest of the
+         * transfer once the evidence says the peer is not following the
+         * stream, and every later window is sent as separate frames */
+        int stream_ok, streamed_n, stream_strikes;
+        /* fragments behind one acknowledgment for this transfer, fixed
+         * at engage: min(operator ceiling, buffer cap, fragment count),
+         * then clipped by the air-time cap. Sizing it to the transfer is
+         * what makes a short transfer cost exactly one acknowledgment
+         * (measured: 9 transmissions -> 6 on a 14 KB file). Resizing it
+         * DURING a transfer was tried and reverted -- see the timeout
+         * path in station.c. */
+        int win;
     } btx;
     struct {
         int active, id, n, last_len, ack_due, done;
@@ -113,6 +194,18 @@ typedef struct {
     double not_before;
     int reply_due, expects_reply, reply_rung_guess, last_tx_rung;
     int reply_len_guess; /* expected reply payload bytes (ack bitmap) */
+
+    /* Adaptive reply timer. The budget splits in two: the reply's AIR
+     * TIME is computable physics (estimate_air_time, and it swings 40x
+     * across the ladder), while everything else -- peer turnaround,
+     * decode time, carrier-sense wait, scheduling, and the error in
+     * reply_rung_guess -- is latency we can only measure. So the air
+     * term stays exact and only the overhead is smoothed, RFC 6298
+     * style, with Karn's rule (no sample from an exchange that involved
+     * a retransmission) and exponential backoff on loss.
+     * turnaround + timeout_margin remain the bootstrap value. */
+    double tx_end_t, rto_air_est, rto_srtt, rto_rttvar, rto_backoff;
+    int rto_have, rto_pending, rto_ambiguous;
 
     uint8_t assembly[2][ST_ASM_MAX];
     int assembly_len[2];
@@ -159,6 +252,11 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
                        double t);
 
 double estimate_air_time(int rung_idx, int payload_len);
+/* air time of one streamed window (the fixed preamble+header once, then
+ * n_blocks of data) -- exposed for tests and air-time planning */
+double stream_air_time_pub(int rung_idx, int payload_len, int n_blocks);
+/* test hook: force the streaming fallback with a given reason */
+void burst_stream_off_pub(station_t *st, int reason, double t);
 
 /* --- external oscillator fine-tune endpoint ---------------------------
  * In a real setup the reference oscillator is trimmable (VCTCXO DAC,
@@ -198,6 +296,13 @@ enum {
     ST_EV_BURST_ACKRX,  /* a=frags acked (total) b=nfrags */
     ST_EV_BURST_PROBE,  /* timeout inside a burst -> 1-frame probe */
     ST_EV_BURST_DONE,   /* a=0 tx-side complete, 1 rx-side delivered */
+    ST_EV_BURST_STREAM, /* a=blocks streamed b=samples c=resync period */
+    ST_EV_BURST_SRX,    /* a=blocks decoded b=blocks examined */
+    ST_EV_BURST_SOFF,   /* streaming abandoned: a=ST_SOFF_* */
+    ST_EV_RTO,          /* reply timer: a=srtt ms b=rttvar ms c=budget ms
+                           d=air-time term ms */
+    ST_EV_BURST_WIN,    /* window chosen at engage: a=ceiling b=used
+                           c=fragments d=burst air time, s */
 };
 void station_set_diag(station_t *st,
                       void (*cb)(void *ctx, int ev, int a, int b, int c,

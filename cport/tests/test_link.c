@@ -94,7 +94,7 @@ static void test_burst_forgiveness(void)
 {
     static station_t C;
     static int16_t air[2000];
-    station_phy_t phy = { 0, stub_build, 0 };
+    station_phy_t phy = { 0, stub_build, 0, 0, 0 };
     static uint8_t bulk[250];
     lc_word_t lc;
     double t = 100.0;
@@ -207,7 +207,7 @@ static void lo_trim_stub(void *ctx, double hz)
 static void test_freq_trim(void)
 {
     static station_t C;
-    station_phy_t phy = { 0, 0, 0 }; /* on_decoded never touches the PHY */
+    station_phy_t phy = { 0, 0, 0, 0, 0 }; /* on_decoded never touches the PHY */
     static uint8_t pkt[128];
     lc_word_t lc;
     int pkt_n;
@@ -295,6 +295,49 @@ static int phy_receive(void *ctx, const int16_t *s, int n, uint8_t *pkt_bits,
     return -1;
 }
 
+static int phy_build_burst(void *ctx, const uint8_t *blocks, int pkt_n,
+                           int n_blocks, int typ, int rung, int resync_every,
+                           int16_t *out, int out_cap)
+{
+    (void)ctx;
+    if (tx_burst_len(ladder_mode(rung), pkt_n, ladder_mod(rung),
+                     ladder_spd(rung), n_blocks, resync_every) > out_cap)
+        return -1;
+    return tx_build_burst(ladder_mode(rung), blocks, pkt_n, n_blocks, typ,
+                          ladder_mod(rung), ladder_spd(rung), resync_every,
+                          out);
+}
+
+static int phy_receive_burst(void *ctx, const int16_t *s, int n,
+                             int max_blocks, int resync_every,
+                             uint8_t *pkt_bits, int *pkt_bits_n, int *ok,
+                             double *snr_db, double *cfo_hz)
+{
+    static uint8_t bits[BURST_STREAM_MAX * 2600];
+    int m;
+    (void)ctx;
+    for (m = 0; m < 3; m++) {
+        rxd_t r;
+        rxd_header_t h;
+        int start, nres, got, k, nb;
+        int64_t cfo;
+        rxd_init(&r, (link_mode_t)m);
+        got = rxd_receive_burst(&r, s, n, max_blocks, resync_every, &h, bits,
+                                ok, &start, &cfo, &nres);
+        if (got < 0)
+            continue;
+        nb = PKT_BITS_FROM_HDR(h.typ, h.len);
+        for (k = 0; k < max_blocks; k++)
+            memcpy(pkt_bits + (size_t)k * 2600, bits + (size_t)k * nb,
+                   (size_t)nb);
+        *pkt_bits_n = nb;
+        *snr_db = r.last_snr_db;
+        *cfo_hz = (double)cfo * 12000.0 / 4294967296.0;
+        return max_blocks;
+    }
+    return -1;
+}
+
 static int16_t g_air[600000], g_rxbuf[600000];
 static uint32_t g_nlcg = 5555;
 
@@ -307,7 +350,7 @@ static int16_t nz(void)
 static void test_session(void)
 {
     static station_t A, B;
-    station_phy_t phy = { 0, phy_build, phy_receive };
+    station_phy_t phy = { 0, phy_build, phy_receive, phy_build_burst, phy_receive_burst };
     static const uint8_t msg_cq[] = "CQ DE R9FEU";
     static uint8_t msg_bulk[96];
     static const uint8_t msg_reply[] = "R R TNX DE UB1ABC 73";
@@ -440,6 +483,362 @@ static void test_session(void)
     }
 }
 
+/* ---------------- streamed bursts + the fallback path ------------------- */
+
+/* run the two stations against each other until B has a new delivery or
+ * the clock runs out; returns the frames put on air */
+static int pump(station_t *A, station_t *B, double *tp, double limit,
+                int deliv0)
+{
+    station_t *owner = 0;
+    double t = *tp, tx_end = 0.0;
+    int air_n = 0, k, frames = 0;
+
+    while (t < limit) {
+        if (owner && t >= tx_end) {
+            station_t *peer = owner == A ? B : A;
+            station_on_tx_end(owner, tx_end);
+            for (k = 0; k < 700; k++)
+                g_rxbuf[k] = nz();
+            for (k = 0; k < air_n; k++)
+                g_rxbuf[700 + k] = (int16_t)(g_air[k] + nz());
+            for (k = 0; k < 700; k++)
+                g_rxbuf[700 + air_n + k] = nz();
+            station_rx_frame(peer, g_rxbuf, air_n + 1400, tx_end);
+            owner = 0;
+        }
+        if (!owner) {
+            station_t *st = ((int)(t * 10) & 1) ? A : B;
+            station_t *other = st == A ? B : A;
+            int n = station_poll_tx(st, t, 0, g_air, 600000);
+            if (!n)
+                n = station_poll_tx(other, t, 0, g_air, 600000), st = other;
+            if (n > 0) {
+                owner = st;
+                air_n = n;
+                tx_end = t + (double)n / 12000.0;
+                frames++;
+            }
+        }
+        if (!owner && B->delivered_n > deliv0 && !station_has_traffic(A))
+            break;
+        t += 0.1;
+    }
+    *tp = t;
+    return frames;
+}
+
+/* one 250-byte transfer at a mid rung (25-byte fragments -> 10 of them,
+ * all full size). peer_streams=0 gives the receiver no burst decoder,
+ * which is the fallback case: the transfer must still complete. */
+static void stream_case(const char *name, int peer_streams, int *frames_out,
+                        int *stream_off_out)
+{
+    static station_t A, B;
+    station_phy_t pa = { 0, phy_build, phy_receive, phy_build_burst,
+                         phy_receive_burst };
+    station_phy_t pb = { 0, phy_build, phy_receive, phy_build_burst,
+                         phy_receive_burst };
+    static uint8_t big[250];
+    lc_word_t lc;
+    double t = 100.0;
+    int k, frames, ok;
+
+    if (!peer_streams)
+        pb.receive_burst = 0;
+    for (k = 0; k < 250; k++)
+        big[k] = (uint8_t)(k * 31 + 5);
+
+    station_init(&A, &pa, 4242);
+    station_init(&B, &pb, 2424);
+    A.burst_window = 8;
+    B.burst_window = 8;
+    A.burst_stream = 1;
+    B.burst_stream = 1;
+
+    /* prime both controllers at a mid rung so fragments are 25 bytes */
+    memset(&lc, 0, sizeof(lc));
+    lc.flags = FLAG_NO_DATA;
+    lc.req_rung = 5;
+    lc.snr_db = -4.0;
+    ctl_on_rx_frame(&A.ctl, -4.0, &lc, t);
+    ctl_on_rx_frame(&B.ctl, -4.0, &lc, t);
+
+    station_submit(&A, big, 250, QOS_BULK);
+    frames = pump(&A, &B, &t, 3000.0, 0);
+
+    ok = B.delivered_n >= 1 && B.delivered_len[0] == 250
+         && memcmp(B.delivered[0], big, 250) == 0;
+    check(name, ok);
+    printf("  %s: %d frames on air, frag %d B, stream_ok=%d\n", name, frames,
+           A.btx.frag_size, A.btx.stream_ok);
+    if (frames_out)
+        *frames_out = frames;
+    if (stream_off_out)
+        *stream_off_out = !A.btx.stream_ok;
+}
+
+static void test_burst_stream(void)
+{
+    int streamed = 0, fallback = 0, off_when_streaming = 0, off_on_fallback = 0;
+
+    stream_case("streamed burst: 250 bytes bit-exact", 1, &streamed,
+                &off_when_streaming);
+    stream_case("fallback (peer cannot decode streams): 250 bytes bit-exact",
+                0, &fallback, &off_on_fallback);
+
+    check("streaming needs fewer transmissions than per-frame bursts",
+          streamed < fallback);
+    check("a peer that cannot follow the stream turns streaming off",
+          off_on_fallback);
+    printf("  streamed %d transmissions vs %d after fallback\n", streamed,
+           fallback);
+}
+
+/* ---------------- adaptive reply timer ---------------- */
+
+/* Drive exchanges whose peer always answers a known interval after the
+ * reply's air time would have ended, and check the budget converges onto
+ * that interval instead of sitting at the fixed bootstrap guess. */
+static void test_rto(void)
+{
+    static station_t C;
+    static int16_t air[2000];
+    static uint8_t pkt[128];
+    station_phy_t phy = { 0, stub_build, 0, 0, 0 };
+    static uint8_t msg[40];
+    lc_word_t lc;
+    uint8_t one = 0;
+    double t = 100.0, boot, tuned_budget, backed;
+    int k, pkt_n, exchanges = 0;
+    const double OVERHEAD = 0.4;
+
+    station_init(&C, &phy, 9);
+    memset(&lc, 0, sizeof(lc));
+    lc.flags = FLAG_NO_DATA;
+    lc.req_rung = 11;
+    lc.snr_db = 6.0;
+    ctl_on_rx_frame(&C.ctl, 6.0, &lc, t);
+    station_submit(&C, msg, (int)sizeof(msg), QOS_INTERACTIVE);
+
+    /* the peer's reply: a plain no-data frame (it never acks, so the
+     * station keeps giving us fresh exchanges to measure) */
+    memset(&lc, 0, sizeof(lc));
+    lc.flags = FLAG_NO_DATA;
+    lc.req_rung = 11;
+    lc.snr_db = 6.0;
+    pkt_n = data_encode(lc_pack(&lc), &one, 1, pkt);
+
+    boot = -1.0;
+    for (k = 0; k < 200 && exchanges < 25; k++) {
+        if (station_poll_tx(&C, t, 0, air, 2000) > 0) {
+            t += 0.1;
+            station_on_tx_end(&C, t);
+            if (C.expects_reply) {
+                double reply_at = C.tx_end_t + C.rto_air_est + OVERHEAD;
+                if (boot < 0.0)
+                    boot = C.await_until - C.tx_end_t - C.rto_air_est;
+                station_on_decoded(&C, pkt, pkt_n, 6.0, 0.0, 0, reply_at);
+                exchanges++;
+                t = reply_at + 0.1;
+            }
+        } else {
+            t += 0.5;
+        }
+    }
+
+    check("rto: first budget is the bootstrap turnaround + margin",
+          boot > 2.29 && boot < 2.31);
+    check("rto: took round-trip samples", C.rto_have && exchanges >= 10);
+    check("rto: learned overhead matches what the peer actually took",
+          C.rto_srtt > OVERHEAD - 0.15 && C.rto_srtt < OVERHEAD + 0.15);
+    tuned_budget = C.rto_srtt + 4.0 * C.rto_rttvar;
+    check("rto: tuned budget is tighter than the bootstrap guess",
+          tuned_budget < boot);
+
+    /* a timeout must widen the timer, and Karn must poison the sample
+     * that follows it. Send one more frame and simply do not answer it. */
+    for (k = 0; k < 200 && C.await_until < 0.0; k++) {
+        if (station_poll_tx(&C, t, 0, air, 2000) > 0) {
+            t += 0.1;
+            station_on_tx_end(&C, t);
+        } else {
+            t += 0.5;
+        }
+    }
+    check("rto: a fresh transmission arms the timer", C.await_until > 0.0);
+    t = C.await_until + 0.1;
+    station_poll_tx(&C, t, 0, air, 2000);
+    backed = C.rto_backoff;
+    check("rto: a timeout backs the timer off and arms Karn",
+          backed >= 2.0 && C.rto_ambiguous == 1);
+    printf("  rto: bootstrap %.2f s -> learned %.2f s "
+           "(srtt %.2f, var %.2f, %d samples), backoff x%.0f\n",
+           boot, tuned_budget, C.rto_srtt, C.rto_rttvar, exchanges, backed);
+}
+
+/* ---------------- burst window sizing ---------------- */
+
+/* The window is chosen once, at engage: cover the whole transfer if the
+ * operator ceiling and the air-time cap allow it. Resizing it DURING a
+ * transfer was implemented and then reverted -- on a fading channel,
+ * halving the window on each timeout produced 196 transmissions and 72
+ * timeouts where striking out of streaming produced 134 and 9. */
+static void test_burst_window(void)
+{
+    static station_t C;
+    static int16_t air[2000];
+    static uint8_t bulk[250];
+    station_phy_t phy = { 0, stub_build, 0, 0, 0 };
+    lc_word_t lc;
+    double t = 100.0;
+    int k, small_win, big_win;
+
+    /* a transfer shorter than the ceiling gets a window sized to it, so
+     * it costs exactly one acknowledgment */
+    station_init(&C, &phy, 77);
+    C.burst_window = 8;
+    memset(&lc, 0, sizeof(lc));
+    lc.flags = FLAG_NO_DATA;
+    lc.req_rung = 11;
+    lc.snr_db = 6.0;
+    ctl_on_rx_frame(&C.ctl, 6.0, &lc, t);
+    station_submit(&C, bulk, (int)sizeof(bulk), QOS_BULK);
+    for (k = 0; k < 20 && !C.btx.active; k++) {
+        if (station_poll_tx(&C, t, 0, air, 2000) > 0)
+            station_on_tx_end(&C, t += 0.1);
+        else
+            t += 0.5;
+    }
+    small_win = C.btx.win;
+    check("window: a short transfer fits in one window",
+          C.btx.active && small_win == C.btx.n && small_win <= C.burst_window);
+
+    /* a transfer with more fragments than the ceiling is capped by it */
+    station_init(&C, &phy, 78);
+    C.burst_window = 4;
+    memset(&lc, 0, sizeof(lc));
+    lc.flags = FLAG_NO_DATA;
+    lc.req_rung = 5; /* low rung -> 25-byte fragments -> 10 of them */
+    lc.snr_db = -4.0;
+    ctl_on_rx_frame(&C.ctl, -4.0, &lc, t);
+    station_submit(&C, bulk, (int)sizeof(bulk), QOS_BULK);
+    t = 100.0;
+    for (k = 0; k < 40 && !C.btx.active; k++) {
+        if (station_poll_tx(&C, t, 0, air, 2000) > 0)
+            station_on_tx_end(&C, t += 0.1);
+        else
+            t += 0.5;
+    }
+    big_win = C.btx.win;
+    check("window: a long transfer is capped by the operator ceiling",
+          C.btx.active && C.btx.n > C.burst_window
+          && big_win == C.burst_window);
+
+    /* whatever is chosen, the burst must fit the air-time cap */
+    check("window: the chosen window fits the air-time cap",
+          stream_air_time_pub(C.last_tx_rung >= 0 ? C.last_tx_rung : 0,
+                              C.btx.frag_size, big_win)
+              <= BURST_WIN_MAX_AIR_S + 0.001);
+    printf("  window: %d-fragment transfer -> %d, %d-fragment -> %d "
+           "(ceilings 8 and 4)\n", 2, small_win, 10, big_win);
+}
+
+/* ------------- peer streaming capability is remembered ------------- */
+
+/* engage a burst transfer and report the window the station chose */
+static int engage_transfer(station_t *C, double *t, const uint8_t *msg,
+                           int len)
+{
+    static int16_t air[2000];
+    int k;
+    C->btx.active = 0;
+    C->cur_bulk.active = 0;
+    station_submit(C, msg, len, QOS_BULK);
+    for (k = 0; k < 40 && !C->btx.active; k++) {
+        if (station_poll_tx(C, *t, 0, air, 2000) > 0)
+            station_on_tx_end(C, *t += 0.1);
+        else
+            *t += 0.5;
+    }
+    return C->btx.active ? C->btx.stream_ok : -1;
+}
+
+static void prime_rung11(station_t *C, double t)
+{
+    lc_word_t lc;
+    memset(&lc, 0, sizeof(lc));
+    lc.flags = FLAG_NO_DATA;
+    lc.req_rung = 11;
+    lc.snr_db = 6.0;
+    ctl_on_rx_frame(&C->ctl, 6.0, &lc, t);
+}
+
+static int stub_build_burst(void *ctx, const uint8_t *b, int pn, int nb,
+                            int typ, int rung, int rs, int16_t *out,
+                            int cap)
+{
+    (void)ctx; (void)b; (void)pn; (void)nb; (void)typ; (void)rung;
+    (void)rs; (void)out; (void)cap;
+    return 5000;
+}
+
+static void test_peer_stream_memory(void)
+{
+    static station_t C;
+    station_phy_t phy = { 0, stub_build, 0, stub_build_burst, 0 };
+    static uint8_t bulk[250];
+    double t = 100.0;
+    int first, after_noack, after_timeout, k, probed = -1;
+
+    /* a NOACK verdict is about the PEER: the next transfer must not
+     * bother streaming */
+    station_init(&C, &phy, 101);
+    C.burst_window = 8;
+    C.burst_stream = 1;
+    prime_rung11(&C, t);
+    first = engage_transfer(&C, &t, bulk, (int)sizeof(bulk));
+    check("peer stream: a fresh peer is assumed capable", first == 1);
+    C.btx.stream_ok = 1;
+    burst_stream_off_pub(&C, ST_SOFF_NOACK, t);
+    after_noack = engage_transfer(&C, &t, bulk, (int)sizeof(bulk));
+    check("peer stream: a NOACK verdict is remembered next transfer",
+          after_noack == 0 && C.peer_stream_ok == 0);
+
+    /* a TIMEOUT verdict is about the CHANNEL: it must NOT stick, or a
+     * fade would disable streaming on a perfectly capable link */
+    station_init(&C, &phy, 102);
+    C.burst_window = 8;
+    C.burst_stream = 1;
+    prime_rung11(&C, t);
+    engage_transfer(&C, &t, bulk, (int)sizeof(bulk));
+    C.btx.stream_ok = 1;
+    burst_stream_off_pub(&C, ST_SOFF_TIMEOUT, t);
+    after_timeout = engage_transfer(&C, &t, bulk, (int)sizeof(bulk));
+    check("peer stream: a TIMEOUT verdict does not stick to the peer",
+          after_timeout == 1 && C.peer_stream_ok == 1);
+
+    /* and the peer verdict expires, so a fade that forged the NOACK
+     * signature costs one retry period, not the session */
+    station_init(&C, &phy, 103);
+    C.burst_window = 8;
+    C.burst_stream = 1;
+    prime_rung11(&C, t);
+    engage_transfer(&C, &t, bulk, (int)sizeof(bulk));
+    C.btx.stream_ok = 1;
+    burst_stream_off_pub(&C, ST_SOFF_NOACK, t);
+    for (k = 1; k <= PEER_STREAM_RETRY + 2; k++) {
+        if (engage_transfer(&C, &t, bulk, (int)sizeof(bulk)) == 1) {
+            probed = k;
+            break;
+        }
+    }
+    check("peer stream: the verdict expires and streaming is re-probed",
+          probed == PEER_STREAM_RETRY);
+    printf("  peer stream: NOACK sticks, TIMEOUT does not, re-probe after "
+           "%d transfers\n", probed);
+}
+
 int main(void)
 {
     test_lc();
@@ -448,6 +847,10 @@ int main(void)
     test_burst_forgiveness();
     test_ext_frame();
     test_session();
+    test_burst_stream();
+    test_rto();
+    test_burst_window();
+    test_peer_stream_memory();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
