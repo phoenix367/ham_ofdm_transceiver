@@ -59,6 +59,83 @@ shows why detection sensitivity depends on this.
     \label{fig:frame_structure}
 \end{figure}
 
+\subsection{Streamed Bursts}
+\label{sec:stream}
+
+The preamble and header are a fixed cost paid \emph{per frame}:
+0.637\,s in NORMAL, 2.49\,s in ROBUST, 9.92\,s in EXTREME
+(Table~\ref{tab:fixed_cost}).  For a full 27-byte frame that is
+$\approx$24\,\% of the air time in every mode; for a short frame at the
+top rung it is 74\,\%.  Extended frames (Section~\ref{sec:coding})
+attack this by making one frame carry more.  Streaming attacks it from
+the other side: one preamble and one header for $N$ blocks,
+
+\[
+\text{[preamble][header][blk}_0\text{][ZC][blk}_1\text{]}\dots
+\]
+
+with the preamble's own Zadoff--Chu block re-emitted every fourth block
+to refresh timing and residual CFO.  All blocks share the packet type,
+size, modulation and code rate --- that is precisely what allows a
+single header to describe them --- and the block \emph{count} is not
+carried in the waveform at all: the link layer signals it, or the
+receiver decodes until the samples run out.
+
+\begin{table}[H]
+    \centering
+    \caption{Fixed per-frame cost by mode, measured.}
+    \label{tab:fixed_cost}
+    \begin{tabular}{lrrrr}
+        \toprule
+        Mode & Tone field & ZC & Header & Total \\
+        \midrule
+        NORMAL  & 0.320\,s & 0.045\,s & 0.272\,s & 0.637\,s \\
+        ROBUST  & 1.280\,s & 0.173\,s & 1.040\,s & 2.49\,s \\
+        EXTREME & 5.120\,s & 0.685\,s & 4.112\,s & 9.92\,s \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Note that the header is comparable to the tone field, so dropping only
+the preamble buys $1.14\times$; dropping preamble \emph{and} header
+buys $1.30\times$.  Measured against the same packets sent as
+independent frames over the article channel
+(\texttt{experiments/stream\_mode.py}, 300 bursts $=$ 6\,000 blocks per
+SNR point), 20 $\times$ 27-byte NORMAL packets take 16.23\,s streamed
+against 28.16\,s per-frame --- $1.73\times$ the throughput --- for a
+sensitivity cost of $0.08$\,dB (Figure~\ref{fig:stream_mode}).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/stream_mode.png}
+    \caption{Streamed bursts against per-frame preambles
+             (\texttt{experiments/stream\_mode.py}).  Delivery is
+             scored per block, so the comparison is packets delivered
+             rather than frames sent.}
+    \label{fig:stream_mode}
+\end{figure}
+
+Three properties took measurement rather than reasoning to establish.
+First, \textbf{the Zadoff--Chu resync is not what holds the stream
+together}: with resync disabled entirely a 24\,s stream decodes at the
+same packet-error rate, because the per-symbol frequency search and the
+pilot channel estimate already do all the tracking.  The resync earns
+its place on sample-clock offset --- a 32-sample cyclic prefix slips in
+$\approx$133\,s at 20\,ppm --- and as a re-entry point for a receiver
+that missed the opening preamble.  Second, \textbf{failures do not
+cascade}: block offsets are deterministic, so a block that fails its
+CRC costs exactly that block, and its raw LLRs are retained for chase
+combining on the retransmission.  Third, \textbf{the cost grows with
+burst length}: a 5-block EXTREME burst measured $\approx$0.35\,dB for
+only $1.21\times$, which is why streaming is recommended at NORMAL
+rungs and not at the modes where decibels are most expensive.
+
+One invariant is easy to violate: the clip-and-filter threshold is a
+\emph{whole-waveform} RMS, so a burst is not the concatenation of
+separately built frames.  A one-block burst with no resync is
+bit-identical to an ordinary frame, and both the float and fixed-point
+test suites assert exactly that.
+
 \subsection{Transmit Chain}
 
 Figure~\ref{fig:tx_chain} shows the transmit chain

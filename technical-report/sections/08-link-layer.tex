@@ -105,6 +105,90 @@ priority-stream LC flag selects one of two reassembly buffers --- so
 an urgent message injected mid-transfer arrives $\sim$23\,s before the
 bulk completes instead of after it.
 
+\subsection{Burst Windows and Streaming}
+\label{sec:burstwin}
+
+Bulk transfers use selective repeat: a window of fragments goes out
+back-to-back, answered by one bitmap acknowledgment
+(NACK-by-omission).  Where the PHY offers streaming
+(Section~\ref{sec:stream}), the whole window is sent behind a
+\emph{single} preamble and header rather than one preamble per
+fragment.  The packets are byte-identical to per-frame burst fragments
+--- one spare bit in the sub-header's index byte marks a fragment as
+streamed --- so a receiver without streaming support still decodes the
+first block of every burst as an ordinary fragment.  That property is
+what makes the fallback safe rather than fatal.
+
+The window is chosen once, at engage, as
+$\min(\text{operator ceiling}, \text{buffer cap},
+\text{fragment count})$, then clipped by an air-time cap so that a
+single transmission can never outlast a plausible fade --- everything
+in a streamed window is exposed before any of it is acknowledged.
+Sizing the window to the transfer is what makes a short transfer cost
+exactly one acknowledgment, which is the deferred-NAK arrangement of
+LTP and CFDP arrived at through a constant rather than new wire
+format.  Measured on a 14\,kB file over the virtual channel: window 4
+takes 14 transmissions, window 8 takes 9, window 16 takes 6.
+
+Resizing the window \emph{during} a transfer was implemented and then
+reverted on the evidence.  Halving it on each streamed-window timeout,
+rather than striking out of streaming, collapsed the window
+$16\to8\to4\to2\to1$ with no path back --- it grows only on a fully
+acknowledged window, which never happens inside a fade --- and produced
+196 transmissions with 72 timeouts against 134 and 9 for the
+strike-out path.  On a clean channel the two were indistinguishable.
+When a fade is what breaks a burst, the correct response is to stop
+streaming, not to stream less.
+
+Three conditions end streaming for a transfer, and they are not the
+same kind of statement.  A bitmap that acknowledges at most one
+fragment of a window of three or more is the signature of a peer
+decoding only the first block: that is a statement about the
+\emph{peer}, and it is remembered across transfers, because a receiver
+unable to follow a stream will not learn to between them.  Repeated
+timeouts and a transmitter-side build refusal describe the
+\emph{channel} and the local buffers respectively, and deliberately do
+not stick --- a fading channel raises timeouts against a peer that
+streams perfectly well, and making that sticky would disable streaming
+for the session on a capable link.  The peer verdict is not permanent
+either, since a deep fade can forge the one-fragment signature:
+streaming is probed again after eight transfers, which bounds a wrong
+verdict to one wasted window per retry period while a genuinely
+incapable peer costs two windows per period instead of two per
+transfer.
+
+\subsection{The Reply Timer}
+\label{sec:rto}
+
+A station that has transmitted and expects an answer must decide how
+long to wait.  The budget splits along what is knowable.  The reply's
+\emph{air time} is computable exactly from the rung and the expected
+reply length, and it swings by a factor of forty across the ladder, so
+smoothing it would be meaningless.  Everything else --- the peer's
+turnaround, its decode time, its wait for the channel to clear, its
+scheduling, and the error in our guess of which rung it will answer at
+--- is latency that can only be measured.
+
+The air term is therefore computed and the overhead is estimated in
+the manner of RFC~6298: a smoothed mean and variance
+($\alpha = 1/8$, $\beta = 1/4$) with the budget set at
+$\text{srtt} + 4\,\text{rttvar}$.  Karn's rule keeps ambiguous
+exchanges out of the estimator --- a reply that follows a
+retransmission cannot be attributed to a particular transmission ---
+and a timeout doubles the timer until a clean exchange clears the
+backoff.  Against a peer that consistently takes 0.40\,s, the
+2.30\,s bootstrap guess converges to 0.40\,s.
+
+This replaces a fixed margin that had already caused a
+misdiagnosis. When the host could not sustain the demonstration
+harness's 25$\times$ time compression, the two stations' sample-derived
+clocks drifted apart --- the mostly-transmitting station stayed
+current while the one decoding three receivers fell behind --- and the
+transmitter timed out before the receiver had finished the burst in
+its own timeline.  Every timeout landed on one station and none on the
+other, with the reply arriving immediately after each: a signature
+that reads exactly like a protocol failure and is not one.
+
 \subsection{Simplex Channel Access}
 
 Both stations share one frequency and are deaf while transmitting.

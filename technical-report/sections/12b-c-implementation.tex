@@ -88,7 +88,7 @@ final architecture:
 \subsection{Protocol Extensions}
 \label{sec:cport_proto}
 
-Two extensions beyond the Python reference address the fixed
+Three extensions beyond the Python reference address the fixed
 per-frame overhead (preamble + header $\approx$0.64\,s in NORMAL mode)
 that dominates air time at the top rungs:
 
@@ -106,12 +106,65 @@ that dominates air time at the top rungs:
           single preamble.  Burst fragment size scales with the
           engage-time rung (200\,B at rung $\ge$10, 100\,B at $\ge$7,
           else 25\,B).
+    \item \textbf{Streamed burst windows.}  A whole selective-repeat
+          window is transmitted behind one preamble and header
+          (Sections~\ref{sec:stream} and~\ref{sec:burstwin}) instead
+          of one preamble per fragment.  \texttt{tx\_build\_burst}
+          waveforms are bit-exact against the fixed-point model, and
+          both receivers can follow a burst: the frame-at-once path
+          re-runs the recording through \texttt{rxd\_receive\_burst}
+          and re-locks on each Zadoff--Chu block, while the streaming
+          receiver steps to the next block at its deterministic offset
+          via \texttt{rxs\_continue\_burst}.
 \end{itemize}
+
+A streamed burst carries only full-size fragments; the short tail of a
+transfer always travels as its own frame, because the receiver derives
+the message length from that final fragment's own length.  The
+acknowledgment request rides on the burst's \emph{first} block as well
+as its last, so a peer that cannot follow the stream still answers and
+the sender learns by bitmap rather than by waiting out a timeout.
+
+That receive-side continuation is also where the sharpest bug of this
+work appeared.  While the streaming receiver is stepping through
+blocks it is not running the preamble detector, so a continuation that
+does not know where to stop makes the receiver deaf for one block-time
+per phantom block.  An early version re-armed its block counter on
+every successful block and therefore never learned that a burst had
+ended: it chased up to seven blocks that were never sent,
+$\approx$12\,s of deafness landing squarely on the peer's next burst,
+which timed out and retried indefinitely.  The transmitter marks the
+last block of a burst with the acknowledgment request, which is the
+stop signal --- qualified as ``set \emph{and} not the first block of
+this stream'', since the first carries it too.
 
 Measured on the virtual channel: a 250-byte transfer completes in
 3 frames instead of $\approx$20 for stop-and-wait, and a 5\,000-byte
 file drops from 211 transmitted frames (legacy) to 45, holding the top
-QAM16 rung throughout.  Supporting endpoints added alongside: a
+QAM16 rung throughout.  Streaming the window compounds this: a
+250-byte transfer at 25-byte fragments takes 4 transmissions streamed
+against 13 after falling back to per-frame bursts, and a 14\,kB file
+over a $+20$\,dB channel takes 76 transmissions streamed against 187
+per-frame.
+
+A fourth extension sits above the protocol rather than inside it.
+Nothing in the chain compressed, while every comparable HF system does
+--- Winlink's B2F, VARA, and PACTOR all compress before transmitting.
+Files are now DEFLATEd whole and the compressed stream is what gets
+split into parts; compressing each part separately would discard most
+of the ratio, since the dictionary never warms up.  A distinct envelope
+magic marks the compressed form, so a peer that predates it sees an
+unknown message rather than misparsing a structurally valid one, and
+the transmitter falls back to sending raw whenever compression fails to
+shrink the payload.  Compression lives at the application layer
+precisely so the C port stays dependency-free: an embedded build
+substitutes miniz or heatshrink, with plain DEFLATE on the wire either
+way.  Measured on a 14\,kB configuration file: 14\,162 bytes to
+5\,015 on air, $2.82\times$.  The honest qualification is that
+transmissions fell only $1.4\times$ and wall-clock delivery
+$1.6\times$, because acknowledgments and the rate-ladder bootstrap do
+not compress --- the ratio applies to the part of an exchange that is
+payload, not to the exchange.  Supporting endpoints added alongside: a
 diagnostic event stream (every TX/RX, timeout, rung change annotated
 with the controller inputs that caused it, burst state transitions)
 plus a controller-decision snapshot --- which immediately located a
