@@ -229,3 +229,116 @@ recovery.
              overhead and turnarounds.}
     \label{fig:link_adaptation}
 \end{figure}
+
+\subsection{Broadcast: Delivery Without Acknowledgment}
+\label{sec:broadcast}
+
+Speech and telemetry cannot wait for a retransmission, so they need a
+mode in which nothing is repeated and the receiver's only contribution
+is a report that it was heard.  The transport for this already exists:
+a broadcast is a streamed burst (Section~\ref{sec:stream}) with the
+acknowledgment machinery subtracted --- no acknowledgment request, no
+window, no selective repeat, no reply timer.  What has to be added is
+the one thing a burst does not need.  A burst has exactly one listener,
+who was already there; a broadcast must let a receiver that tunes in
+mid-transmission join.  Every group therefore re-sends the preamble and
+opens with a \textsc{sync} frame carrying the stream descriptor, so a
+late listener acquires at the next group boundary rather than waiting
+for the broadcast to end.
+
+Framing is two bytes per frame: a \textsc{sync} bit, an \textsc{eos}
+bit, a six-bit sequence number used \emph{only} for loss statistics, and
+the count of valid payload bytes in that frame.  The obvious model to
+copy would be RTP, and copying it would be a mistake: its twelve-byte
+fixed header is 91\,ms of air time at the top rung, so a
+20\,ms-packetised stream would carry 1.75 bytes of payload behind
+12 bytes of header.  What survives the transplant is what a receiver
+cannot work out for itself --- sequence, stream boundaries and payload
+type.  What does not is the timestamp (this link's delay is
+deterministic, so a frame's position in the stream \emph{is} its
+timestamp), the synchronisation source identifier, and the per-packet
+payload type, which rides the \textsc{sync} frame instead.
+
+Carrying the length in \emph{every} frame rather than only in the
+\textsc{eos} frame costs about 4\,\% at 26-byte frames and buys a
+property that only matters when nothing is retransmitted: every frame
+is self-delimiting, so losing the one frame that would have carried the
+length does not mis-size the payload.
+
+The rate ladder decides what can be carried at all.  Codec2 at
+700\,bit/s fits only rungs 11--12 (941 and 1\,059\,bit/s user rate,
+$+2.6$ and $+4.7$\,dB); Codec2 450 fits rungs 8--9; below rung 8 this
+mode carries telemetry only, down to EXTREME's 7.8\,bit/s.  That
+envelope is set by the waveform, not by the protocol above it.
+
+\begin{table}[H]
+    \centering
+    \caption{Broadcast delivery, 200-byte payload in groups of four
+             (\texttt{experiments/broadcast\_demo.py}, 20 trials per
+             point).  Nothing is retransmitted, so ``recovered'' is
+             payload bytes reassembled against bytes sent.}
+    \label{tab:broadcast}
+    \begin{tabular}{lccc}
+        \toprule
+        & all recovered & $\ge$90\,\% & breaks down \\
+        \midrule
+        speech, rung 12 (16-QAM 3/4)  & $+9.5$\,dB & $+5.0$\,dB & $+2$\,dB \\
+        telemetry, rung 7 (QPSK 1/2)  & $+1.5$\,dB & $-3.0$\,dB & $-6$\,dB \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/broadcast_demo.png}
+    \caption{Non-ARQ delivery against SNR.  Frames delivered runs above
+             payload recovered at the low end because a frame lost from
+             the middle of a group costs its own bytes while still
+             being counted in the span.}
+    \label{fig:broadcast}
+\end{figure}
+
+Telemetry reaches 90\,\% delivery at $\approx-3.1$\,dB against rung 7's
+$-5.3$\,dB acknowledged-mode sensitivity.  That $\approx$2\,dB is the
+honest price of non-ARQ: a frame that fails is simply gone, and a group
+whose preamble is missed takes four frames with it.  A receiver that
+tuned in half-way through the first group of seven recovered 90\,\% of
+the remainder --- it cannot, of course, recover what it never heard.
+
+Two findings from building this generalise beyond broadcast.
+
+The first concerns the detector.  \texttt{detect\_preamble} takes a
+\emph{global} argmax over whatever slice it is handed, so a slice
+containing several groups makes it lock the strongest preamble rather
+than the first, and every group before that one is silently lost --- 300
+samples of lead-in were enough to skip a whole group.  The slice must
+therefore be bounded on \emph{both} sides so that it holds exactly one
+preamble.  Starting the slice on a preamble is not sufficient; nor can
+the far edge be found by searching forward for the next preamble, since
+from inside a group the detector false-locks on data.  The bound is
+geometry --- preamble plus header plus blocks --- and because the first
+decode necessarily runs before that geometry is known, the receiver
+learns the extent from it and then restarts the walk with the bound in
+place.  Anything that scans a recording containing multiple frames has
+the same exposure.
+
+The second concerns LLR calibration (Section~\ref{sec:llr}), which
+matters more here than under ARQ for a simple reason: a frame the
+decoder cannot recover is not retried, it is lost.  Enabling the
+measured reliability map moved telemetry from 30.6\,\% to 69.8\,\% of
+payload recovered at $-4.5$\,dB and from 3.4\,\% to 12.0\,\% at
+$-6$\,dB, while changing nothing above $-3$\,dB where delivery is
+already near perfect.  It is therefore on by default in this mode.  The
+map is gated to $\mu \le 2$ because it was trained on BPSK/QPSK
+statistics, and the speech column of the sweep came back
+\emph{bit-identical} with the map enabled --- an incidental but clean
+confirmation that the gate does what it claims.
+
+What broadcast gives up is the feedback path.  The rate-adaptation
+mechanisms of Section~\ref{sec:link} all depend on the peer replying,
+and here it does not.  Either the sender schedules periodic listening
+gaps in which receivers return the statistics above, at the cost of the
+continuous transmission that makes broadcast cheap, or it does not
+adapt at all: announce a rung in the descriptor and hold it.
+STANAG~5066's non-ARQ delivery mode takes the second course, and it is
+the right default --- a broadcast has no single listener to adapt to.

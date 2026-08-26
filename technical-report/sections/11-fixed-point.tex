@@ -195,6 +195,160 @@ exactly as the float system does, and the monitor blind-decodes 37 of
 the air, requests up to rung~11) and the monitor decodes 26 of 40
 (Appendix~\ref{app:fixeddemo}).
 
+\subsection{Coarse-CFO Ambiguity and the Two-Lag Unwrap}
+\label{sec:cfo_unwrap}
+
+The integer detector carried a defect that cost $\approx$8\,\% of
+\emph{all} acquisitions and stayed hidden for a long time because
+acknowledged mode simply retransmits what it loses.  Broadcast
+(Section~\ref{sec:broadcast}) has no retransmission, so it surfaced
+there as whole groups vanishing, and the diagnosis is worth recording
+in full because the symptom pointed three layers away from the cause.
+
+The observable was a timing outlier: the fixed receiver is
+sample-accurate on 22 of 24 noisy trials, and on the other two it locks
+$+33$ or $+34$ samples late.  Thirty-three is one more than the
+32-sample cyclic prefix, so those frames die of inter-symbol
+interference --- and the rate was flat against SNR, which is the
+signature of a discrete decision going wrong rather than of noise.
+
+The chain of causation runs backwards from there:
+
+\begin{enumerate}
+    \item The coarse mask-shift search is a near-\emph{tie} between
+          adjacent frequency bins.  Measured on a failing trial, the
+          correct shift scored $36.7\times10^6$ and its neighbour
+          $38.0\times10^6$ --- 4\,\% apart, so noise picks the wrong
+          bin often enough to matter.  On its own this is harmless: the
+          residual estimator exists to absorb exactly this.
+    \item It cannot.  The residual is the lag-$N$ phase of the tone
+          field, which wraps beyond $\pm f_s/2N = \pm 46.9$\,Hz --- and
+          that is precisely \emph{one coarse bin}.  With a one-bin
+          coarse error the residual must supply $+49.9$\,Hz, so it wraps
+          to $-43.8$\,Hz and the total lands $93.75$\,Hz
+          ($=f_s/N$, one subcarrier) away.
+    \item A frequency error \emph{cyclically shifts} a Zadoff--Chu
+          correlation in time.  The 93.75\,Hz error moves the ZC peak by
+          $\approx$34 samples, and the fine stage duly reports it: the
+          ZC stage was faithfully answering for the frequency it had
+          been handed.
+\end{enumerate}
+
+So the defect is a \textbf{phase-unwrap failure}, not aliasing and not
+peak selection.  The float chain never had it because it resolves the
+residual with a full-block FFT peak (unambiguous over $\pm1.5$ bins)
+before refining with the lag-$N$ phase; the integer model had only the
+lag-$N$ step.
+
+The fix restores the missing disambiguation at integer cost: take the
+phase at lag $N/2$ as well, which is unambiguous over $\pm f_s/N$ ---
+wide enough to cover a one-bin coarse error --- and use it to choose
+which lag-$N$ cycle is the correct one,
+\[
+    \hat{\omega} = \omega_N + \operatorname{round}\!\left(
+        \frac{\omega_{N/2} - \omega_N}{f_s/N}\right)\cdot \frac{f_s}{N} .
+\]
+One extra correlation, no FFT, no new tables.  Applied identically to
+\texttt{ofdm\_phy/fixed/rx.py} and \texttt{cport/src/rx\_detect.c}.
+
+\begin{table}[H]
+    \centering
+    \caption{Effect of the two-lag unwrap on the integer detector.}
+    \label{tab:unwrap}
+    \begin{tabular}{lcc}
+        \toprule
+        & before & after \\
+        \midrule
+        CFO on the two failing trials (truth $+3.0$\,Hz)
+            & $-90.9$, $-87.0$\,Hz & $+3.8$, $+5.7$\,Hz \\
+        timing outliers, 24 trials $\times$ 3 SNRs
+            & 6 at $+33/+34$ & \textbf{none} \\
+        locks within $\pm16$ samples
+            & 21--23 of 24 & \textbf{24 of 24} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+The golden vectors were regenerated against the corrected model and the
+C detector re-verified: that \texttt{test\_rx} still passes is the
+meaningful check, since it asserts the two implementations agree
+bit-exactly with the new unwrap rather than merely that both work.
+
+End to end, the fix closes a gap that had looked like a sensitivity
+difference.  Broadcast delivery (Section~\ref{sec:broadcast}, 200-byte
+payload, 12 trials per point) ran 15--20 percentage points behind the
+float chain before it, because one lost acquisition costs a whole group
+of four frames; afterwards the integer chain matches float everywhere
+and is \emph{ahead} at the two lowest points --- the same compressive
+6-bit quantization advantage reported above, no longer masked by lost
+acquisitions.
+
+\begin{table}[H]
+    \centering
+    \caption{Broadcast payload recovered, before and after the unwrap
+             fix.}
+    \label{tab:unwrap_delivery}
+    \begin{tabular}{lccc}
+        \toprule
+        SNR & float & fixed (before) & fixed (after) \\
+        \midrule
+        $-4.5$\,dB & 76.2\,\% & 60.2\,\% & \textbf{87.1\,\%} \\
+        $-3.0$\,dB & 98.0\,\% & 78.8\,\% & \textbf{100\,\%} \\
+        $-1.5$\,dB & 100\,\%  & 86.1\,\% & \textbf{100\,\%} \\
+        $0.0$\,dB  & 100\,\%  & 90.1\,\% & \textbf{100\,\%} \\
+        $+3.0$\,dB & 100\,\%  & 100\,\%  & 100\,\% \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Where the Fixed Model Differs from the Float Chain}
+\label{sec:fixed_vs_float}
+
+The integer model is not a transliteration; several places diverge
+deliberately, and a caller that mixes the two must know which.
+
+\begin{table}[H]
+    \centering
+    \caption{Deliberate float/fixed divergences.}
+    \label{tab:fixed_vs_float}
+    \begin{tabular}{p{0.24\textwidth}p{0.33\textwidth}p{0.33\textwidth}}
+        \toprule
+        & float & fixed \\
+        \midrule
+        Detection FFT (NORMAL) & 128 bins &
+            256 bins, so the coarse grid is fine enough for an
+            unambiguous lag-$N$ residual \\
+        Residual CFO & full-block FFT peak, refined by lag-$N$ phase &
+            lag-$N/2$ phase selects the lag-$N$ cycle
+            (Section~\ref{sec:cfo_unwrap}) \\
+        CFO representation & Hz throughout &
+            32-bit phase-increment word everywhere; Hz only at the
+            boundaries \\
+        Analytic signal & \texttt{scipy.signal.hilbert}, zero delay &
+            63-tap FIR with a \textbf{31-sample group delay} --- detector
+            positions are in analytic index space, not sample space \\
+        LLR quantization & float LLRs, $\pm20$ clip &
+            6-bit peak-normalized for $\mu\le2$; 8-bit for $\mu=4$,
+            whose wider dynamic range the 6-bit path compressed \\
+        LLR recalibration & measured monotone map &
+            32-entry reliability ROM trained on the fixed chain itself \\
+        SNR estimate & decision-directed $E_s/N_0$ &
+            gain-weighted symbol rows, $-7.2$\,dB measured constant;
+            reads low outside the regime it was calibrated in \\
+        FFT scaling & unscaled &
+            $1/N$ carried as a per-stage $\gg 1$, with BFP exponents
+            tracked through every energy and LLR comparison \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+The group delay is the one that bites hardest in new code.  Inside
+\texttt{FixedReceiver.receive()} it cancels --- detection and
+demodulation index the same analytic arrays --- but any caller that
+detects in one space and then slices, bounds or advances in sample
+space accumulates 31 samples per step.  It is the first thing to check
+when an integer-chain walk drifts.
+
 \subsection{Debug Lore}
 
 Three integer-domain bugs cost real time and are recorded so an RTL
