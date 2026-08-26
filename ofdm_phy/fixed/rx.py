@@ -37,6 +37,12 @@ Q15_MAX = (1 << Q15) - 1
 
 FIXED_DETECT_FFT = {LinkMode.NORMAL: 256, LinkMode.ROBUST: 512, LinkMode.EXTREME: 512}
 
+# Diagnostic switch, not a tuning knob: set False to restore the
+# pre-fix single-lag residual (see _detect_newman). Kept so the cost of
+# the coarse-CFO wrap can be re-measured against the fix rather than
+# taken on trust.
+RESIDUAL_UNWRAP = True
+
 
 def _div_round(a: int, b: int) -> int:
     """Signed round-to-nearest integer division."""
@@ -232,10 +238,11 @@ class FixedReceiver:
             return _div_round(ang, lag)
 
         residual_word = _lag_word(N)
-        coarse_res = _lag_word(N // 2)
-        ambig = PHASE_ONE // N               # one lag-N cycle, = fs/N Hz
-        k = _div_round(coarse_res - residual_word, ambig)
-        residual_word += k * ambig
+        if RESIDUAL_UNWRAP:
+            coarse_res = _lag_word(N // 2)
+            ambig = PHASE_ONE // N           # one lag-N cycle, = fs/N Hz
+            k = _div_round(coarse_res - residual_word, ambig)
+            residual_word += k * ambig
 
         return sample_index, coarse_word + residual_word
 
