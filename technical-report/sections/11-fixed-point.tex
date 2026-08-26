@@ -283,6 +283,44 @@ and is \emph{ahead} at the two lowest points --- the same compressive
 6-bit quantization advantage reported above, no longer masked by lost
 acquisitions.
 
+Two coincidences make this defect what it is, and both are visible in
+Figure~\ref{fig:cfo_unwrap}.  The first is numerical: the coarse bin
+spacing is $f_s/B = 46.875$\,Hz and the lag-$N$ wrap boundary is
+$f_s/2N = 46.875$\,Hz --- \emph{the same number}, because $B = 2N$.  A
+one-bin slip therefore demands a residual sitting exactly on the wrap,
+where the phase is at $\pm\pi$ and the decision is a coin toss.  That is
+why the failures cluster at multiples of the bin spacing and vanish in
+between: 20--25\,\% of locks ruined at 0 and 46.9\,Hz, none at all
+between 10 and 40\,Hz.
+
+The second coincidence is operational, and it is the one that matters.
+CFO $\approx 0$ is not an arbitrary point on that axis --- it is where
+the AFC netting loop of Section~\ref{sec:afc} drives a linked pair.  The
+worst-affected operating point was the one the system actively steers
+toward, so a \emph{well-netted} link paid the highest price.  In
+acknowledged mode that price is invisible in the delivery statistics and
+shows up only as extra transmissions: at zero offset, $1.25$ per
+delivered frame before the fix against $1.00$ after, or 25\,\% of the
+link's transmissions spent re-sending frames the detector had mistimed.
+
+The left panel measures the cause and the right the effect, and at zero
+offset they are exact complements --- 20\,\% of locks off by more than
+half a cyclic prefix, 20\,\% of frames lost --- so every mistimed lock
+cost precisely one frame.  Note also what an A/B at a single frequency
+would have concluded: at 20\,Hz the two curves are identical, and the
+first throughput measurement taken for this section, which happened to
+use that offset, reported no improvement whatsoever.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/cfo_unwrap.png}
+    \caption{The coarse-CFO unwrap swept across one bin
+             (\texttt{experiments/cfo\_unwrap.py}, QPSK 1/2 at
+             $-3.5$\,dB, 40 frames per point).  Dotted lines mark the
+             coarse bin centres.}
+    \label{fig:cfo_unwrap}
+\end{figure}
+
 \begin{table}[H]
     \centering
     \caption{Broadcast payload recovered, before and after the unwrap
