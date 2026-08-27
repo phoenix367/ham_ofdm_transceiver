@@ -1,4 +1,7 @@
 #include <string.h>
+#ifdef RXS_TRACE
+#include <stdio.h>
+#endif
 
 #include "rx_stream.h"
 #include "rx_internal.h"
@@ -565,6 +568,14 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                  * calls rxs_continue_burst() before pushing more samples,
                  * and the next block is decoded from here without
                  * re-detecting a preamble */
+#ifdef RXS_TRACE
+                fprintf(stderr, "[rxs] block done: blk_idx %d base %lld "
+                        "end %lld rc %d type %d  lag %lld hwm %lld/%d%s\n",
+                        r->blk_idx, (long long)r->data_base, (long long)end,
+                        rc, ev->type, (long long)(r->abs_n - r->data_base),
+                        (long long)r->ring_hwm, RXS_RAW_RING_LEN,
+                        r->ring_hwm > RXS_RAW_RING_LEN ? "  RING OVERRUN" : "");
+#endif
                 r->burst_resume_abs = end;
                 rearm(r, end);
                 return rc;
@@ -609,6 +620,13 @@ int rxs_continue_burst(rxs_t *r, int resync_every)
 
     if (r->burst_resume_abs <= 0)
         return 0;
+#ifdef RXS_TRACE
+    fprintf(stderr, "[rxs] continue: blk_idx %d -> %d  resume_abs %lld  "
+            "skip_zc %d  n_data %d symlen %d\n", r->blk_idx, r->blk_idx + 1,
+            (long long)r->burst_resume_abs,
+            (resync_every > 0 && (r->blk_idx + 1) % resync_every == 0),
+            r->n_data, r->demod.symbol_len);
+#endif
     base = r->burst_resume_abs;
     r->burst_resume_abs = 0;
     r->blk_idx++;
