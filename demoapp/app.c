@@ -654,11 +654,18 @@ static void show_help(void)
  * refit is worth nothing even with oracle knowledge of the answer
  * (experiments/burst_alpha_ab.py).
  *
- * The cap stays modest because a broadcast is non-ARQ: one preamble
- * covers more frames as it grows, but a missed acquisition costs the
- * whole group with nothing to repeat it. */
+ * 8 is the ceiling BC_MAX_GROUP imposes (bc_receive holds a whole group
+ * in a static buffer), and the compile-time assertion below keeps the
+ * two from drifting apart. It is not a performance ceiling: 16 was
+ * measured to deliver a 14162-byte file complete once the two bugs
+ * above were fixed.
+ *
+ * The trade-off the size sets is a non-ARQ one. A larger group amortises
+ * the preamble over more frames, but nothing is retransmitted, so a
+ * missed acquisition costs the whole group rather than one frame --
+ * bigger groups are cheaper per frame and more expensive per failure. */
 #ifndef BC_GROUP_CAP
-#define BC_GROUP_CAP 4
+#define BC_GROUP_CAP 8
 #endif
 /* The group size travels on the wire (log2 in the SYNC descriptor), so a
  * receiver using bc_receive() must be able to hold a whole group -- that
