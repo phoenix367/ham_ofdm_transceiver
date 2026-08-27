@@ -23,6 +23,11 @@ Framing is two bytes per frame:
             bits 5-0      sequence, mod 64 -- for loss statistics only,
                           never for retransmission
     byte 1         valid payload bytes in THIS frame
+    byte 2         SYNC frames only: log2(group) << 4 | payload type.
+                   The group size has to be on the wire -- a receiver
+                   that assumes it decodes the first frame of every group
+                   and nothing else, which is exactly what happened when
+                   the demo app's two ends disagreed.
 
 The per-frame length costs ~4% at 26-byte frames and buys a property
 that matters when nothing is retransmitted: every frame is
@@ -98,6 +103,7 @@ class BroadcastStats:
     bytes_out: int = 0
     snr_sum: float = 0.0
     ptype: int = -1
+    group: int = 0        # frames per group, read from the descriptor
     saw_eos: bool = False
 
     @property
@@ -227,6 +233,13 @@ class BroadcastTx:
         self.group = group
         self.frame_bytes = frame_bytes
 
+    def _group_code(self) -> int:
+        g, c = self.group, 0
+        while g > 1:
+            g >>= 1
+            c += 1
+        return c & 0x0F
+
     def _cap(self, sync: bool) -> int:
         return self.frame_bytes - 2 - (1 if sync else 0)
 
@@ -234,7 +247,7 @@ class BroadcastTx:
               ptype: int = None) -> Data:
         head = bytes([flags | (seq % SEQ_MOD), len(body)])
         if ptype is not None:
-            head += bytes([ptype])
+            head += bytes([(self._group_code() << 4) | (ptype & 0x0F)])
         pad = self.frame_bytes - len(head) - len(body)
         assert pad >= 0, "frame overflow"
         return Data(reserved=0, payload=head + body + bytes(pad))
@@ -421,7 +434,8 @@ class BroadcastRx:
                 head = 2
                 if flags & SYNC:
                     if len(body) > 2:
-                        st.ptype = body[2]
+                        st.ptype = body[2] & 0x0F
+                        st.group = 1 << (body[2] >> 4)
                     head = 3
                 if flags & EOS:
                     st.saw_eos = True

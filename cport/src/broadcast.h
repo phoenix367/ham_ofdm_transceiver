@@ -58,6 +58,7 @@ typedef struct {
     int frames_lost;  /* inferred from sequence gaps */
     int bytes_out;
     int ptype;        /* payload type from the SYNC descriptor, -1 unknown */
+    int group;        /* frames per group, read from the same descriptor */
     int saw_eos;
     double snr_sum;   /* over decoded frames; divide by frames_ok */
 } bc_stats_t;

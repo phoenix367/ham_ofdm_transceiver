@@ -175,7 +175,11 @@ int bc_receive(link_mode_t mode, const int16_t *samples, int n, int group,
                     int pt = 0;
                     for (j = 0; j < 8; j++)
                         pt = (pt << 1) | (bits[20 + 8 * BC_HEAD + j] & 1);
-                    st->ptype = pt;
+                    /* log2(group) << 4 | payload type: the group size has
+                     * to be on the wire, or a receiver that guesses wrong
+                     * decodes the first frame of each group and no more */
+                    st->ptype = pt & 0x0F;
+                    st->group = 1 << (pt >> 4);
                 }
                 head = BC_HEAD + 1;
             }
