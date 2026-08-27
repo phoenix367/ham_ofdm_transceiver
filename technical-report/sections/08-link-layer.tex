@@ -74,6 +74,25 @@ rung the moment one frame gets through.
     \label{fig:adaptation}
 \end{figure}
 
+Figure~\ref{fig:rungseq} walks the same controller through one
+session.  The three paths differ in what they need in order to act:
+the peer's explicit request needs a round trip, the peer's SNR report
+of \emph{our} signal clamps the cap as soon as any frame arrives, and
+the loss fallback needs no feedback at all --- which is the only path
+still available once the peer has gone silent.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.80\textwidth]{images/rung_seq.png}
+    \caption{Rung selection across modes: bootstrap at rung~0
+             (EXTREME), the jump to the SNR-indicated rung after a
+             single decoded exchange, a fade clamped by the peer's
+             report, and the loss fallback when no feedback arrives at
+             all.  Silence is not neutral --- it decays the request by
+             one rung per 90\,s and purges the SNR history.}
+    \label{fig:rungseq}
+\end{figure}
+
 On the transmit side, the rung is the minimum of the peer's request
 and a cap derived from the peer's SNR report of our own signal,
 adjusted by \emph{learned per-rung offsets} ($+0.7$\,dB on loss,
@@ -297,6 +316,101 @@ envelope is set by the waveform, not by the protocol above it.
              being counted in the span.}
     \label{fig:broadcast}
 \end{figure}
+
+\subsubsection{What a Broadcast Exchange Actually Looks Like}
+\label{sec:broadcast_seq}
+
+Figure~\ref{fig:bcseq} traces a 14162-byte file broadcast over the
+virtual channel.  Three properties of the sequence are worth drawing
+out, because each was established by a failure rather than by design.
+
+\emph{The rung is fixed at engage.}  A broadcast cannot renegotiate,
+so it runs at whatever the link last established --- and the link must
+be established first: below rung~4 a broadcast cannot be carried at
+all, so the sender probes with a control frame and waits rather than
+refusing outright.
+
+\emph{The listener stays silent.}  On a simplex channel, transmitting
+is precisely what stops a station hearing, and a broadcast is a train
+of transmissions with gaps of well under a second between turns.  Those
+gaps read as an idle channel to carrier sense, so a station holding a
+pending reply fires into one and is deaf as the next transmission's
+preamble goes past.  Losing a group's preamble costs the entire group:
+measured, a single 0.8\,s reply cost exactly 16 frames on a $+20$\,dB
+channel.  A station that is hearing a broadcast therefore treats the
+channel as busy, which suppresses the transmission \emph{and} stops
+the link layer scoring the resulting reply timeouts as losses.
+
+\emph{\textsc{eos} ends the walk, not the group descriptor.}  The final
+group of a broadcast is normally short, but the descriptor can only
+advertise the nominal size --- it carries $\log_2$ of the group.  A
+receiver that trusts the descriptor walks blocks that were never
+transmitted, and while stepping through blocks it is not running the
+preamble detector: 15 phantom CRC failures, each costing a block-time
+of deafness.  The \textsc{eos} bit is the stop signal, with a
+consecutive-failure bound for the case where the \textsc{eos} frame is
+itself lost.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images/broadcast_seq.png}
+    \caption{A file broadcast: link probe, then transmissions carrying
+             one preamble per group, with no acknowledgment of any kind
+             in return.  The listener's silence is a protocol
+             requirement, not an omission.}
+    \label{fig:bcseq}
+\end{figure}
+
+\subsubsection{A Reception Report: Measured and Rejected}
+
+The gap this leaves is real.  A 14162-byte broadcast ran its entire
+450\,s at rung~8 while the listener was decoding it at $+7.7$\,dB ---
+enough for rung~12, which would have cut each turn from 28.1\,s to
+5.1\,s.  Worse, broadcast frames deliberately never reach the ARQ
+path, so during a broadcast \emph{neither} station's controller sees
+traffic and the staleness decay walks both ladders down: after 454\,s
+of broadcasting, the next file transfer opened at rung~4 and spent
+37.0\,s on a frame that rung~12 delivers in 5.1\,s.
+
+A listener report was therefore implemented, in a quiet window left by
+the sender, and then removed.  Table~\ref{tab:bcreport} is why.
+
+\begin{table}[H]
+    \centering
+    \caption{Listener reception reports, 14162-byte broadcast,
+             597 frames sent, $+20$\,dB channel.  The mode repairs
+             nothing, so every lost frame is lost for good.}
+    \label{tab:bcreport}
+    \begin{tabular}{lccc}
+        \toprule
+        & frames lost & turns & rung \\
+        \midrule
+        no report (run 1)    & 0  & 15 & 8 fixed \\
+        no report (run 2)    & 4  & 15 & 8 fixed \\
+        report per group     & 32 & 10 & $8\rightarrow11$ \\
+        report per turn      & 28 & 16 & $8\rightarrow7$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Rate-limiting the report to one per turn removed the storm and bought
+nothing: the same turn count, 28 frames lost permanently, and the rung
+moved \emph{down}.  The feedback is self-defeating in a way tuning
+cannot fix --- the listener's own transmission causes losses, the
+losses make the controller conservative, and the broadcast gets slower.
+The root cause is that the listener infers ``the sender has paused''
+from quiet on its own clock, while it decodes \emph{behind} the sender
+(lag of seconds; 11.7\,s was measured on a 16-block group), so its
+reply lands inside the next transmission whatever threshold is chosen,
+and a window wide enough to absorb the lag costs more air than the rung
+climb saves.
+
+Doing this properly requires the \emph{sender} to signal an explicit
+report slot on the wire --- a flag on the last frame of each turn, so
+the listener answers a marker instead of inferred silence.  That is a
+frame-format change across the float, fixed and C twins and their
+golden vectors, and it is left as future work rather than approximated
+at the application layer.
 
 Telemetry reaches 90\,\% delivery at $\approx-3.1$\,dB against rung 7's
 $-5.3$\,dB acknowledged-mode sensitivity.  That $\approx$2\,dB is the

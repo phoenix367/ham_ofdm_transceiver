@@ -1,0 +1,21 @@
+sequenceDiagram
+    participant A as A (sender)
+    participant B as B (peer)
+    Note over A,B: bootstrap — both sides start at rung 0 (EXTREME),<br/>which works whenever anything works
+    A->>B: DATA rung 0 (EXTREME, 7.8 bit/s)
+    Note over B: measures SNR -3.5 dB of A's signal
+    B->>A: ACK  req_rung=7, snr_report=-3.5 dB
+    Note over A,B: path 1 — peer's explicit request (one round trip)<br/>rung = min(peer_req, cap from snr_report)
+    A->>B: DATA rung 7 (QPSK 1/2, 353 bit/s)
+    Note over A,B: one decoded exchange is enough to jump<br/>straight to the SNR-indicated rung
+    Note over B: fade — B now hears A at -9 dB
+    B->>A: ACK  req_rung=4, snr_report=-9.0 dB
+    Note over A,B: path 2 — peer's SNR report of OUR signal<br/>clamps the cap instantly, no round trip needed
+    A->>B: DATA rung 4 (BPSK 1/3, 118 bit/s)
+    Note over A,B: deep fade — B hears nothing at all
+    A-XB: DATA rung 4 (lost)
+    A-XB: DATA rung 4 (lost)
+    Note over A,B: path 3 — loss fallback, no feedback at all<br/>2 consecutive losses: rung -2, 4 losses: rung 0
+    A->>B: DATA rung 0 (EXTREME)
+    Note over A,B: learned offset: +0.7 dB charged to rung 4,<br/>-0.15 dB credited on each success
+    Note over A,B: silence also decays the request: one rung<br/>per STALE_S = 90 s, and the SNR history is purged<br/>so a stale pre-fade measurement cannot resurrect a high rung

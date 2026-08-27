@@ -1,0 +1,19 @@
+sequenceDiagram
+    participant A as A (broadcaster)
+    participant B as B (listener)
+    Note over A,B: broadcastfile — 14162 B, but the link sits at rung 0,<br/>which cannot carry a broadcast (BURST_MIN_RUNG = 4)
+    A->>B: LINK probe (QoS control)
+    B->>A: ACK  req_rung=8, snr_report
+    Note over A,B: rung is fixed at engage for the WHOLE broadcast —<br/>there is no acknowledgment to renegotiate with
+    Note over A,B: transmission 1 of 15 — 950 B, 28.1 s of air
+    A->>B: preamble + header + SYNC frame (descriptor: log2 group, payload type)
+    A->>B: frames 1..3 of the group (no preamble, deterministic offsets)
+    A->>B: preamble + header + SYNC (next group)
+    A->>B: frames 1..3 of the group
+    Note over B: a failed block does NOT end the group —<br/>offsets are deterministic, so step over it and continue
+    Note over B: B stays SILENT. Its own keying would make it deaf<br/>exactly as the next preamble passes — measured, one 0.8 s<br/>reply cost a whole group of 16 frames on a +20 dB channel
+    Note over A,B: ... 14 more transmissions, ~0.6 s apart ...
+    A->>B: final group, last frame carries EOS
+    Note over B: EOS ends the walk HERE, whatever the descriptor promised.<br/>The final group is short, but the descriptor can only<br/>advertise the nominal size — it carries log2 of the group
+    B--)A: nothing — non-ARQ, no ack, no repeat, no report
+    Note over B: 14162 B, 597 frames, 0 lost, +7.7 dB<br/>gaps, if any, are NOT repaired

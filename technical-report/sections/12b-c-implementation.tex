@@ -263,6 +263,41 @@ protocol's window bugs, the carrier-sense threshold and the rung-0
 fallback were all found by this infrastructure rather than by
 inspection.
 
+Figure~\ref{fig:sendfileseq} traces a file transfer through it.  Two
+decisions in that sequence are worth isolating.
+
+The file is deflated \emph{whole} before being split into parts, not
+per part: a 14162-byte configuration file becomes 5015 bytes on air
+($2.82\times$), and compressing each 3\,kB part separately would throw
+most of that away.  Compression lives in the application rather than in
+\texttt{cport/}, which keeps the C port dependency-free --- an MCU
+build swaps zlib for miniz or heatshrink and the wire format is plain
+\textsc{deflate} either way.
+
+The transfer also \emph{negotiates before it commits}.  The transmit
+rung decays by one step per 90\,s of peer silence
+(Section~\ref{sec:link}), so a transfer started after a quiet
+spell would otherwise open at a rung the link has never been tested at:
+measured, a 37.0\,s frame at rung~4 immediately before the next
+exchange settled at rung~12 and 5.1\,s.  A sub-second control frame is
+answered, and an answered frame is what moves the ladder, so the probe
+goes first and the bulk queue follows behind it.  The staleness test
+must ask whether the peer has \emph{ever} reported rather than
+subtracting from the initial timestamp --- the sentinel is
+$-10^{9}$, and doing the arithmetic anyway reported that the peer had
+last been heard from 1000000058\,seconds ago.  It is the same rule the
+link layer already follows for sequence numbers, where every value
+0--7 is legitimate and ``nothing yet'' must be its own state.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{images/sendfile_seq.png}
+    \caption{A file transfer: whole-file compression, a link probe
+             before the transfer is committed, then selective-repeat
+             windows carried one per transmission.}
+    \label{fig:sendfileseq}
+\end{figure}
+
 \subsection{From Simulation to a Radio}
 \label{sec:cport_sdr}
 

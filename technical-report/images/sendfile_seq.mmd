@@ -1,0 +1,22 @@
+sequenceDiagram
+    participant A as A (sender)
+    participant B as B (receiver)
+    Note over A: sendfile clearml.conf — 14162 B
+    Note over A,B: DEFLATE the file WHOLE, then split.<br/>14162 B → 5015 B on air (2.82x). Compressing each<br/>3 kB part separately would throw the ratio away
+    Note over A,B: peer not heard from recently — ctl_tx_rung decays<br/>one rung per 90 s, so committing now would open at a<br/>rung the link was never tested at (measured, 37.0 s<br/>at rung 4 where the next exchange settled at rung 12)
+    A->>B: LINK probe (QoS control, sub-second)
+    B->>A: ACK  req_rung, snr_report
+    Note over A: ladder refreshed — only NOW is the transfer committed
+    Note over A,B: part 1 of 2 — a selective-repeat window in ONE transmission
+    A->>B: preamble + header + frag 0 (ack_req set)
+    A->>B: frag 1, frag 2, ... (streamed, ZC resync every 4 blocks)
+    A->>B: frag N (ack_req set)
+    Note over A,B: ack_req rides the FIRST block as well as the last,<br/>so a peer that cannot follow the stream still replies<br/>and the sender falls back by bitmap, not by timeout
+    B->>A: ACK + bitmap of missing fragments
+    A->>B: retransmit only the missing fragments
+    B->>A: ACK — window complete
+    Note over A,B: part 2 of 2 — same window mechanics
+    A->>B: streamed window
+    B->>A: ACK + bitmap
+    Note over A,B: parts arrive in order (FIFO bulk queue),<br/>then inflate the whole DEFLATE stream once
+    Note over B: stored as rx_clearml.conf — 14162 B, 2 parts,<br/>5015 B on air = 2.82x compression
