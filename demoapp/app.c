@@ -54,6 +54,10 @@
 #define FILE_TAG "FILE:"
 #define FILE_PART_DATA 3000
 #define FILE_MAX_SRC (1 << 19) /* 512 KB source cap before compression */
+/* Peer silence past which a bulk transfer probes before committing. Below
+ * ctl_tx_rung()'s STALE_S (90 s), so the probe happens BEFORE the first
+ * rung of decay rather than after it. */
+#define BULK_PROBE_STALE_S 60.0
 
 #include "../cport/src/link.h"
 #include "../cport/src/station.h"
@@ -91,9 +95,80 @@ static int g_burst_left[3], g_burst_miss[3];
  * the global-argmax trouble the buffer-based walk has: it commits to a
  * preamble as samples arrive and never sees two at once. */
 static int g_bc_left[3];
+/* consecutive undecodable blocks that end a broadcast group: the EOS
+ * marker rides in a frame, so losing that frame would otherwise leave the
+ * receiver walking phantom blocks to the end of the advertised group */
+#ifndef BC_MAX_MISS
+#define BC_MAX_MISS 4
+#endif
+static int g_bc_miss[3];
 static int g_bc_group = 4;
+/* A broadcast payload goes STRAIGHT TO DISK. It used to accumulate in
+ * this RAM buffer and be written once at EOS, which silently truncated
+ * anything larger than the buffer: a 14162-byte file arrived as "8192
+ * bytes" with nothing in the summary hinting that 42% was missing.
+ * Streaming also means the open (and any failure) is reported when the
+ * broadcast STARTS, not minutes later when it ends.
+ *
+ * The buffer remains for the text/telemetry path, which is small by
+ * nature and is printed rather than stored -- it now says so when it
+ * fills. */
+/* A broadcast is a TRAIN of transmissions with short gaps between them
+ * (the sender yields to carrier sense between turns). Those gaps read as
+ * idle, so a station holding a pending reply fires into one -- and its
+ * own keying makes it deaf just as the next transmission's preamble goes
+ * by. Losing a group's preamble costs the WHOLE group with nothing to
+ * repeat it: measured, one 0.8 s reply cost exactly 16 frames on a
+ * +20 dB channel, which looked like channel errors and was not.
+ *
+ * So a station holds off while it is hearing a broadcast. The hold is
+ * expressed as "the channel is busy" rather than as a transmit veto, so
+ * the link layer does not count the resulting reply timeouts as losses
+ * (a timeout on a busy channel is deliberately not a loss) and the rate
+ * ladder is left alone. It spans longer than one group so that a lost
+ * group does not release it mid-broadcast, and EOS clears it at once. */
+#define BC_RX_HOLD_S 12.0
+static double g_bc_rx_last = -1e9;
+
+/* NOTE: there is deliberately no listener->sender reception report
+ * here. It was implemented and REVERTED after measurement.
+ *
+ * The idea is sound and the gap is real -- a broadcast at rung 8 while
+ * the listener decodes it at +7.7 dB wastes 5x the air. But on a simplex
+ * channel the listener has to transmit to report, and transmitting is
+ * exactly what stops it hearing. Measured against a baseline that
+ * delivered 14162/14162 bytes with 0 frames lost:
+ *
+ *   reports every group  24 reports/10 turns, 32 lost, rung 8->11
+ *   one report per turn  15 reports/16 turns, 28 lost, rung 8->7 (down)
+ *
+ * The second run is the damning one: rate limiting removed the storm and
+ * bought nothing -- same turn count, 28 frames lost for good, and the
+ * rung moved DOWN, because the listener's own deafness became losses and
+ * the losses made the controller conservative.
+ *
+ * The root cause is not tuning: the listener infers "the sender paused"
+ * from quiet on ITS clock, but it decodes BEHIND the sender (lag of
+ * seconds; 11.7 s was measured on a 16-block group). Its reply therefore
+ * lands inside the next transmission whatever threshold is chosen, and a
+ * window wide enough to absorb the lag costs more air than the rung
+ * climb saves.
+ *
+ * Doing this properly means the SENDER signalling an explicit report
+ * slot on the wire -- a flag on the last frame of each turn, so the
+ * listener answers a marker instead of inferred silence. That is a frame
+ * format change across the Python/C/demoapp twins and the golden
+ * vectors, not an app-layer heuristic. Until then a broadcast runs at
+ * whatever rung the link last established. */
+
+#define BC_RX_PATH "rx_broadcast.bin"
+static FILE *g_bc_file;
+static long g_bc_written;
+static int g_bc_trunc;
 static uint8_t g_bc_asm[8192];
 static int g_bc_len, g_bc_frames, g_bc_lost, g_bc_last_seq = -1;
+static int g_bc_ptype = -1;   /* descriptor from the SYNC frame */
+static int g_bc_rx_group = 4; /* group size, read off the wire */
 static int16_t g_bc_air[600000];
 static int g_bc_pending;   /* samples queued for transmission */
 static int g_bc_sent;
@@ -173,6 +248,27 @@ static const char *tstamp(void)
     snprintf(buf, sizeof(buf), "%02d:%02d:%02d", tm.tm_hour, tm.tm_min,
              tm.tm_sec);
     return buf;
+}
+
+/* Open the broadcast sink once the descriptor says the payload is
+ * opaque. Anything already buffered (frames that arrived before the
+ * SYNC) is flushed into it first. */
+static void bc_sink_open(void)
+{
+    if (g_bc_file || g_bc_ptype != BC_PT_OPAQUE)
+        return;
+    g_bc_file = fopen(BC_RX_PATH, "wb");
+    if (!g_bc_file) {
+        printf("\n%s [%s] broadcast: cannot open %s for writing: %s\n> ",
+               tstamp(), g_name, BC_RX_PATH, strerror(errno));
+        fflush(stdout);
+        return;
+    }
+    if (g_bc_len > 0) {
+        fwrite(g_bc_asm, 1, (size_t)g_bc_len, g_bc_file);
+        g_bc_written += g_bc_len;
+        g_bc_len = 0;
+    }
 }
 
 static double g_noise_floor = 1e9; /* min-tracking RMS^2 EWMA */
@@ -486,76 +582,311 @@ static void handle_delivered(int before)
 
 /* Queue a broadcast: one preamble+header per group of BC frames, framing
  * as ofdm_phy/broadcast.py (SYNC|EOS|seq, then this frame's length). */
-static void cmd_broadcast(const char *text, int rung);
-
-static void cmd_broadcast(const char *text, int rung)
+/* The grouping is the point: everything under "delivered" is tracked by
+ * the ARQ layer and retransmitted until acknowledged, while broadcast
+ * repeats nothing at all. `stream` is easy to misread as the second kind
+ * -- it is not, it only changes how a burst is framed on air -- so it
+ * sits with the tuning knobs, not with the transfer commands. */
+static void show_help(void)
 {
-    static uint8_t blocks[8 * 2600];
-    uint8_t payload[26];
-    int fb = 26, cap0 = 26 - 3, cap = 26 - 2;
-    int len = (int)strlen(text), off = 0, seq = 0, total = 0;
+    printf(
+"\n  transfers -- DELIVERED (tracked, retransmitted until acknowledged)\n"
+"    send <text>        interactive message, jumps ahead of bulk traffic\n"
+"    sendfile <path>    file transfer over burst ARQ (deflated first)\n"
+"    bulk <n>           queue an n-byte test pattern\n"
+"\n  transfers -- NOT DELIVERED (non-ARQ: nothing is ever repeated)\n"
+"    broadcast <text>       speech/telemetry style; the receiver reports\n"
+"                           what it heard and losses stay lost\n"
+"    broadcastfile <path>   the same, file-sourced and binary-safe; the\n"
+"                           receiver stores it as rx_broadcast.bin.\n"
+"                           A broadcast cannot negotiate its rate, so if\n"
+"                           the link is still at the bootstrap rung the\n"
+"                           payload is HELD and the station probes the\n"
+"                           peer until the ladder can carry it.\n"
+"\n  tuning\n"
+"    stream on|off      put a whole burst window behind ONE preamble\n"
+"                       instead of one per fragment (default on). This\n"
+"                       does NOT affect delivery -- every fragment is\n"
+"                       still acknowledged and retransmitted; it only\n"
+"                       changes framing, and falls back automatically if\n"
+"                       the peer cannot follow a stream.\n"
+"    window <n>         fragments per acknowledgment (ceiling; the\n"
+"                       station picks below it from what lands)\n"
+"    compress on|off    deflate files before transmitting (default on)\n"
+"    tune <hz>          manual LO trim, through the trim budget\n"
+"\n  diagnostics\n"
+"    debug on|off       live event stream: every TX/RX, timeout, rung\n"
+"                       change with the inputs that caused it, and burst\n"
+"                       state transitions\n"
+"    status             rung, SNR, CFO, queues, carrier sense, controller\n"
+"    stats              frame counters\n"
+"    help | quit\n\n");
+}
 
-    if (len <= 0)
-        return;
-    g_bc_pending = g_bc_sent = 0;
-    while (off < len) {
-        int nf = 0, pkt_n = 0, first = 1, n;
-        while (nf < g_bc_group && off < len) {
-            int take = (first ? cap0 : cap);
+/* ---- broadcast transmit ----
+ *
+ * A broadcast is not one keying. A payload of any size is cut into
+ * successive transmissions, each a whole number of groups that fits the
+ * air buffer, with the sequence number running CONTINUOUSLY across them
+ * so the receiver's loss counting still works and only the final frame
+ * carries EOS. Truncating instead (the first version did) silently
+ * dropped 46978 of 47001 bytes and then reported success.
+ */
+#define BC_MAX_TX_SAMPLES 360000   /* 30 s: one polite turn on the channel */
+/* Frames behind one preamble in a broadcast.
+ *
+ * A 400-byte broadcast once arrived as "5 frames, 12 lost" at 16 and
+ * complete at 4, which looked like a group-size limit. It was not: the
+ * DSP is innocent at every group size. Capturing the audio the live
+ * receiver actually saw and replaying it offline showed two unrelated
+ * application bugs, both now fixed --
+ *   1. g_bc_left was armed from g_bc_rx_group BEFORE the SYNC descriptor
+ *      that sets it was parsed, so the first group of a broadcast walked
+ *      the PREVIOUS stream's block count (4), and 4 + 1 re-acquired
+ *      frame is exactly the "5 frames" that was reported;
+ *   2. EOS did not stop the walk, so the short FINAL group -- whose
+ *      descriptor can only advertise the nominal size -- was chased to
+ *      the full 16, giving 15 phantom CRC failures.
+ * For the record, what was ruled out by measurement: the C transmitter
+ * is bit-identical to the Python twin at 16 blocks; the C streaming
+ * receiver decodes a 16-block burst 16/16 offline; the shared sample
+ * ring never overran (124478 of 147456); and a per-block LLR-temperature
+ * refit is worth nothing even with oracle knowledge of the answer
+ * (experiments/burst_alpha_ab.py).
+ *
+ * The cap stays modest because a broadcast is non-ARQ: one preamble
+ * covers more frames as it grows, but a missed acquisition costs the
+ * whole group with nothing to repeat it. */
+#ifndef BC_GROUP_CAP
+#define BC_GROUP_CAP 4
+#endif
+/* The group size travels on the wire (log2 in the SYNC descriptor), so a
+ * receiver using bc_receive() must be able to hold a whole group -- that
+ * walker rejects group > BC_MAX_GROUP outright. Fail the build rather
+ * than emit broadcasts the C receive API cannot accept. */
+typedef char bc_group_cap_fits[(BC_GROUP_CAP <= BC_MAX_GROUP
+                                && BC_GROUP_CAP >= 1) ? 1 : -1];
+
+static uint8_t g_bc_src[65536];
+static int g_bc_src_len, g_bc_src_off, g_bc_seq, g_bc_rung, g_bc_ptype_tx;
+/* A broadcast cannot negotiate: it carries no acknowledgment, so the
+ * rung is whatever the link last established, and at the bootstrap rung
+ * that is EXTREME -- tens of seconds per frame. Rather than telling the
+ * operator to go and make the link by hand, hold the payload and drive
+ * the ladder here: a control-class message is exactly the "say something
+ * back to me" probe the rate controller needs, so no new message type is
+ * required. */
+static int g_bc_waiting;          /* payload held until the link is up */
+static double g_bc_deadline, g_bc_next_probe;
+#define BC_LINK_TIMEOUT_S 180.0
+#define BC_PROBE_EVERY_S 25.0
+
+/* Bytes a single transmission can carry at this rung -- used to tell the
+ * operator up front what will happen, instead of discovering it after a
+ * 42-second transmission of 23 bytes. */
+static int bc_bytes_per_tx(int rung, int group)
+{
+    int pkt_bits = 36 + 8 * 26;
+    int one = tx_burst_len(ladder_mode(rung), pkt_bits, ladder_mod(rung),
+                           ladder_spd(rung), group, BURST_STREAM_RESYNC);
+    int per_group = group * (26 - 2) - 1;   /* SYNC frame spends one more */
+    int groups;
+    if (one <= 0)
+        return 0;
+    groups = BC_MAX_TX_SAMPLES / one;
+    return groups > 0 ? groups * per_group : 0;
+}
+
+/* Build the next transmission into g_bc_air. Returns samples, or 0 when
+ * the payload is exhausted. */
+static int bc_build_next(void)
+{
+    static uint8_t blocks[8 * 2600], packed[8 * 2600];
+    uint8_t payload[26];
+    int cap0 = 26 - 3, cap = 26 - 2;
+
+    g_bc_pending = 0;
+    while (g_bc_src_off < g_bc_src_len) {
+        int nf = 0, pkt_n = 0, first = 1, n, i;
+        while (nf < g_bc_group && g_bc_src_off < g_bc_src_len) {
+            int take = first ? cap0 : cap;
             int flags = first ? 0x80 : 0;
-            if (take > len - off)
-                take = len - off;
-            if (off + take >= len)
-                flags |= 0x40; /* EOS */
+            if (take > g_bc_src_len - g_bc_src_off)
+                take = g_bc_src_len - g_bc_src_off;
+            if (g_bc_src_off + take >= g_bc_src_len)
+                flags |= 0x40;               /* EOS: the very last frame */
             memset(payload, 0, sizeof(payload));
-            payload[0] = (uint8_t)(flags | (seq & 0x3F));
+            payload[0] = (uint8_t)(flags | (g_bc_seq & 0x3F));
             payload[1] = (uint8_t)take;
-            if (first)
-                payload[2] = BC_PT_TELEMETRY;
-            memcpy(payload + (first ? 3 : 2), text + off, (size_t)take);
-            pkt_n = data_encode(0, payload, fb, blocks + (size_t)nf * 2600);
-            off += take;
-            seq++;
+            if (first) {
+                /* log2(group) << 4 | payload type -- the receiver cannot
+                 * guess the group size, and guessing wrong costs it every
+                 * frame after the first of each group */
+                int gc = 0, g = g_bc_group;
+                while (g > 1) { g >>= 1; gc++; }
+                payload[2] = (uint8_t)((gc << 4) | (g_bc_ptype_tx & 0x0F));
+            }
+            memcpy(payload + (first ? 3 : 2), g_bc_src + g_bc_src_off,
+                   (size_t)take);
+            pkt_n = data_encode(0, payload, 26, blocks + (size_t)nf * 2600);
+            g_bc_src_off += take;
+            g_bc_seq++;
             nf++;
             first = 0;
         }
-        {   /* pack contiguously at the packet stride the builder wants */
-            static uint8_t packed[8 * 2600];
-            int i;
-            for (i = 0; i < nf; i++)
-                memcpy(packed + (size_t)i * pkt_n, blocks + (size_t)i * 2600,
-                       (size_t)pkt_n);
-            n = tx_build_burst(ladder_mode(rung), packed, pkt_n, nf,
-                               PKT_TYP_BCAST, ladder_mod(rung),
-                               ladder_spd(rung), BURST_STREAM_RESYNC,
-                               g_bc_air + g_bc_pending);
-        }
+        for (i = 0; i < nf; i++)
+            memcpy(packed + (size_t)i * pkt_n, blocks + (size_t)i * 2600,
+                   (size_t)pkt_n);
+        n = tx_build_burst(ladder_mode(g_bc_rung), packed, pkt_n, nf,
+                           PKT_TYP_BCAST, ladder_mod(g_bc_rung),
+                           ladder_spd(g_bc_rung), BURST_STREAM_RESYNC,
+                           g_bc_air + g_bc_pending);
         if (n <= 0) {
-            /* The group did not fit the transmit buffer -- at the slow
-             * rungs one EXTREME frame is already 20 s of air, so four of
-             * them behind a single preamble is far past it. Shrink the
-             * group and retry; a group of one is still a valid broadcast,
-             * it just stops amortizing the preamble. */
-            if (g_bc_group > 1) {
-                g_bc_group /= 2;
-                printf("%s [%s] broadcast: group too long at rung %d, "
-                       "retrying with %d frame(s) per group\n", tstamp(),
-                       g_name, rung, g_bc_group);
-                g_bc_pending = 0;
-                cmd_broadcast(text, rung);
-                return;
-            }
-            printf("%s [%s] broadcast: will not fit at rung %d -- let the "
-                   "ladder climb first\n", tstamp(), g_name, rung);
-            g_bc_pending = 0;
-            return;
+            printf("%s [%s] broadcast: PHY refused a group at rung %d\n",
+                   tstamp(), g_name, g_bc_rung);
+            g_bc_src_off = g_bc_src_len;
+            break;
         }
         g_bc_pending += n;
-        total++;
+        if (g_bc_pending + n > BC_MAX_TX_SAMPLES)
+            break;                            /* this turn is full */
     }
-    printf("%s [%s] broadcast queued: %d bytes in %d group(s), %.1f s air "
-           "at rung %d (non-ARQ, nothing will be repeated)\n", tstamp(),
-           g_name, len, total, (double)g_bc_pending / FS, rung);
+    return g_bc_pending;
+}
+
+/* Begin transmitting a held payload at the rung the link now has.
+ * Returns 0 if the rung still will not carry it. */
+static int bc_start(int rung)
+{
+    int per_tx, n_tx;
+
+    g_bc_group = BC_GROUP_CAP;
+    while (g_bc_group > 1
+           && tx_burst_len(ladder_mode(rung), 36 + 8 * 26, ladder_mod(rung),
+                           ladder_spd(rung), g_bc_group,
+                           BURST_STREAM_RESYNC) > BC_MAX_TX_SAMPLES)
+        g_bc_group /= 2;
+    per_tx = bc_bytes_per_tx(rung, g_bc_group);
+    if (per_tx <= 0)
+        return 0;
+
+    g_bc_src_off = 0;
+    g_bc_seq = 0;
+    g_bc_rung = rung;
+    g_bc_pending = g_bc_sent = 0;
+    g_bc_waiting = 0;
+    n_tx = (g_bc_src_len + per_tx - 1) / per_tx;
+    printf("\n%s [%s] broadcast starting: %d bytes at rung %d, %d frame(s) "
+           "per group, ~%d transmission(s), ~%.0f s of air in total "
+           "(non-ARQ, nothing will be repeated)\n> ", tstamp(), g_name,
+           g_bc_src_len, rung, g_bc_group, n_tx,
+           (double)n_tx * BC_MAX_TX_SAMPLES / FS);
+    fflush(stdout);
+    return 1;
+}
+
+/* Called from the main loop while a payload is held: probe the peer with
+ * control-class traffic until the rate ladder is high enough to carry
+ * the broadcast, then start it. */
+static void bc_poll_link(double now)
+{
+    static const uint8_t probe[] = "LINK";
+    int rung = g_st.stats.last_rung;
+
+    if (!g_bc_waiting)
+        return;
+    if (rung >= BURST_MIN_RUNG && bc_start(rung))
+        return;
+    if (now > g_bc_deadline) {
+        printf("\n%s [%s] broadcast: gave up after %.0f s -- the link is "
+               "still at rung %d, which cannot carry a broadcast\n> ",
+               tstamp(), g_name, BC_LINK_TIMEOUT_S, rung);
+        fflush(stdout);
+        g_bc_waiting = 0;
+        g_bc_src_len = 0;
+        return;
+    }
+    if (now >= g_bc_next_probe) {
+        g_bc_next_probe = now + BC_PROBE_EVERY_S;
+        /* control class: highest priority, and a frame the peer answers,
+         * which is what moves the ladder */
+        if (station_submit(&g_st, probe, (int)sizeof(probe) - 1,
+                           QOS_CONTROL) == 0) {
+            printf("\n%s [%s] broadcast: link at rung %d, probing to bring "
+                   "it up...\n> ", tstamp(), g_name, rung);
+            fflush(stdout);
+        }
+    }
+}
+
+static void cmd_broadcast_bytes(const uint8_t *data, int len, int rung,
+                                int ptype)
+{
+    if (len <= 0)
+        return;
+    if (len > (int)sizeof(g_bc_src)) {
+        printf("%s [%s] broadcast: %d bytes exceeds the %zu-byte cap\n",
+               tstamp(), g_name, len, sizeof(g_bc_src));
+        return;
+    }
+    memcpy(g_bc_src, data, (size_t)len);
+    g_bc_src_len = len;
+    g_bc_ptype_tx = ptype;
+    g_bc_src_off = g_bc_seq = 0;
+    g_bc_pending = g_bc_sent = 0;
+
+    if (rung >= BURST_MIN_RUNG && bc_start(rung))
+        return;
+    /* Hold it and bring the link up ourselves rather than handing the
+     * operator a chore. */
+    g_bc_waiting = 1;
+    g_bc_deadline = now_t() + BC_LINK_TIMEOUT_S;
+    g_bc_next_probe = 0.0;
+    printf("%s [%s] broadcast held: %d bytes waiting for the link (rung %d "
+           "cannot carry it); probing the peer, giving up after %.0f s\n",
+           tstamp(), g_name, len, rung, BC_LINK_TIMEOUT_S);
+}
+
+static void cmd_broadcast(const char *text, int rung)
+{
+    cmd_broadcast_bytes((const uint8_t *)text, (int)strlen(text), rung,
+                        BC_PT_TELEMETRY);
+}
+
+/* Broadcast a file: same non-ARQ path, binary-safe. Nothing here is
+ * acknowledged or repeated, so what the receiver misses is gone -- it
+ * is the right carrier for telemetry or coded speech, and the wrong one
+ * for anything that has to arrive intact. Use sendfile for that. */
+static void cmd_broadcastfile(const char *path, int rung)
+{
+    static uint8_t buf[65536];
+    FILE *f = fopen(path, "rb");
+    long sz;
+    size_t got;
+
+    if (!f) {
+        printf("%s [%s] broadcastfile: cannot open %s\n", tstamp(), g_name,
+               path);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > (long)sizeof(buf)) {
+        printf("%s [%s] broadcastfile: %s is %ld bytes, cap is %zu\n",
+               tstamp(), g_name, path, sz, sizeof(buf));
+        fclose(f);
+        return;
+    }
+    got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (got != (size_t)sz) {
+        printf("%s [%s] broadcastfile: read error\n", tstamp(), g_name);
+        return;
+    }
+    printf("%s [%s] broadcasting %s (%ld bytes, no delivery guarantee)\n",
+           tstamp(), g_name, path, sz);
+    cmd_broadcast_bytes(buf, (int)sz, rung, BC_PT_OPAQUE);
 }
 
 static int g_compress = 1; /* deflate files before transmitting */
@@ -610,6 +941,38 @@ static void cmd_sendfile(const char *path)
     head = 1 + (int)strlen(FILE_TAG) + (int)strlen(base) + 1 + 2;
     n_parts = body_len <= 0 ? 1
                             : (body_len + FILE_PART_DATA - 1) / FILE_PART_DATA;
+    /* Negotiate before committing. ctl_tx_rung() decays the rung by one
+     * step per STALE_S of peer silence, so a transfer started after a
+     * quiet spell opens at a rung the link has not actually been tested
+     * at -- measured, a 37.0 s frame at rung 4 where the very next
+     * exchange settled at rung 12 and 5.1 s. One control frame costs
+     * under a second and is answered, which is what moves the ladder, so
+     * probe first and let the bulk queue behind it. */
+    {
+        /* peer_req_time starts at the -1e9 sentinel, so "never heard from"
+         * must be TESTED for, not subtracted from -- doing the arithmetic
+         * anyway printed "peer last reported 1000000058 s ago". Same rule
+         * the link layer already follows for last_rx_seq. */
+        int never = g_st.ctl.peer_req_time < -1e8;
+        double age = never ? 0.0 : now_t() - g_st.ctl.peer_req_time;
+
+        if (never || age > BULK_PROBE_STALE_S) {
+            static const uint8_t probe[] = "LINK";
+            if (station_submit(&g_st, probe, (int)sizeof(probe) - 1,
+                               QOS_CONTROL) == 0) {
+                if (never)
+                    printf("%s [%s] sendfile: peer has not reported yet"
+                           " -- probing before committing the transfer\n",
+                           tstamp(), g_name);
+                else
+                    printf("%s [%s] sendfile: peer last reported %.0f s"
+                           " ago -- probing before committing the"
+                           " transfer\n", tstamp(), g_name, age);
+                fflush(stdout);
+            }
+        }
+    }
+
     q_free = ST_MAX_MSGS - g_st.qcount[QOS_BULK];
     if (n_parts > 255 || n_parts > q_free) {
         printf("%s [%s] sendfile: %s is %ld bytes (%d on air) = %d parts, "
@@ -697,6 +1060,9 @@ static void handle_command(char *line)
         printf("%s [%s] burst window = %d fragment%s per acknowledgment "
                "(stream cap %d)\n", tstamp(), g_name, w,
                w == 1 ? "" : "s", BURST_STREAM_MAX);
+    } else if (!strncmp(line, "broadcastfile ", 14)) {
+        cmd_broadcastfile(line + 14, g_st.stats.last_rung >= 0
+                                         ? g_st.stats.last_rung : 7);
     } else if (!strncmp(line, "broadcast ", 10)) {
         cmd_broadcast(line + 10, g_st.stats.last_rung >= 0
                                      ? g_st.stats.last_rung : 7);
@@ -719,9 +1085,11 @@ static void handle_command(char *line)
         show_stats();
     } else if (!strcmp(line, "quit") || !strcmp(line, "exit")) {
         exit(0);
+    } else if (!strcmp(line, "help") || !strcmp(line, "?")) {
+        show_help();
     } else if (line[0]) {
-        printf("commands: send <text> | sendfile <path> | bulk <n> | "
-               "tune <hz> | debug on|off | status | stats | quit\n");
+        printf("%s [%s] unknown command '%s' -- type 'help'\n", tstamp(),
+               g_name, line);
     }
 }
 
@@ -790,6 +1158,14 @@ int main(int argc, char **argv)
             }
             n = (int)(got / 2);
             g_rx_total += n;
+#ifdef RXS_TRACE
+            {   /* capture exactly what the live receiver saw, so the same
+                 * audio can be replayed through the offline decoder */
+                static FILE *cap;
+                if (!cap) cap = fopen("rx_raw.bin", "wb");
+                if (cap) { fwrite(chunk, 2, (size_t)n, cap); fflush(cap); }
+            }
+#endif
             note_busy(chunk, n);
             {
                 int m;
@@ -852,7 +1228,26 @@ int main(int argc, char **argv)
                                    ? -ev.type : 0]);
                         fflush(stdout);
                     }
-                    if (ev.type == 1 && ev.hdr.typ == PKT_TYP_BCAST) {
+                    if (ev.type == -3 && ev.hdr.typ == PKT_TYP_BCAST
+                        && g_bc_left[m] > 0) {
+                        /* A block that failed CRC must NOT end the group.
+                         * The offsets are deterministic, so step over it
+                         * and keep going -- otherwise one bad block costs
+                         * every frame behind it, which is how a 17-frame
+                         * broadcast arrived as 5. */
+                        g_bc_left[m]--;
+                        g_bc_lost++;
+                        g_bc_rx_last = now_t();
+                        /* The EOS marker rides in a frame, so a lost EOS
+                         * leaves nothing to stop on. Bound the chase the
+                         * same way the ARQ burst path does. */
+                        if (++g_bc_miss[m] >= BC_MAX_MISS)
+                            g_bc_left[m] = 0;
+                        if (g_bc_left[m] > 0
+                            && !rxs_continue_burst(g_rxs[m],
+                                                   BURST_STREAM_RESYNC))
+                            g_bc_left[m] = 0;
+                    } else if (ev.type == 1 && ev.hdr.typ == PKT_TYP_BCAST) {
                         /* Broadcast: Data-shaped but NOT station traffic --
                          * its reserved field is not a link-control word, so
                          * it must never reach the ARQ reassembler. */
@@ -867,8 +1262,24 @@ int main(int argc, char **argv)
                             v = (v << 1) | (b[28 + j] & 1);
                         dlen = v;
                         if (flags & 0x80) {
+                            /* descriptor: log2(group) << 4 | ptype.
+                             * Parse it BEFORE arming g_bc_left: the group
+                             * size is a property of THIS stream, so arming
+                             * from the previous stream's value makes the
+                             * first group of every broadcast walk the
+                             * wrong number of blocks -- and the first
+                             * group is the only one a listener that just
+                             * tuned in actually gets. */
+                            int t = 0, q;
                             head = 3;
-                            g_bc_left[m] = g_bc_group - 1;
+                            for (q = 0; q < 8; q++)
+                                t = (t << 1) | (b[20 + 16 + q] & 1);
+                            g_bc_ptype = t & 0x0F;
+                            g_bc_rx_group = 1 << (t >> 4);
+                            if (g_bc_rx_group < 1
+                                || g_bc_rx_group > BURST_STREAM_MAX)
+                                g_bc_rx_group = 4;
+                            g_bc_left[m] = g_bc_rx_group - 1;
                         } else if (g_bc_left[m] > 0) {
                             g_bc_left[m]--;
                         }
@@ -879,29 +1290,83 @@ int main(int argc, char **argv)
                         }
                         g_bc_last_seq = seq;
                         g_bc_frames++;
+                        g_bc_rx_last = now_t();
                         if (dlen > plen - head)
                             dlen = plen - head;
-                        for (j = 0; j < dlen
-                             && g_bc_len < (int)sizeof(g_bc_asm); j++) {
-                            int bb, val = 0;
-                            for (bb = 0; bb < 8; bb++)
-                                val = (val << 1)
-                                      | (b[20 + 8 * (head + j) + bb] & 1);
-                            g_bc_asm[g_bc_len++] = (uint8_t)val;
+                        {
+                            uint8_t tmp[256];
+                            int nb = 0;
+                            for (j = 0; j < dlen
+                                 && nb < (int)sizeof(tmp); j++) {
+                                int bb, val = 0;
+                                for (bb = 0; bb < 8; bb++)
+                                    val = (val << 1)
+                                          | (b[20 + 8 * (head + j) + bb] & 1);
+                                tmp[nb++] = (uint8_t)val;
+                            }
+                            bc_sink_open();
+                            if (g_bc_file) {
+                                fwrite(tmp, 1, (size_t)nb, g_bc_file);
+                                g_bc_written += nb;
+                            } else {
+                                int room = (int)sizeof(g_bc_asm) - g_bc_len;
+                                int c = nb < room ? nb : room;
+                                memcpy(g_bc_asm + g_bc_len, tmp, (size_t)c);
+                                g_bc_len += c;
+                                if (c < nb)
+                                    g_bc_trunc = 1;
+                            }
                         }
+                        g_bc_miss[m] = 0;
+                        if (flags & 0x40)
+                            /* EOS: the stream ends HERE, whatever the
+                             * group descriptor promised. The final group
+                             * of a broadcast is usually SHORT, but the
+                             * descriptor can only advertise the nominal
+                             * size (it carries log2(group)), so without
+                             * this the receiver walks blocks that were
+                             * never transmitted: measured 15 phantom CRC
+                             * failures on a 1-frame final group, each
+                             * costing a block-time of deafness. */
+                            g_bc_left[m] = 0;
                         if (g_bc_left[m] > 0
                             && !rxs_continue_burst(g_rxs[m],
                                                    BURST_STREAM_RESYNC))
                             g_bc_left[m] = 0;
                         if (flags & 0x40) {
-                            printf("\n%s [%s] << broadcast: %d bytes, "
+                            long total = g_bc_written + g_bc_len;
+                            printf("\n%s [%s] << broadcast: %ld bytes, "
                                    "%d frames, %d lost, snr %+.1f dB\n",
-                                   tstamp(), g_name, g_bc_len, g_bc_frames,
+                                   tstamp(), g_name, total, g_bc_frames,
                                    g_bc_lost, ev.snr_db);
-                            printf("    \"%.*s\"\n> ", g_bc_len, g_bc_asm);
+                            if (g_bc_file) {
+                                /* binary: printing it would be nonsense,
+                                 * and it may well have holes in it --
+                                 * nothing was retransmitted */
+                                fclose(g_bc_file);
+                                g_bc_file = NULL;
+                                printf("    stored %ld bytes as %s"
+                                       " (%d of the frames sent arrived;"
+                                       " gaps are NOT repaired)\n> ",
+                                       g_bc_written, BC_RX_PATH,
+                                       g_bc_frames);
+                            } else if (g_bc_ptype == BC_PT_OPAQUE) {
+                                printf("    NOT stored: %s could not be"
+                                       " opened (see the error above)\n> ",
+                                       BC_RX_PATH);
+                            } else {
+                                printf("    \"%.*s\"%s\n> ", g_bc_len,
+                                       g_bc_asm,
+                                       g_bc_trunc ? "  [truncated: text"
+                                                    " buffer full]" : "");
+                            }
                             fflush(stdout);
                             g_bc_len = g_bc_frames = g_bc_lost = 0;
+                            g_bc_written = 0;
+                            g_bc_trunc = 0;
                             g_bc_last_seq = -1;
+                            g_bc_ptype = -1;
+                            g_bc_rx_last = -1e9;
                         }
                     } else if (ev.type == 1) {
                         int before = g_st.delivered_n;
@@ -931,14 +1396,26 @@ int main(int argc, char **argv)
                     prev_busy = busy;
                 }
                 int nf = 0;
-                if (g_bc_pending > 0 && !busy && !g_txing) {
-                    /* a broadcast owns the channel for its duration: there
-                     * is no acknowledgment to wait for and nothing to
-                     * retransmit, so it just goes out */
-                    nf = g_bc_pending;
-                    memcpy(g_frame, g_bc_air, (size_t)nf * sizeof(int16_t));
-                    g_bc_pending = 0;
-                    g_bc_sent = 1;
+                if (now_t() - g_bc_rx_last < BC_RX_HOLD_S)
+                    busy = 1;   /* hearing someone else's broadcast */
+                bc_poll_link(now_t());
+                if (!g_bc_waiting && g_bc_src_off < g_bc_src_len
+                    && !busy && !g_txing) {
+                    /* Successive turns: build the next transmission only
+                     * when the channel is free, so a long payload yields
+                     * to carrier sense between turns instead of hogging
+                     * the frequency in one enormous keying. */
+                    nf = bc_build_next();
+                    if (nf > 0) {
+                        memcpy(g_frame, g_bc_air,
+                               (size_t)nf * sizeof(int16_t));
+                        g_bc_pending = 0;
+                        g_bc_sent = 1;
+                        printf("%s [%s] >> broadcast %d/%d bytes, %.1f s "
+                               "air\n> ", tstamp(), g_name, g_bc_src_off,
+                               g_bc_src_len, (double)nf / FS);
+                        fflush(stdout);
+                    }
                 }
                 if (nf == 0)
                     nf = station_poll_tx(&g_st, now_t(), busy,

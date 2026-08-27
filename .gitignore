@@ -12,3 +12,6 @@ technical-report/build/
 # editor / OS noise
 *.swp
 .DS_Store
+
+# files the demo stations receive at runtime (rx_<basename>, rx_broadcast.bin)
+demoapp/rx_*
