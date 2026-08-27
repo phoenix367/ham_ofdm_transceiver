@@ -44,8 +44,14 @@ int main(void)
                      (int)sizeof(g_out), &st);
     check("broadcast receive: payload byte-exact",
           got == BC_PAYLOAD_N && memcmp(g_out, BC_PAYLOAD, BC_PAYLOAD_N) == 0);
+    /* st.group is read off the wire (log2 in the SYNC descriptor), so
+     * asserting it is what ties the vectors to the FRAMING and not just
+     * to the waveform: this test builds the air signal FROM the golden
+     * bits, so a stale BC_BITS would otherwise agree with its own stale
+     * hash and pass while the descriptor drifted underneath. */
     check("broadcast receive: descriptor and EOS seen",
-          st.ptype == BC_PT_TELEMETRY && st.saw_eos && st.groups == 1);
+          st.ptype == BC_PT_TELEMETRY && st.group == BC_GROUP
+          && st.saw_eos && st.groups == 1);
     check("broadcast receive: every frame accounted for",
           st.frames_ok == BC_GROUP && st.frames_lost == 0);
     printf("  broadcast: %d B, %d/%d frames, %d group(s), ptype %d\n",
