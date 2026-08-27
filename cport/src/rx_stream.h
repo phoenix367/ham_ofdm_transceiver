@@ -41,6 +41,12 @@ typedef struct rxs_state rxs_t; /* opaque; single instance */
  * head) -- the empirical minimum ring size for this mode/traffic */
 int64_t rxs_ring_hwm(const rxs_t *r);
 
+/* Reads refused because the samples had already been overwritten (or had
+ * not been written yet). Always 0 on a receiver that keeps up; any
+ * non-zero value means decodes were abandoned rather than run on stale
+ * ring contents, and the ring wants sizing up for this workload. */
+int64_t rxs_ring_miss(const rxs_t *r);
+
 rxs_t *rxs_open(link_mode_t mode, int calibrate);
 
 /* feed samples in arbitrary chunks; returns 1 when ev was filled */

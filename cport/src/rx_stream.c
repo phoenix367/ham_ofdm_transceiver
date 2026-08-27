@@ -58,6 +58,7 @@ struct rxs_state {
     int64_t burst_resume_abs;
     int64_t last_eval_blk;
     int64_t ring_hwm; /* deepest raw lookback (incl. FIR history) */
+    int64_t ring_miss; /* reads refused because the samples were gone */
     rxd_header_t hdr;
     int hdr_scale, data_scale;
     uint8_t hdr_bits[HEADER_BITS];
@@ -86,12 +87,41 @@ static int64_t g_q64[MAX_LLRS];
 /* analytic extraction: recompute the streaming Hilbert from the raw
  * ring, bit-identical to the former write-time FIR (zero prehistory;
  * i[n] = x[n-31] pairs with the group-delayed q[n]) */
-static void ring_copy(rxs_t *r, int64_t abs_start, int n,
-                      int64_t *di, int64_t *dq)
+/* Is every raw sample this call will touch still in the ring?
+ *
+ * The ring holds only the last RXS_RAW_RING_LEN samples written, and
+ * ring_copy addresses it by modulo alone -- so a request that has fallen
+ * off the back does not fail, it silently returns samples from the
+ * PREVIOUS wrap. Those decode to a CRC failure indistinguishable from
+ * noise, which is the worst possible way for a receiver to report that
+ * it could not keep up. The FIR reaches HILBERT_TAPS_N-1 samples behind
+ * abs_start, so that history has to be resident too.
+ *
+ * This does not fire in normal operation: the deepest lookback measured
+ * on a heavily-lagged receiver was 124478 of 147456. It is here so that
+ * if it ever does, it is visible as a miss rather than as mystery
+ * corruption. */
+static void rearm(rxs_t *r, int64_t guard_abs);
+
+static int ring_resident(const rxs_t *r, int64_t abs_start, int n)
+{
+    if (r->abs_n - abs_start + (HILBERT_TAPS_N - 1) > RXS_RAW_RING_LEN)
+        return 0;                     /* overwritten since it was written */
+    if (abs_start + n > r->abs_n)
+        return 0;                     /* not written yet */
+    return 1;
+}
+
+static int ring_copy(rxs_t *r, int64_t abs_start, int n,
+                     int64_t *di, int64_t *dq)
 {
     int k, j;
+    int ok = ring_resident(r, abs_start, n);
+
     if (r->abs_n - abs_start + (HILBERT_TAPS_N - 1) > r->ring_hwm)
         r->ring_hwm = r->abs_n - abs_start + (HILBERT_TAPS_N - 1);
+    if (!ok)
+        r->ring_miss++;   /* copied anyway -- the caller decides */
     for (k = 0; k < n; k++) {
         int64_t abs = abs_start + k;
         int64_t acc = 0;
@@ -109,6 +139,7 @@ static void ring_copy(rxs_t *r, int64_t abs_start, int n,
                                   % RXS_RAW_RING_LEN)]
                     : 0;
     }
+    return ok ? 0 : -1;
 }
 
 rxs_t *rxs_open(link_mode_t mode, int calibrate)
@@ -155,12 +186,18 @@ rxs_t *rxs_open(link_mode_t mode, int calibrate)
     r->best_metric = -1;
     r->last_eval_blk = -1;
     r->ring_hwm = 0;
+    r->ring_miss = 0;
     return r;
 }
 
 int64_t rxs_ring_hwm(const rxs_t *r)
 {
     return r->ring_hwm;
+}
+
+int64_t rxs_ring_miss(const rxs_t *r)
+{
+    return r->ring_miss;
 }
 
 /* per-block summary: BFP spectrum -> band power + mask dots per shift */
@@ -170,6 +207,12 @@ static void block_summary(rxs_t *r, int64_t blk_idx)
     blk_sum_t *bs = &g_blk[r->inst][blk_idx & (BLK_CAP - 1)];
     int B = r->B, k, sh, exp;
 
+    /* Status ignored on purpose. The detection stages validate
+     * themselves -- a stale read fails the ZC correlation threshold or
+     * the header CRC and costs one acquisition attempt. Refusing them
+     * instead was measured to throw away GOOD acquisitions: with a ring
+     * deliberately undersized to 8192, aborting here took a receiver
+     * that decoded 16 of 16 blocks down to 0. */
     ring_copy(r, blk_idx * B, B, re, im);
     fft_bfp(re, im, B, 13, &exp);
     bs->exp = exp;
@@ -281,7 +324,7 @@ static void tone_commit(rxs_t *r)
          r->best_shift, (long long)r->best_metric);
     r->cs_abs = r->best_off_blk * r->B;
     r->cw = (int64_t)r->best_shift * r->word_per_bin;
-    ring_copy(r, r->cs_abs, seg_n, g_seg_i, g_seg_q);
+    ring_copy(r, r->cs_abs, seg_n, g_seg_i, g_seg_q);  /* see block_summary */
     nco_derotate(g_seg_i, g_seg_q, seg_n, r->cw, 0u, g_seg_i, g_seg_q);
     r->cw += rx_lag_n_word(g_seg_i, g_seg_q, seg_n);
     r->st = S_ZC_WAIT;
@@ -477,7 +520,12 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                     win_buf[win_n++] = k;
                 window = win_buf;
             }
-            ring_copy(r, pos, r->demod.symbol_len, si, sq);
+            if (ring_copy(r, pos, r->demod.symbol_len, si, sq) != 0) {
+                /* stale samples here decode to a CRC failure that is
+                 * indistinguishable from noise -- say so instead */
+                rearm(r, pos + r->demod.symbol_len);
+                continue;
+            }
             g_hexps[r->inst][r->sym_idx] = rxd_demod_symbol(
                 &r->demod, si, sq, (int)pos, r->cfo_word, 1, window, win_n,
                 g_h64[r->inst] + r->sym_idx * N_DATA_CARRIERS);
@@ -552,7 +600,12 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                     win_buf[win_n++] = k;
                 window = win_buf;
             }
-            ring_copy(r, pos, r->demod.symbol_len, si, sq);
+            if (ring_copy(r, pos, r->demod.symbol_len, si, sq) != 0) {
+                /* abandon the frame rather than decode stale ring
+                 * contents into a CRC failure that looks like noise */
+                rearm(r, pos + r->demod.symbol_len);
+                continue;
+            }
             g_dexps[r->inst][r->sym_idx] = rxd_demod_symbol(
                 &r->demod, si, sq, (int)pos, r->cfo_word, r->mu, window,
                 win_n, g_d64[r->inst] + r->sym_idx * r->cap);
