@@ -28,11 +28,34 @@ typedef struct {
 
 typedef struct rxs_state rxs_t; /* opaque; single instance */
 
-/* shared raw sample ring: ONE int16 ring serves every instance (all
+/* Shared raw sample ring: ONE int16 ring serves every instance (all
  * receivers listen to the same audio; each push writes the same values
- * idempotently). Sized ~1.18x the measured worst-case lookback
- * (rxs_ring_hwm: 124416 + 62 FIR history, EXTREME). Overridable, and
- * deliberately not a power of two -- 2^17 leaves only 5% margin. */
+ * idempotently).
+ *
+ * What sets the size is NOT the preamble -- it is how late the tone
+ * detector commits. Both consumers of the tone peak (the lag-N residual
+ * in tone_commit, and the ZC scan in S_ZC_WAIT) anchor at `cs_abs`, the
+ * START of the tone field; and on a channel where the metric never
+ * falls cleanly back below threshold the commit waits for the argmax to
+ * be stable for a full window span past the best block (rx_stream.c,
+ * "commit when the above-threshold region ends, OR ..."). The best block
+ * is already one window past cs_abs, so the write head ends up TWO tone
+ * fields ahead of the sample the receiver then reaches back for:
+ *
+ *   lookback = (2 * 3*T*FFT_BINS/B + DECLINE_BLOCKS) * B
+ *              + (HILBERT_TAPS_N - 1)
+ *
+ * which is exact for all three modes -- 8510 / 32318 / 124478, matching
+ * rxs_ring_hwm to the sample (test_stream prints it). EXTREME therefore
+ * wants 124478, and 147456 is that with 18% margin: deliberately not a
+ * power of two, since 2^17 would leave only 5%.
+ *
+ * So the ring is 288 kB because of a detector TIMEOUT, not because a
+ * frame is long. Halving it means making the lag-N estimate incremental
+ * (it is a re-read of the tone field, which the block summaries already
+ * traverse) and anchoring the ZC scan near the tone field's END rather
+ * than its start -- both touch acquisition sensitivity, which is why
+ * neither has been done casually. Overridable meanwhile. */
 #ifndef RXS_RAW_RING_LEN
 #define RXS_RAW_RING_LEN 147456
 #endif
