@@ -361,6 +361,65 @@ itself lost.
     \label{fig:bcseq}
 \end{figure}
 
+\subsubsection{Group Size Under Fading}
+\label{sec:bcgroup}
+
+Group size is the one free parameter of the mode, and on a clean
+channel it looks free in both directions: a 14162-byte file arrives
+complete and byte-identical at groups of 4, 8 and 16 alike.  That
+result says nothing, because it exercises only half of the trade.  One
+preamble amortised over more frames is the benefit; the cost is that a
+missed acquisition takes the whole group with it, and a broadcast
+retransmits nothing.  The cost term only fires when acquisitions are
+actually missed, which on a clean channel they are not.
+
+Figure~\ref{fig:bcfading} runs the same three group sizes against SNR
+with Rayleigh fading enabled (0.5\,Hz, roughly a 2\,s fade period),
+30 trials per point, all three sizes facing the same fading realisation
+at each point so the comparison is paired rather than three independent
+samples of a noisy quantity.
+
+The left panel is the metric that matters, and it is flat: mean payload
+recovery is 64.4\,\%, 62.5\,\% and 62.3\,\% for groups of 4, 8 and 16.
+The spread between them is smaller than the point-to-point scatter, so
+on this evidence a larger group buys nothing.
+
+The right panel is where the trade becomes visible.  Frames
+\emph{decoded} does rise with group size --- there are fewer preambles
+to miss --- but payload recovered does not follow it, and the gap
+between the two is the payload lost behind a missed acquisition.  That
+gap is monotonic in group size and well outside the scatter: 4.8,
+8.6 and 15.5 points on average.  A group of 16 at $+2$\,dB decodes
+89.3\,\% of frames while recovering 65.0\,\% of the payload.
+
+The practical reading is that group size trades \emph{granularity} of
+loss, not quantity.  Above $+5$\,dB all three are equivalent and the
+larger group is free: with the same 0.5\,Hz fading and a $+20$\,dB
+nominal channel, the 14162-byte file still arrived complete and
+byte-identical at a group of 8, the fading having pulled the measured
+SNR to $+2.4$\,dB and the link down one rung.  Below that the larger
+group concentrates the same loss into fewer, longer holes.  For
+telemetry reassembled whole this is strictly worse; for speech, where
+one long dropout is more objectionable than several short ones, worse
+again.
+
+The demonstration application caps the group at 8, which is the ceiling
+its static receive buffer imposes rather than a value this figure
+argues for --- on these measurements 4 is the better default whenever
+fading is expected, and the choice should follow the channel rather
+than the buffer.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/broadcast_fading.png}
+    \caption{Broadcast group size under 0.5\,Hz Rayleigh fading
+             (\texttt{experiments/broadcast\_fading.py}, 30 trials per
+             point, paired realisations).  Payload recovery is
+             indistinguishable across group sizes; what changes is how
+             the loss is distributed.}
+    \label{fig:bcfading}
+\end{figure}
+
 \subsubsection{A Reception Report: Measured and Rejected}
 
 The gap this leaves is real.  A 14162-byte broadcast ran its entire

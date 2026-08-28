@@ -31,7 +31,8 @@ RESULT_NAMES = ber_vs_snr.png per_vs_snr.png per_stf_vs_newman.png \
                constellation_ladder.png llr_shape.png viterbi_recal.png ldpc_recal.png fec_comparison.png \
                extreme_recal.png qam16_recal.png \
                sdr_tx_spectrum.png sdr_drive_sweep.png \
-               sdr_waterfall.png stream_mode.png broadcast_demo.png cfo_unwrap.png
+               sdr_waterfall.png stream_mode.png broadcast_demo.png cfo_unwrap.png \
+               broadcast_fading.png
 RESULT_IMGS = $(addprefix images/,$(RESULT_NAMES))
 
 ALL_DIAGRAMS = $(MERMAID_IMGS) $(RESULT_IMGS)
