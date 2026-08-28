@@ -33,6 +33,16 @@ static int i64_eq(const int64_t *a, const int64_t *b, int n)
     return 1;
 }
 
+/* golden LLR vectors are int64; the decode path is llr_t (int32) */
+static llr_t g_llr_in[8192];
+static const llr_t *as_llr(const int64_t *v, int n)
+{
+    int i;
+    for (i = 0; i < n && i < (int)(sizeof(g_llr_in) / sizeof(g_llr_in[0])); i++)
+        g_llr_in[i] = (llr_t)v[i];
+    return g_llr_in;
+}
+
 int main(void)
 {
     check("crc8 lte", crc8_lte(CRC_BITS, 120) == CRC8_WANT);
@@ -44,9 +54,18 @@ int main(void)
         check("scramble", u8_eq(out, SCR_OUT, 200));
     }
     {
-        int64_t out[200];
-        descramble_llrs(DESCR_IN, 200, out);
-        check("descramble (soft)", i64_eq(out, DESCR_OUT, 200));
+        /* the golden vectors are int64; the pipeline is llr_t (int32),
+         * so convert at the boundary and comparevalue for value */
+        llr_t in[200], out[200];
+        int64_t wide[200];
+        int i, ok = 1;
+        for (i = 0; i < 200; i++)
+            in[i] = (llr_t)DESCR_IN[i];
+        descramble_llrs(in, 200, out);
+        for (i = 0; i < 200; i++)
+            wide[i] = out[i];
+        ok = i64_eq(wide, DESCR_OUT, 200);
+        check("descramble (soft)", ok);
     }
     {
         uint8_t out[93];
@@ -54,9 +73,15 @@ int main(void)
         check("interleave", u8_eq(out, IL_OUT, 93));
     }
     {
-        int64_t out[93];
-        deinterleave_i64(DL_IN, 93, 16, out);
-        check("deinterleave", i64_eq(out, DL_OUT, 93));
+        llr_t in[93], out[93];
+        int64_t wide[93];
+        int i;
+        for (i = 0; i < 93; i++)
+            in[i] = (llr_t)DL_IN[i];
+        deinterleave_i64(in, 93, 16, out);
+        for (i = 0; i < 93; i++)
+            wide[i] = out[i];
+        check("deinterleave", i64_eq(wide, DL_OUT, 93));
     }
 
 #define CONV_CASE(RATE)                                                     \
@@ -68,7 +93,9 @@ int main(void)
         check("conv encode " #RATE,                                         \
               n == (int)sizeof(CONV_##RATE##_CODED) &&                      \
               u8_eq(coded, CONV_##RATE##_CODED, n));                        \
-        conv_decode(CC_##RATE, CONV_##RATE##_NOISY,                         \
+        conv_decode(CC_##RATE,                                              \
+                    as_llr(CONV_##RATE##_NOISY,                             \
+                           (int)(sizeof(CONV_##RATE##_NOISY) / 8)),         \
                     (int)(sizeof(CONV_##RATE##_NOISY) / 8), 100, dec, work);\
         check("viterbi " #RATE " (noisy LLRs)",                             \
               u8_eq(dec, CONV_##RATE##_DEC, 100));                          \
@@ -87,7 +114,8 @@ int main(void)
         check("ldpc encode (k=236, shortened)",
               n == (int)sizeof(LDPC_CODED) &&
               u8_eq(coded, LDPC_CODED, n));
-        ldpc_decode_int(LDPC_NOISY, (int)(sizeof(LDPC_NOISY) / 8), k, dec);
+        ldpc_decode_int(as_llr(LDPC_NOISY, (int)(sizeof(LDPC_NOISY) / 8)),
+                        (int)(sizeof(LDPC_NOISY) / 8), k, dec);
         check("ldpc min-sum decode (noisy LLRs)",
               u8_eq(dec, LDPC_DEC, k));
     }

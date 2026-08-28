@@ -5,6 +5,13 @@
 
 #include <stdint.h>
 
+/* LLR sample type -- see rx_internal.h for the rationale and the
+ * widening rule for products. */
+#ifndef OFDM_LLR_T
+#define OFDM_LLR_T
+typedef int32_t llr_t;
+#endif
+
 #define SCRAMBLER_SEED 0x5A
 
 uint32_t crc8_lte(const uint8_t *bits, int n);
@@ -14,10 +21,10 @@ uint32_t crc16_ccitt(const uint8_t *bits, int n);
 void scramble_bits(const uint8_t *in, int n, uint8_t *out);
 
 /* flip LLR signs where the PRBS bit is 1 (soft descramble), in place ok */
-void descramble_llrs(const int64_t *in, int n, int64_t *out);
+void descramble_llrs(const llr_t *in, int n, llr_t *out);
 
 /* transpose block interleaver over num_carriers columns (pruned) */
 void interleave_u8(const uint8_t *in, int n, int num_carriers, uint8_t *out);
-void deinterleave_i64(const int64_t *in, int n, int num_carriers, int64_t *out);
+void deinterleave_i64(const llr_t *in, int n, int num_carriers, llr_t *out);
 
 #endif /* OFDM_BITS_H */

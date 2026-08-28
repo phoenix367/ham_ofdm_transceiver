@@ -100,7 +100,7 @@ void conv_encode(cc_rate_t rate, const uint8_t *bits, int bits_count,
      * mask phase advances with the element index either way -- identical */
 }
 
-void conv_decode(cc_rate_t rate, const int64_t *soft, int soft_len,
+void conv_decode(cc_rate_t rate, const llr_t *soft, int soft_len,
                  int bits_count, uint8_t *out, uint8_t *work)
 {
     const uint8_t (*mask)[3] = rate_mask(rate);

@@ -8,6 +8,12 @@
 
 #include <stdint.h>
 
+/* LLR sample type -- see rx_internal.h. */
+#ifndef OFDM_LLR_T
+#define OFDM_LLR_T
+typedef int32_t llr_t;
+#endif
+
 /* transmitted coded length for bits_count info bits: N - (K - k) */
 int ldpc_cc_elements(int bits_count);
 
@@ -16,7 +22,7 @@ void ldpc_encode(const uint8_t *bits, int bits_count, uint8_t *out);
 
 /* integer min-sum decode: soft (positive = logical 1) of length
  * ldpc_cc_elements(bits_count); out receives bits_count bits */
-void ldpc_decode_int(const int64_t *soft, int soft_len, int bits_count,
+void ldpc_decode_int(const llr_t *soft, int soft_len, int bits_count,
                      uint8_t *out);
 
 #endif /* OFDM_LDPC_H */

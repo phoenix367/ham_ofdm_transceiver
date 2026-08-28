@@ -116,7 +116,7 @@ static void min_sum_int(const int64_t *llr, uint8_t *bits)
     }
 }
 
-void ldpc_decode_int(const int64_t *soft, int soft_len, int bits_count,
+void ldpc_decode_int(const llr_t *soft, int soft_len, int bits_count,
                      uint8_t *out)
 {
     static int64_t llr[LDPC_N];

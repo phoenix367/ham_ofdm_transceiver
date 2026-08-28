@@ -6,6 +6,12 @@
 
 #include <stdint.h>
 
+/* LLR sample type -- see rx_internal.h. */
+#ifndef OFDM_LLR_T
+#define OFDM_LLR_T
+typedef int32_t llr_t;
+#endif
+
 #define CONV_K 7
 #define CONV_SPEED 3
 #define CONV_PAD (CONV_K - 1)
@@ -32,7 +38,7 @@ void conv_encode(cc_rate_t rate, const uint8_t *bits, int bits_count,
  * zero. out: bits_count decoded bits. work: traceback scratch of at
  * least (bits_count + CONV_PAD) * CONV_STATES / 8 bytes (1 bit per
  * state per step). */
-void conv_decode(cc_rate_t rate, const int64_t *soft, int soft_len,
+void conv_decode(cc_rate_t rate, const llr_t *soft, int soft_len,
                  int bits_count, uint8_t *out, uint8_t *work);
 
 #endif /* OFDM_CONV_H */

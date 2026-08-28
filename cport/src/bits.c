@@ -50,7 +50,7 @@ void scramble_bits(const uint8_t *in, int n, uint8_t *out)
     }
 }
 
-void descramble_llrs(const int64_t *in, int n, int64_t *out)
+void descramble_llrs(const llr_t *in, int n, llr_t *out)
 {
     uint32_t lfsr = lfsr_init(), p;
     int i;
@@ -74,7 +74,7 @@ void interleave_u8(const uint8_t *in, int n, int num_carriers, uint8_t *out)
         }
 }
 
-void deinterleave_i64(const int64_t *in, int n, int num_carriers, int64_t *out)
+void deinterleave_i64(const llr_t *in, int n, int num_carriers, llr_t *out)
 {
     int rows = (n + num_carriers - 1) / num_carriers;
     int c, r, k = 0;
