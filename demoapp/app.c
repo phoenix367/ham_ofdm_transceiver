@@ -175,15 +175,34 @@ static int g_bc_sent;
 
 /* ---------------- PHY glue ---------------- */
 
+/* Render a frame or burst through the streaming transmitter.
+ *
+ * The generator produces the waveform on demand from one 128-sample IFFT
+ * tile, so nothing here holds a frame: it is what lets the C port drop
+ * tx.c's 4.3 MB g_sig entirely (--gc-sections removes it once
+ * tx_build_frame/tx_build_burst are unreferenced). Bit-identical to the
+ * frame-at-once path, which cport/tests/test_tx.c asserts. */
+static int build_streamed(int rung, const uint8_t *blocks, int pkt_n,
+                          int n_blocks, int typ, int resync_every,
+                          int16_t *out, int out_cap)
+{
+    int total = 0, got, pos = 0;
+    txs_t *t = txs_open(ladder_mode(rung), blocks, pkt_n, n_blocks, typ,
+                        ladder_mod(rung), ladder_spd(rung), resync_every, 0,
+                        &total);
+
+    if (!t || total < 0 || total > out_cap)
+        return -1;
+    while ((got = txs_pull(t, out + pos, out_cap - pos)) > 0)
+        pos += got;
+    return pos == total ? pos : -1;
+}
+
 static int phy_build(void *ctx, const uint8_t *bits, int n, int typ,
                      int rung, int16_t *out, int out_cap)
 {
     (void)ctx;
-    if (tx_frame_len(ladder_mode(rung), n, ladder_mod(rung),
-                     ladder_spd(rung)) > out_cap)
-        return -1;
-    return tx_build_frame(ladder_mode(rung), bits, n, typ,
-                          ladder_mod(rung), ladder_spd(rung), out);
+    return build_streamed(rung, bits, n, 1, typ, 0, out, out_cap);
 }
 
 static int phy_build_burst(void *ctx, const uint8_t *blocks, int pkt_n,
@@ -191,12 +210,8 @@ static int phy_build_burst(void *ctx, const uint8_t *blocks, int pkt_n,
                            int16_t *out, int out_cap)
 {
     (void)ctx;
-    if (tx_burst_len(ladder_mode(rung), pkt_n, ladder_mod(rung),
-                     ladder_spd(rung), n_blocks, resync_every) > out_cap)
-        return -1;
-    return tx_build_burst(ladder_mode(rung), blocks, pkt_n, n_blocks, typ,
-                          ladder_mod(rung), ladder_spd(rung), resync_every,
-                          out);
+    return build_streamed(rung, blocks, pkt_n, n_blocks, typ, resync_every,
+                          out, out_cap);
 }
 
 static int phy_receive_unused(void *ctx, const int16_t *s, int n,
@@ -744,10 +759,10 @@ static int bc_build_next(void)
         for (i = 0; i < nf; i++)
             memcpy(packed + (size_t)i * pkt_n, blocks + (size_t)i * 2600,
                    (size_t)pkt_n);
-        n = tx_build_burst(ladder_mode(g_bc_rung), packed, pkt_n, nf,
-                           PKT_TYP_BCAST, ladder_mod(g_bc_rung),
-                           ladder_spd(g_bc_rung), BURST_STREAM_RESYNC,
-                           g_bc_air + g_bc_pending);
+        n = build_streamed(g_bc_rung, packed, pkt_n, nf, PKT_TYP_BCAST,
+                           BURST_STREAM_RESYNC, g_bc_air + g_bc_pending,
+                           (int)(sizeof(g_bc_air) / sizeof(g_bc_air[0]))
+                               - g_bc_pending);
         if (n <= 0) {
             printf("%s [%s] broadcast: PHY refused a group at rung %d\n",
                    tstamp(), g_name, g_bc_rung);
