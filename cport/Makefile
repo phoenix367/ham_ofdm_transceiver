@@ -85,4 +85,27 @@ armsize: $(GEN) | $(BUILD)
 	done
 	@arm-none-eabi-size $(BUILD)/arm_*.o
 
-.PHONY: bench armsize
+# Run one golden-vector suite on Cortex-M7 under QEMU (qemu/README.md).
+#   make qemu SUITE=test_stream
+# Needs an M-profile toolchain: a vendor arm-none-eabi (Xilinx, ST) is
+# Cortex-A oriented, compiles cortex-m7 fine and then fails at link with
+# no v7e-m multilib -- so prefer the packaged one when it is present.
+QEMUCC   ?= $(if $(wildcard /usr/bin/arm-none-eabi-gcc),/usr/bin/arm-none-eabi-gcc,arm-none-eabi-gcc)
+QEMUSIZE ?= $(QEMUCC:gcc=size)
+QEMUMACH ?= mps2-an500
+QEMUCPU  ?= cortex-m7
+SUITE    ?= test_primitives
+QEMUFLAGS = -std=c99 -Os -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 \
+            -mfloat-abi=hard -ffunction-sections -fdata-sections \
+            -Isrc -Itests -nostartfiles -specs=nano.specs -u _printf_float
+
+qemu: $(GEN) | $(BUILD)
+	$(QEMUCC) $(QEMUFLAGS) -T qemu/mps2.ld -Wl,--gc-sections \
+	    qemu/startup.c $(SRC) tests/$(SUITE).c -lm \
+	    -o $(BUILD)/$(SUITE).elf
+	@$(QEMUSIZE) $(BUILD)/$(SUITE).elf
+	qemu-system-arm -M $(QEMUMACH) -cpu $(QEMUCPU) -nographic \
+	    -semihosting-config enable=on,target=native \
+	    -kernel $(BUILD)/$(SUITE).elf
+
+.PHONY: bench armsize qemu
