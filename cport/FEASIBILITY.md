@@ -82,25 +82,48 @@ block-periodicity and the TX golden-hash tests prove the reconstruction
 bit-exact. This supersedes the earlier "synthesize EXTREME at init"
 idea (better ratio, no synthesis code, no init time).
 
-RAM (shared-raw-ring streaming architecture, as implemented):
+RAM (streaming architecture, as implemented). These are MEASURED on a
+linked Cortex-M7 image (`arm-none-eabi-gcc -Os`, `--gc-sections`) that
+references only the streaming APIs, not projected:
+
+| Image | Flash | RAM (.bss) |
+|---|---|---|
+| Transmit only (`txs_open`/`txs_pull`) | 20 KB | **28 KB** |
+| **Full station, all three modes** (streaming RX + TX + link layer) | **50 KB** | **1.04 MB** |
+
+Where the station's RAM goes:
 
 | Component | Size |
 |---|---|
 | Shared raw int16 ring (147456 samples, all instances) | 288 KB |
-| Per-mode block summaries + symbol scratch | 8 / 35 / 69 KB |
-| Decoder state (Viterbi + LDPC messages) | 53 KB |
-| **NORMAL only** | **≈ 100 KB** (ring may shrink to its 8.5 k lookback: ≈ 30 KB) |
-| **NORMAL + ROBUST** | **≈ 140 KB** (ring sized to ROBUST: ≈ 120 KB) |
-| **All three modes** | **≈ 453 KB** |
+| Per-mode tone block summaries | 204 KB |
+| Scratch arena (detect / demod / decode, unioned) | 153 KB |
+| LLR buffers, 3 instances (int32) | 192 KB |
+| Everything else (FEC scratch, station/link state, TX) | ~227 KB |
 
-(`RXS_RAW_RING_LEN` is overridable at build time; a single-mode build
-sizes it to that mode's measured lookback plus margin.)
+A caution about single-mode builds. **Rung 0 of the ladder is EXTREME**
+(`LADDER_MODE[0] == 2`), and rung 0 is where both stations bootstrap,
+where `ctl_tx_rung()` drops after four consecutive losses, and where
+staleness decay lands. Rungs 1-3 are ROBUST. So a build that omits
+EXTREME cannot acquire a link at all, and cannot recover one after a
+fade -- which is exactly when EXTREME's 64x tiling earns its cost.
+Per-mode sizing is therefore a CAPABILITY choice, not a memory knob, and
+would need the bootstrap rung changed first. `RXS_RAW_RING_LEN` is still
+overridable for a deployment that has made that decision.
 
-Note: enabling the extended-frame protocol (`PKT_TYP_EXT_DATA`, 255-byte
-payloads) grows the Viterbi buffers to ~42 KB (2112-step trellis:
-25 KB int32 depuncture + 17 KB packed traceback) and the LLR scratch 8×
-(~190 KB/instance as int64); a build without EXT frames keeps the
-figures above (`CONV_MAX_STEPS` back to 272, `MAX_LLRS` to 1024).
+How the figures got here (they were ~10 MB of `.bss` before):
+- the transmitter generates its waveform on demand from one 128-sample
+  IFFT tile instead of buffering a frame (4.3 MB -> 10 kB);
+- detection pulls samples through `zc_src_t` instead of materialising
+  the search window, and both lag correlations run off a 128-sample
+  delay line, so detection memory follows the PREAMBLE rather than
+  anything it searches (2.4 MB -> 220 kB);
+- the call-scoped scratch of the detect, demod and decode phases shares
+  one arena, sized by the largest phase rather than their sum
+  (646 kB -> 153 kB). Note demod is the largest, not detect: `eval_hyp`'s
+  derotation scratch is live *while* the symbol samples still are;
+- LLRs are int32 (measured peak 1211062) and analytic samples are int32
+  (measured peak 43077), halving both.
 
 Memory-shape notes (why the budgets are what they are):
 - **Viterbi traceback is 1 bit per state per step** — the predecessor
@@ -123,13 +146,23 @@ Memory-shape notes (why the budgets are what they are):
   Constraint: instances fed different audio must not be live
   concurrently (sequential reuse is fine); test_stream fails a case if
   `rxs_ring_hwm` ever exceeds capacity.
-- Further headroom if ever needed: detection scratch (ZC segment) and
-  decode scratch (Viterbi) are never live simultaneously — a union
-  saves the smaller; LLR buffers fit int32; quarter-wave NCO saves
-  6 KB flash. None taken — budgets already fit the target parts.
+- **Taken since**: the scratch union, int32 LLRs and int32 analytic
+  samples above. Still available: a quarter-wave NCO table (~6 KB
+  flash), and dropping `PKT_TYP_EXT_DATA` support, which returns
+  `MAX_LLRS` to 1024 and `CONV_MAX_STEPS` to 272 -- a FEATURE trade
+  rather than a mode trade, worth roughly 170 KB across the LLR buffers
+  and the arena.
+- **Narrowing a type is where the bugs live.** Three defects this way:
+  a `memcpy` with a hardcoded `sizeof(int64_t)` into a now-int32 array
+  (loud), a `>>= sh` with `sh` up to 34 that is undefined on int32
+  (UBSan only), and a 2x buffer overrun in `zc_arr_fetch` that the whole
+  suite passed straight through (found by grep, confirmed by ASan). Use
+  `sizeof(*ptr)`, and run the sanitizers after any width change.
 
-(The host reference's multi-MB `.bss` is oversized frame-at-once scratch,
-not part of the streaming budget.)
+(The host reference still carries multi-MB frame-at-once scratch. It is
+not part of the streaming budget and `--gc-sections` drops it -- but only
+if the build enables section GC, which is why `demoapp/Makefile` now
+does. Without it the linker keeps whole objects and the buffers stay.)
 
 ## Target fit: STM32H723xG (chosen target)
 
@@ -139,20 +172,34 @@ data). CPU: the @480 MHz projections scale by 480/550 — EXTREME ZC
 acquisition ≈ 9 % amortized, everything else < 3 %. Flash: the whole
 57 KB stack fits in ITCM alone.
 
-| Configuration | RAM | Fits? |
+| Configuration (MEASURED, linked image) | RAM | Fits ~496 KB? |
 |---|---|---|
-| NORMAL only | ≈ 125 KB | yes |
-| NORMAL + EXT frames (int64 LLR scratch, as coded) | ≈ 357 KB | yes |
-| NORMAL + ROBUST | ≈ 345 KB | yes |
-| NORMAL + ROBUST + EXT (needs the int32-LLR trim) | ≈ 482 KB | tight |
-| All three modes, shared raw ring (**implemented**) | ≈ 453 KB | **yes** |
+| Transmit only | 28 KB | yes |
+| All three modes, no EXT frames (`-DMAX_LLRS=1024`) | 834 KB | **no** |
+| All three modes + EXT frames (as built) | 1.04 MB | **no** |
 
-The shared-ring architecture is now the only one: one raw 2 B/sample
-ring (288 KB) serves all instances, Hilbert recomputed on extraction
-(bit-identical, suite-verified), per-mode summaries/scratch (~112 KB)
-+ decoders (~53 KB). The full three-mode station fits the H723 with
-~43 KB to spare. Linker placement: Viterbi/FFT/symbol scratch in DTCM,
-the ring in AXI SRAM.
+**This verdict is a correction.** The table previously read "all three
+modes ≈ 453 KB, fits with ~43 KB to spare". That was an estimate, and
+the linked image does not meet it. Two places the estimate was optimistic:
+
+- it costed per-mode block summaries (8/35/69 KB, ~112 KB total), but
+  `g_blk[RXS_MAX_INST][BLK_CAP]` gives EVERY instance the EXTREME block
+  count -- 204 KB as built. Sizing each instance to its own mode's
+  window (15 / 30 / 120 blocks) would recover ~116 KB and costs no
+  capability, since an instance only ever scans its own mode. This is
+  the clearest remaining win;
+- it assumed a build without EXT frames. That is a real option and is
+  now measurable (`-DMAX_LLRS=1024`), worth 236 KB.
+
+Even with both, the floor is the 288 KB raw ring plus ~88 KB of
+right-sized summaries plus the 153 KB arena: about 529 KB, still over
+the H723's usable data RAM. Closing the rest means shrinking the arena
+(its detect phase is EXTREME's ZC geometry) or accepting a larger part.
+The ring itself is not negotiable while EXTREME is supported: its
+measured lookback is 124478 samples.
+
+What has NOT changed: flash is comfortable at 50 KB against 1 MB, and
+the CPU projections stand.
 
 ## Verdicts
 
@@ -160,12 +207,14 @@ the ring in AXI SRAM.
   (~10 % amortized). On M4 it is ~50 % during the 5.8 s acquisition —
   workable but tight; the planned FFT overlap-save correlation (~10×)
   brings it to ~5 % if EXTREME-on-M4 is wanted.
-- **G3 (≤ 60 % load, RAM within target)**: **PASS on M7/H7-class**
-  (≥ 400 KB RAM: full three-mode build ≈ 645 KB needs a 1 MB part such
-  as STM32H743, or the raw-int16-ring variant at roughly half). **PASS
-  on M4-class for NORMAL+ROBUST** (≈ 345 KB with LDPC — a 192 KB part
-  fits NORMAL-only ≈ 125 KB, or NORMAL+ROBUST without LDPC ≈ 300 KB is
-  still over: ROBUST needs a ≥ 384 KB part).
+- **G3 (≤ 60 % load, RAM within target)**: load **PASS**; RAM
+  **QUALIFIED** — see "Target fit" above. The measured three-mode image
+  is 834 KB without EXT frames and 1.04 MB with, so it needs a ~1 MB
+  part (STM32H743 class) rather than the H723xG named as the target.
+  Single-mode figures are NOT a way out: rung 0 is EXTREME, so a build
+  without it cannot bootstrap or recover a link at all. The path back to
+  an H723 is right-sizing the per-instance block summaries (~116 KB) and
+  the arena, not dropping modes.
 - The gated two-stage frequency search is confirmed in vivo: 0.9 ms vs
   4.9 ms per EXTREME first symbol on identical input.
 

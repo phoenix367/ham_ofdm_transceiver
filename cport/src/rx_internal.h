@@ -52,7 +52,12 @@ extern union rx_arena_u {
 } rx_arena_store;
 #define rx_arena (rx_arena_store.b)
 
-#define MAX_LLRS 8192 /* 255-byte EXT frame at BPSK 1/3 */
+/* Sized for a 255-byte EXT frame at BPSK 1/3. A build without
+ * PKT_TYP_EXT_DATA can set this to 1024 (-DMAX_LLRS=1024), which is a
+ * FEATURE trade, not a mode trade. */
+#ifndef MAX_LLRS
+#define MAX_LLRS 8192
+#endif
 #define MAX_SYMS 400
 
 /* one symbol at seg (>= symbol_len samples), absolute position `pos` for

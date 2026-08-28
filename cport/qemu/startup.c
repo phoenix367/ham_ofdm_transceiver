@@ -12,6 +12,7 @@
 extern unsigned __data_start__, __data_end__, __bss_start__, __bss_end__;
 extern unsigned __etext, _estack, __heap_start__, __heap_end__;
 extern int main(void);
+extern void (*const g_vectors[])(void);   /* defined below */
 
 static inline int semihost(int op, void *arg)
 {
@@ -134,6 +135,16 @@ static void hang(void) { for (;;) ; }
 void Reset_Handler(void)
 {
     unsigned *s = &__etext, *d = &__data_start__;
+
+    /* Point VTOR at our table. RESET is fetched from address 0 by
+     * hardware, so boot works regardless -- but every LATER exception
+     * vectors through VTOR, and leaving it at whatever the machine reset
+     * to means a fault can never reach its handler. The symptom is
+     * particularly misleading: the core stacks the exception frame,
+     * enters HardFault state, and locks up without executing one
+     * instruction of handler code, so gdb breakpoints on the handlers
+     * never fire and every cause looks identical. */
+    *(volatile unsigned *)0xE000ED08 = (unsigned)(unsigned long)&g_vectors[0];
 
     /* The Cortex-M7 FPU is DISABLED at reset. Built -mfloat-abi=hard,
      * the very first FP instruction (main's "vpush {d8}" prologue) then
