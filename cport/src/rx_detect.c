@@ -14,6 +14,7 @@
 /* cc[m] gathers mag[m + g*klen] for g < ng, so the scan needs
  * (ng-1)*klen+1 magnitudes resident: EXTREME 15*512+1 = 7681. */
 #define ZC_MAG_RING (15 * ZC_KLEN_MAX + 1)
+#define ZC_PREAMBLE_MAX (64 * FFT_BINS)   /* zc_L, EXTREME */
 
 typedef struct {
     int B, T, max_shift, thr_q10, n_mask_bins;
@@ -60,6 +61,111 @@ static int64_t lag_word(const int64_t *di, const int64_t *dq, int n, int lag)
 }
 
 /* lag-N phase estimate of a derotated segment -> residual phase word */
+
+/* Both lag correlations in ONE pass over a pulled source.
+ *
+ * The lags are FFT_BINS and FFT_BINS/2 -- 128 and 64 -- not a fraction
+ * of the segment, so the correlation never needs more than a 128-sample
+ * delay line however long the segment is. Materialising the segment for
+ * it cost 640 kB at EXTREME to hold 40960 samples that are read exactly
+ * twice each.
+ *
+ * Accumulates the same terms in the same order as lag_word(), so the
+ * cordic input is identical and the result is bit-exact. */
+#define LAG_CHUNK 512
+#define LAG_HIST FFT_BINS
+
+static void lag_words_src(const zc_src_t *src, int n, int want_coarse,
+                          int64_t *fine_out, int64_t *coarse_out)
+{
+    static int64_t bi[LAG_CHUNK + LAG_HIST], bq[LAG_CHUNK + LAG_HIST];
+    int64_t rr1 = 0, ri1 = 0, rr2 = 0, ri2 = 0, ang, mag;
+    const int L1 = FFT_BINS, L2 = FFT_BINS / 2;
+    int pos = 0, hist = 0;
+
+    while (pos + hist < n) {
+        int want = LAG_CHUNK;
+        int total, j, j0;
+        if (pos + hist + want > n)
+            want = n - pos - hist;
+        src->fetch(src->ctx, pos + hist, want, bi + hist, bq + hist);
+        total = hist + want;
+        /* absolute index a = pos + j; a-L1 must still be in the buffer */
+        j0 = pos < L1 ? L1 - pos : L1;
+        for (j = j0; j < total; j++) {
+            rr1 += bi[j - L1] * bi[j] + bq[j - L1] * bq[j];
+            ri1 += bi[j - L1] * bq[j] - bq[j - L1] * bi[j];
+            if (want_coarse) {
+                rr2 += bi[j - L2] * bi[j] + bq[j - L2] * bq[j];
+                ri2 += bi[j - L2] * bq[j] - bq[j - L2] * bi[j];
+            }
+        }
+        if (total > LAG_HIST) {
+            memmove(bi, bi + total - LAG_HIST,
+                    (size_t)LAG_HIST * sizeof(int64_t));
+            memmove(bq, bq + total - LAG_HIST,
+                    (size_t)LAG_HIST * sizeof(int64_t));
+            pos += total - LAG_HIST;
+            hist = LAG_HIST;
+        } else {
+            hist = total;
+        }
+    }
+    cordic_atan2(ri1, rr1, &ang, &mag);
+    *fine_out = div_round_signed(ang, L1);
+    if (want_coarse) {
+        cordic_atan2(ri2, rr2, &ang, &mag);
+        *coarse_out = div_round_signed(ang, L2);
+    }
+}
+
+/* array + derotation, and source + derotation: the phase at index k is
+ * k*word, so a fetch can start anywhere */
+typedef struct {
+    const int64_t *i_arr, *q_arr;
+    int off;
+    int64_t w;
+} zc_rot_ctx_t;
+
+static void zc_rot_fetch(void *ctx, int k, int n, int64_t *di, int64_t *dq)
+{
+    const zc_rot_ctx_t *a = (const zc_rot_ctx_t *)ctx;
+    memcpy(di, a->i_arr + a->off + k, (size_t)n * sizeof(int64_t));
+    memcpy(dq, a->q_arr + a->off + k, (size_t)n * sizeof(int64_t));
+    nco_derotate(di, dq, n, a->w,
+                 (uint32_t)((int64_t)(uint32_t)a->w * k), di, dq);
+}
+
+typedef struct {
+    const zc_src_t *inner;
+    int off;
+    int64_t w;
+} zc_rot2_ctx_t;
+
+static void zc_rot2_fetch(void *ctx, int k, int n, int64_t *di, int64_t *dq)
+{
+    const zc_rot2_ctx_t *a = (const zc_rot2_ctx_t *)ctx;
+    a->inner->fetch(a->inner->ctx, a->off + k, n, di, dq);
+    nco_derotate(di, dq, n, a->w,
+                 (uint32_t)((int64_t)(uint32_t)a->w * k), di, dq);
+}
+
+int64_t rx_lag_n_word_src(const zc_src_t *src, int n)
+{
+    int64_t fine = 0, coarse = 0;
+    lag_words_src(src, n, 0, &fine, &coarse);
+    return fine;
+}
+
+int64_t rx_residual_word_src(const zc_src_t *src, int n)
+{
+    int64_t fine = 0, coarse = 0, ambig = (int64_t)1 << PHASE_BITS, k;
+    lag_words_src(src, n, 1, &fine, &coarse);
+    ambig /= FFT_BINS;
+    k = div_round_signed(coarse - fine, ambig);
+    return fine + k * ambig;
+}
+
 int64_t rx_lag_n_word(const int64_t *di, const int64_t *dq, int n)
 {
     return lag_word(di, dq, n, FFT_BINS);
@@ -79,30 +185,12 @@ int64_t rx_lag_n_word(const int64_t *di, const int64_t *dq, int n)
  * coarse error, so it picks the right cycle. (The float chain does the
  * same job with a full-block FFT peak; this is the integer-cheap twin.)
  * Keep this in step with ofdm_phy/fixed/rx.py::_detect_newman. */
-static int64_t rx_residual_word(const int64_t *di, const int64_t *dq, int n)
-{
-    int64_t fine = lag_word(di, dq, n, FFT_BINS);
-    int64_t coarse = lag_word(di, dq, n, FFT_BINS / 2);
-    int64_t ambig = (int64_t)1 << PHASE_BITS;
-    int64_t k;
-    ambig /= FFT_BINS;                    /* one lag-N cycle */
-    k = div_round_signed(coarse - fine, ambig);
-    return fine + k * ambig;
-}
 
 static int64_t g_pows[MAX_BLOCKS * DET_B_MAX];
-/* This scratch is NOT a whole detection window. It holds either one
- * coarse segment (2*T*FFT_BINS, EXTREME 40960) for the residual-CFO
- * estimate, or one ZC preamble (zc_L*FFT_BINS, EXTREME 8192) for the
- * lag-N word -- never ZC_WIN_MAX. Sizing it to the window cost 469 KB
- * of nothing.
- *
- * It must stay SEPARATE from rx_stream's buffer of the same name, which
- * looks like a duplicate and is not: rx_stream passes its buffer in as
- * i_arr/q_arr and detect_zc derotates FROM that INTO this one, so
- * sharing would alias the input with the output. */
-#define DET_SEG_MAX (2 * DET_T_EXTREME * FFT_BINS)
-static int64_t g_seg_i[DET_SEG_MAX], g_seg_q[DET_SEG_MAX];
+/* No detection scratch here any more: the ZC scan pulls through
+ * zc_src_t and both lag correlations run off a 128-sample delay line, so
+ * neither the search window nor the coarse segment is ever resident. */
+
 
 static int cmp_i64(const void *a, const void *b)
 {
@@ -232,19 +320,80 @@ static int detect_newman(const det_mode_t *d, const int64_t *i_arr,
         int sample_index = best_off * B;
         int64_t coarse_word = (int64_t)best_shift * d->word_per_bin;
         int seg_n = 2 * T * FFT_BINS;
-        nco_derotate(i_arr + sample_index, q_arr + sample_index, seg_n,
-                     coarse_word,
-                     0u /* python derotates the slice from phase 0 */,
-                     g_seg_i, g_seg_q);
+        zc_rot_ctx_t rc;
+        zc_src_t rs;
+        rc.i_arr = i_arr;
+        rc.q_arr = q_arr;
+        rc.off = sample_index;
+        rc.w = coarse_word;   /* python derotates the slice from phase 0 */
+        rs.ctx = &rc;
+        rs.fetch = zc_rot_fetch;
         *start_out = sample_index;
-        *word_out = coarse_word + rx_residual_word(g_seg_i, g_seg_q, seg_n);
+        *word_out = coarse_word + rx_residual_word_src(&rs, seg_n);
     }
     return 0;
 }
 
 /* ZC stage on a (derotated) window: fine timing + CFO */
-static int detect_zc(const det_mode_t *d, const int64_t *i_arr,
-                     const int64_t *q_arr, int n, int *time_out,
+
+/* Bounded slice of the scan window.
+ *
+ * The scan's live span is preamble_len+1 samples however long the search
+ * is (see zc_src_t), so this holds that plus a slide block and refills as
+ * the scan advances. Each sample is fetched exactly once per pass: the
+ * retained tail is moved down rather than re-read. 164 kB at EXTREME,
+ * against 1.1 MB to materialise the window. */
+#define ZC_SLIDE_BLK 2048
+#define ZC_SLIDE_W (ZC_PREAMBLE_MAX + ZC_SLIDE_BLK)
+
+static int64_t g_wi[ZC_SLIDE_W], g_wq[ZC_SLIDE_W];
+static int g_wbase, g_wfill;
+
+static void win_open(const zc_src_t *src, int n)
+{
+    g_wbase = 0;
+    g_wfill = n < ZC_SLIDE_W ? n : ZC_SLIDE_W;
+    if (g_wfill > 0)
+        src->fetch(src->ctx, 0, g_wfill, g_wi, g_wq);
+}
+
+/* make absolute index hi readable, keeping at least `back` behind it */
+static void win_need(const zc_src_t *src, int n, int hi, int back)
+{
+    int new_base, shift, add;
+
+    if (hi < g_wbase + g_wfill || g_wbase + g_wfill >= n)
+        return;
+    new_base = hi - back;
+    if (new_base < 0)
+        new_base = 0;
+    if (new_base < g_wbase)
+        new_base = g_wbase;
+    shift = new_base - g_wbase;
+    if (shift > 0) {
+        int keep = g_wfill - shift;
+        if (keep < 0)
+            keep = 0;
+        memmove(g_wi, g_wi + shift, (size_t)keep * sizeof(int64_t));
+        memmove(g_wq, g_wq + shift, (size_t)keep * sizeof(int64_t));
+        g_wbase = new_base;
+        g_wfill = keep;
+    }
+    add = ZC_SLIDE_W - g_wfill;
+    if (g_wbase + g_wfill + add > n)
+        add = n - g_wbase - g_wfill;
+    if (add > 0) {
+        src->fetch(src->ctx, g_wbase + g_wfill, add,
+                   g_wi + g_wfill, g_wq + g_wfill);
+        g_wfill += add;
+    }
+}
+
+#define WI(a) g_wi[(a) - g_wbase]
+#define WQ(a) g_wq[(a) - g_wbase]
+
+static int detect_zc(const det_mode_t *d, const zc_src_t *src,
+                     int n, int *time_out,
                      int64_t *word_out)
 {
     /* Streaming ZC scan: memory is a function of the PREAMBLE, not of the
@@ -297,15 +446,18 @@ static int detect_zc(const det_mode_t *d, const int64_t *i_arr,
             n_pos = n_cc;
 
         /* energy of the first candidate window, [0, preamble_len) */
+        win_open(src, n);
+        win_need(src, n, preamble_len - 1, preamble_len);
         for (k = 0; k < preamble_len; k++)
-            we += i_arr[k] * i_arr[k] + q_arr[k] * q_arr[k];
+            we += WI(k) * WI(k) + WQ(k) * WQ(k);
 
         j = 0;
         for (p = 0; p < n_corr; p++) {
             int64_t a = 0, b2 = 0, aa, bb;
+            win_need(src, n, p + klen < n ? p + klen : n - 1, preamble_len);
             for (k = 0; k < klen; k++) {
-                a += i_arr[p + k] * kr[k] + q_arr[p + k] * ki[k];
-                b2 += q_arr[p + k] * kr[k] - i_arr[p + k] * ki[k];
+                a += WI(p + k) * kr[k] + WQ(p + k) * ki[k];
+                b2 += WQ(p + k) * kr[k] - WI(p + k) * ki[k];
             }
             a = rshift_round(a, Q15);
             b2 = rshift_round(b2, Q15);
@@ -338,9 +490,9 @@ static int detect_zc(const det_mode_t *d, const int64_t *i_arr,
                     }
                     /* slide the energy window to [m+1, m+1+preamble_len) */
                     if (m + 1 < n_pos)
-                        we += i_arr[m + preamble_len] * i_arr[m + preamble_len]
-                              + q_arr[m + preamble_len] * q_arr[m + preamble_len]
-                              - i_arr[m] * i_arr[m] - q_arr[m] * q_arr[m];
+                        we += WI(m + preamble_len) * WI(m + preamble_len)
+                              + WQ(m + preamble_len) * WQ(m + preamble_len)
+                              - WI(m) * WI(m) - WQ(m) * WQ(m);
                 }
             }
         }
@@ -365,11 +517,33 @@ static int detect_zc(const det_mode_t *d, const int64_t *i_arr,
     if (best_metric < 0)
         return -1;
 
-    nco_derotate(i_arr + best_idx, q_arr + best_idx, preamble_len, best_w,
-                 0u, g_seg_i, g_seg_q);
-    *word_out = best_w + rx_lag_n_word(g_seg_i, g_seg_q, preamble_len);
+    /* revisit the winner by pulling its preamble again, derotated by the
+     * winning hypothesis -- nothing of the scan was kept */
+    {
+        zc_rot2_ctx_t rc;
+        zc_src_t rs;
+        rc.inner = src;
+        rc.off = best_idx;
+        rc.w = best_w;
+        rs.ctx = &rc;
+        rs.fetch = zc_rot2_fetch;
+        *word_out = best_w + rx_lag_n_word_src(&rs, preamble_len);
+    }
     *time_out = (best_idx - CP_LEN) + d->zc_pre_block_len;
     return 0;
+}
+
+/* array-backed source, so callers that already hold the window are
+ * unchanged (the frame-at-once path, and the golden-vector tests) */
+typedef struct {
+    const int64_t *i_arr, *q_arr;
+} zc_arr_ctx_t;
+
+static void zc_arr_fetch(void *ctx, int k, int n, int64_t *di, int64_t *dq)
+{
+    const zc_arr_ctx_t *a = (const zc_arr_ctx_t *)ctx;
+    memcpy(di, a->i_arr + k, (size_t)n * sizeof(int64_t));
+    memcpy(dq, a->q_arr + k, (size_t)n * sizeof(int64_t));
 }
 
 int rx_detect(link_mode_t mode, const int64_t *i_arr, const int64_t *q_arr,
@@ -390,7 +564,17 @@ int rx_detect(link_mode_t mode, const int64_t *i_arr, const int64_t *q_arr,
         static int64_t wi[ZC_WIN_MAX], wq[ZC_WIN_MAX];
         uint32_t sp = 0u; /* python derotates the slice from phase 0 */
         nco_derotate(i_arr + cs, q_arr + cs, win, cw, sp, wi, wq);
-        if (detect_zc(d, wi, wq, win, &ft, &fw) != 0)
+        {
+            zc_arr_ctx_t a;
+            zc_src_t src;
+            a.i_arr = wi;
+            a.q_arr = wq;
+            src.ctx = &a;
+            src.fetch = zc_arr_fetch;
+            if (detect_zc(d, &src, win, &ft, &fw) != 0)
+                return -1;
+        }
+        if (0)
             return -1;
     }
     *start = cs + ft;
@@ -402,5 +586,17 @@ int rx_detect_zc_window(link_mode_t mode, const int64_t *i_arr,
                         const int64_t *q_arr, int n, int *time_out,
                         int64_t *word_out)
 {
-    return detect_zc(&DET[mode], i_arr, q_arr, n, time_out, word_out);
+    zc_arr_ctx_t a;
+    zc_src_t src;
+    a.i_arr = i_arr;
+    a.q_arr = q_arr;
+    src.ctx = &a;
+    src.fetch = zc_arr_fetch;
+    return detect_zc(&DET[mode], &src, n, time_out, word_out);
+}
+
+int rx_detect_zc_src(link_mode_t mode, const zc_src_t *src, int n,
+                     int *time_out, int64_t *word_out)
+{
+    return detect_zc(&DET[mode], src, n, time_out, word_out);
 }

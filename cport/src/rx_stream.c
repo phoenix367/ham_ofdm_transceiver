@@ -81,7 +81,10 @@ static blk_sum_t g_blk[RXS_MAX_INST][BLK_CAP];
 static int64_t g_h64[RXS_MAX_INST][MAX_LLRS], g_d64[RXS_MAX_INST][MAX_LLRS];
 static int g_hexps[RXS_MAX_INST][MAX_SYMS], g_dexps[RXS_MAX_INST][MAX_SYMS];
 /* per-call scratch (never live across rxs_push calls) */
-static int64_t g_seg_i[ZC_WIN_MAX], g_seg_q[ZC_WIN_MAX];
+/* No segment scratch: the tone stage's residual and the ZC scan both
+ * pull through zc_ring_fetch, which reads the shared raw ring directly
+ * and derotates on the way out. This pair held 1.1 MB. */
+
 static int64_t g_q64[MAX_LLRS];
 
 /* analytic extraction: recompute the streaming Hilbert from the raw
@@ -140,6 +143,27 @@ static int ring_copy(rxs_t *r, int64_t abs_start, int n,
                     : 0;
     }
     return ok ? 0 : -1;
+}
+
+/* ZC scan source: the samples are already in the shared raw ring, so
+ * materialising a derotated int64 copy of the whole search window cost
+ * 1.1 MB to hold data we had. The scan's live span is only
+ * preamble_len+1 samples (see zc_src_t), so it pulls what it needs and
+ * we derotate on the way out.
+ *
+ * The derotation phase is a pure function of the index -- phase =
+ * k * cw, mod 2^32 -- which is what makes random access possible. */
+typedef struct {
+    rxs_t *r;
+    int64_t base_abs, cw;
+} zc_ring_ctx_t;
+
+static void zc_ring_fetch(void *ctx, int k, int n, int64_t *di, int64_t *dq)
+{
+    zc_ring_ctx_t *z = (zc_ring_ctx_t *)ctx;
+    ring_copy(z->r, z->base_abs + k, n, di, dq);
+    nco_derotate(di, dq, n, z->cw, (uint32_t)((int64_t)(uint32_t)z->cw * k),
+                 di, dq);
 }
 
 rxs_t *rxs_open(link_mode_t mode, int calibrate)
@@ -324,9 +348,17 @@ static void tone_commit(rxs_t *r)
          r->best_shift, (long long)r->best_metric);
     r->cs_abs = r->best_off_blk * r->B;
     r->cw = (int64_t)r->best_shift * r->word_per_bin;
-    ring_copy(r, r->cs_abs, seg_n, g_seg_i, g_seg_q);  /* see block_summary */
-    nco_derotate(g_seg_i, g_seg_q, seg_n, r->cw, 0u, g_seg_i, g_seg_q);
-    r->cw += rx_lag_n_word(g_seg_i, g_seg_q, seg_n);
+    {   /* pulled: the lag correlation needs a 128-sample delay line, not
+         * the 40960-sample segment, so nothing is materialised here */
+        zc_ring_ctx_t z;
+        zc_src_t src;
+        z.r = r;
+        z.base_abs = r->cs_abs;
+        z.cw = r->cw;
+        src.ctx = &z;
+        src.fetch = zc_ring_fetch;
+        r->cw += rx_lag_n_word_src(&src, seg_n);
+    }
     r->st = S_ZC_WAIT;
 }
 
@@ -483,11 +515,24 @@ static int advance(rxs_t *r, rxs_event_t *ev)
             int64_t fw;
             if (r->abs_n < r->cs_abs + r->zc_win)
                 return 0;
-            ring_copy(r, r->cs_abs, r->zc_win, g_seg_i, g_seg_q);
-            nco_derotate(g_seg_i, g_seg_q, r->zc_win, r->cw, 0u,
-                         g_seg_i, g_seg_q);
-            if (rx_detect_zc_window(r->mode, g_seg_i, g_seg_q, r->zc_win,
-                                    &ft, &fw) != 0) {
+            {
+                zc_ring_ctx_t z;
+                zc_src_t src;
+                z.r = r;
+                z.base_abs = r->cs_abs;
+                z.cw = r->cw;
+                src.ctx = &z;
+                src.fetch = zc_ring_fetch;
+                ft = 0;
+                fw = 0;
+                if (rx_detect_zc_src(r->mode, &src, r->zc_win, &ft, &fw)
+                    != 0) {
+                    SDBG("zc: no lock at cs=%lld\n", (long long)r->cs_abs);
+                    rearm(r, r->cs_abs + r->B);
+                    continue;
+                }
+            }
+            if (0) {
                 SDBG("zc: no lock at cs=%lld\n", (long long)r->cs_abs);
                 rearm(r, r->cs_abs + r->B); /* false tone hit */
                 continue;
