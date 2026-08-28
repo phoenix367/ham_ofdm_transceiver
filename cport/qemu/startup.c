@@ -78,10 +78,40 @@ void _exit(int code)
  * instead -- the stacked PC is the whole diagnosis. */
 void fault_report(unsigned *sp, int which)
 {
-    static const char *n[] = { "HARD", "MEMMANAGE", "BUS", "USAGE", "NMI" };
-    printf("\n*** %s FAULT  pc=%08x lr=%08x psr=%08x r0=%08x r1=%08x\n",
-           n[which], sp[6], sp[5], sp[7], sp[0], sp[1]);
-    _exit(3);
+    /* No printf. A fault handler that calls into the C library cannot
+     * survive the conditions it exists to report -- every fault then
+     * presents as the same opaque "can't escalate 3 to HardFault"
+     * lockup, which is how two wrong diagnoses got made before this.
+     * Hand-formatted into a static buffer, straight out via SYS_WRITE0.
+     *
+     * CFSR (0xE000ED28) is the answer: bit 16 UNDEFINSTR, 17 INVSTATE,
+     * 24 UNALIGNED, 25 DIVBYZERO, 8..15 bus faults, 0..7 mem faults.
+     * HFSR bit 30 FORCED means it escalated from one of those. */
+    static char msg[] =
+        "*** FAULT x pc=xxxxxxxx lr=xxxxxxxx psr=xxxxxxxx "
+        "cfsr=xxxxxxxx hfsr=xxxxxxxx sp=xxxxxxxx\n";
+    static const char hx[] = "0123456789abcdef";
+    unsigned v[6];
+    int f, i;
+
+    v[0] = sp[6];                              /* stacked PC  */
+    v[1] = sp[5];                              /* stacked LR  */
+    v[2] = sp[7];                              /* stacked xPSR */
+    v[3] = *(volatile unsigned *)0xE000ED28;   /* CFSR */
+    v[4] = *(volatile unsigned *)0xE000ED2C;   /* HFSR */
+    v[5] = (unsigned)(unsigned long)sp;
+    msg[10] = (char)('0' + which);
+    for (f = 0; f < 6; f++) {
+        static const int at[6] = { 15, 27, 40, 54, 68, 80 };
+        unsigned x = v[f];
+        for (i = 7; i >= 0; i--) {
+            msg[at[f] + i] = hx[x & 15u];
+            x >>= 4;
+        }
+    }
+    semihost(0x04, msg);
+    semihost(0x18, (void *)0x20026);
+    for (;;) ;
 }
 
 #define FAULT(name, idx)                                                  \
@@ -125,8 +155,20 @@ void Reset_Handler(void)
     _exit(main());
 }
 
+/* 16 core exceptions + 96 external IRQ slots.
+ *
+ * A 16-entry table is the trap here: any exception with number >= 16 --
+ * i.e. ANY peripheral interrupt -- reads past the end of it, fetches
+ * whatever follows in .text, and branches there. The observed failure
+ * was exactly that: stacking SUCCEEDED (SP = _estack - 0x20, one frame,
+ * stack otherwise empty, so not an overflow), and the core then jumped
+ * to PC=0 and locked up. It looked nondeterministic because it depends
+ * on something asserting an IRQ, not on the code under test.
+ *
+ * Every slot is populated so an unexpected interrupt reports itself
+ * instead of vectoring into space. */
 __attribute__((section(".isr_vector"), used))
-void (*const g_vectors[])(void) = {
+void (*const g_vectors[16 + 96])(void) = {
     (void (*)(void)) &_estack,
     Reset_Handler,
     hang,                 /* NMI */
@@ -135,4 +177,13 @@ void (*const g_vectors[])(void) = {
     BusFault_Handler,
     UsageFault_Handler,
     hang, hang, hang, hang, hang, hang, hang, hang, hang,
+    /* external IRQs 0..95 */
+    hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang,
+    hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang,
+    hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang,
+    hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang,
+    hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang,
+    hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang,
+    hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang,
+    hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang, hang,
 };
