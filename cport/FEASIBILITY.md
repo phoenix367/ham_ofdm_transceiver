@@ -89,17 +89,19 @@ references only the streaming APIs, not projected:
 | Image | Flash | RAM (.bss) |
 |---|---|---|
 | Transmit only (`txs_open`/`txs_pull`) | 20 KB | **28 KB** |
-| **Full station, all three modes** (streaming RX + TX + link layer) | **50 KB** | **1.04 MB** |
+| **Full station, all three modes, no EXT frames** | **50 KB** | **723 KB** |
+| Full station, all three modes + EXT frames | 50 KB | 954 KB |
 
 Where the station's RAM goes:
 
 | Component | Size |
 |---|---|
 | Shared raw int16 ring (147456 samples, all instances) | 288 KB |
-| Per-mode tone block summaries | 204 KB |
 | Scratch arena (detect / demod / decode, unioned) | 153 KB |
-| LLR buffers, 3 instances (int32) | 192 KB |
-| Everything else (FEC scratch, station/link state, TX) | ~227 KB |
+| Tone summaries, each instance sized to its own mode | 94 KB |
+| LLR buffers, 3 instances (int32) | 24 KB (192 KB with EXT frames) |
+| FEC encode scratch + streaming TX | 33 KB |
+| Everything else (station/link state, small buffers) | ~131 KB |
 
 A caution about single-mode builds. **Rung 0 of the ladder is EXTREME**
 (`LADDER_MODE[0] == 2`), and rung 0 is where both stations bootstrap,
@@ -175,28 +177,30 @@ acquisition ≈ 9 % amortized, everything else < 3 %. Flash: the whole
 | Configuration (MEASURED, linked image) | RAM | Fits ~496 KB? |
 |---|---|---|
 | Transmit only | 28 KB | yes |
-| All three modes, no EXT frames (`-DMAX_LLRS=1024`) | 834 KB | **no** |
-| All three modes + EXT frames (as built) | 1.04 MB | **no** |
+| All three modes, no EXT frames (`-DMAX_LLRS=1024`) | 723 KB | **no** |
+| All three modes + EXT frames (as built) | 954 KB | **no** |
 
 **This verdict is a correction.** The table previously read "all three
 modes ≈ 453 KB, fits with ~43 KB to spare". That was an estimate, and
 the linked image does not meet it. Two places the estimate was optimistic:
 
 - it costed per-mode block summaries (8/35/69 KB, ~112 KB total), but
-  `g_blk[RXS_MAX_INST][BLK_CAP]` gives EVERY instance the EXTREME block
-  count -- 204 KB as built. Sizing each instance to its own mode's
-  window (15 / 30 / 120 blocks) would recover ~116 KB and costs no
-  capability, since an instance only ever scans its own mode. This is
-  the clearest remaining win;
+  `g_blk[RXS_MAX_INST][BLK_CAP]` gave EVERY instance the EXTREME block
+  count -- 204 KB. **Since fixed**: each instance is sized to its own
+  mode's window (caps 16 / 32 / 128 for 15 / 30 / 120 blocks), which
+  recovered 113 KB at no cost in capability. It required keying the
+  instance pool by mode rather than round-robin, so the slice and the
+  window agree;
 - it assumed a build without EXT frames. That is a real option and is
   now measurable (`-DMAX_LLRS=1024`), worth 236 KB.
 
-Even with both, the floor is the 288 KB raw ring plus ~88 KB of
-right-sized summaries plus the 153 KB arena: about 529 KB, still over
-the H723's usable data RAM. Closing the rest means shrinking the arena
-(its detect phase is EXTREME's ZC geometry) or accepting a larger part.
-The ring itself is not negotiable while EXTREME is supported: its
-measured lookback is 124478 samples.
+Even with both taken, the floor is the 288 KB raw ring plus the 153 KB
+arena plus 94 KB of summaries: 535 KB before anything else, against
+~496 KB usable. The ring is not negotiable while EXTREME is supported
+(measured lookback 124478 samples), so closing the rest means the
+arena, whose detect phase is dominated by a 40960-sample ZC slide
+window -- an incremental correlator could shrink it the way the mag
+ring already was. Failing that, an H743-class part.
 
 What has NOT changed: flash is comfortable at 50 KB against 1 MB, and
 the CPU projections stand.
@@ -209,7 +213,7 @@ the CPU projections stand.
   brings it to ~5 % if EXTREME-on-M4 is wanted.
 - **G3 (≤ 60 % load, RAM within target)**: load **PASS**; RAM
   **QUALIFIED** — see "Target fit" above. The measured three-mode image
-  is 834 KB without EXT frames and 1.04 MB with, so it needs a ~1 MB
+  is 723 KB without EXT frames and 954 KB with, so it needs a ~1 MB
   part (STM32H743 class) rather than the H723xG named as the target.
   Single-mode figures are NOT a way out: rung 0 is EXTREME, so a build
   without it cannot bootstrap or recover a link at all. The path back to

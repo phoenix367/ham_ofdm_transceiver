@@ -17,7 +17,14 @@
 
 
 #define MAX_SHIFTS 33                    /* +-16 mask-roll grid, EXTREME */
-#define BLK_CAP 128                      /* >= tone window blocks (120) */
+/* Summary ring per instance, sized by that instance's OWN mode: it only
+ * ever scans its own tone window (15 / 30 / 120 blocks). Giving all
+ * three the EXTREME count cost 110 kB for nothing. Caps are powers of
+ * two so the index stays a mask. */
+#define BLK_CAP 128                      /* EXTREME: >= 120 blocks */
+#define BLK_CAP_NORMAL 16                /* >= 15  */
+#define BLK_CAP_ROBUST 32                /* >= 30  */
+#define BLK_TOTAL (BLK_CAP_NORMAL + BLK_CAP_ROBUST + BLK_CAP)
 #define DECLINE_BLOCKS 3
 #define ZC_WIN_MAX 71000
 #define STREAM_MAX_SYM (CP_LEN + 64 * FFT_BINS)
@@ -57,6 +64,7 @@ struct rxs_state {
     int blk_idx, burst_resync;
     int64_t burst_resume_abs;
     int64_t last_eval_blk;
+    int blk_base, blk_mask;   /* this instance's slice of g_blk */
     int64_t ring_hwm; /* deepest raw lookback (incl. FIR history) */
     int64_t ring_miss; /* reads refused because the samples were gone */
     rxd_header_t hdr;
@@ -66,7 +74,6 @@ struct rxs_state {
 };
 
 static struct rxs_state g_pool[RXS_MAX_INST];
-static int g_pool_next;
 /* persistent per-instance state */
 /* ONE shared raw ring for all instances: every receiver is fed the same
  * audio (mode self-labeling by preamble root), so concurrent instances
@@ -77,7 +84,10 @@ static int g_pool_next;
  * FIR per extracted sample and removes the per-instance analytic rings
  * entirely (2 B/sample raw vs 8 B/sample analytic per instance). */
 static int16_t g_raw[RXS_RAW_RING_LEN];
-static blk_sum_t g_blk[RXS_MAX_INST][BLK_CAP];
+static blk_sum_t g_blk[BLK_TOTAL];
+static const int BLK_CAP_OF[3] = { BLK_CAP_NORMAL, BLK_CAP_ROBUST, BLK_CAP };
+static const int BLK_OFF_OF[3] = { 0, BLK_CAP_NORMAL,
+                                   BLK_CAP_NORMAL + BLK_CAP_ROBUST };
 static llr_t g_h64[RXS_MAX_INST][MAX_LLRS], g_d64[RXS_MAX_INST][MAX_LLRS];
 static int g_hexps[RXS_MAX_INST][MAX_SYMS], g_dexps[RXS_MAX_INST][MAX_SYMS];
 /* per-call scratch (never live across rxs_push calls) */
@@ -182,9 +192,12 @@ static void zc_ring_fetch(void *ctx, int k, int n, samp_t *di, samp_t *dq)
 
 rxs_t *rxs_open(link_mode_t mode, int calibrate)
 {
-    rxs_t *r = &g_pool[g_pool_next % RXS_MAX_INST];
-    int inst = g_pool_next % RXS_MAX_INST;
-    g_pool_next++;
+    /* keyed by MODE, not round-robin: the summary slice below is sized
+     * for this mode's tone window, so the two must agree. One live
+     * instance per mode, which is how the stack uses it (demoapp opens
+     * exactly one receiver per link mode). */
+    rxs_t *r = &g_pool[(int)mode];
+    int inst = (int)mode;
     static const struct {
         int B, T, max_shift, thr, nmask;
         int64_t wpb;
@@ -218,6 +231,10 @@ rxs_t *rxs_open(link_mode_t mode, int calibrate)
     r->tone0 = 2 * r->T * FFT_BINS / r->B;
     r->tone1 = r->T * FFT_BINS / r->B;
     r->total_blocks = r->tone0 + r->tone1;
+    r->blk_base = BLK_OFF_OF[(int)mode];
+    r->blk_mask = BLK_CAP_OF[(int)mode] - 1;
+    if (r->total_blocks > BLK_CAP_OF[(int)mode])
+        return 0;   /* window does not fit its slice -- caps are wrong */
     r->zc_win = 3 * r->T * FFT_BINS + r->demod.symbol_len + 4 * FFT_BINS
                 + r->B;
     r->st = S_SEARCH;
@@ -242,7 +259,7 @@ int64_t rxs_ring_miss(const rxs_t *r)
 static void block_summary(rxs_t *r, int64_t blk_idx)
 {
     int64_t re[512], im[512], pow_[512];
-    blk_sum_t *bs = &g_blk[r->inst][blk_idx & (BLK_CAP - 1)];
+    blk_sum_t *bs = &g_blk[r->blk_base + (int)(blk_idx & r->blk_mask)];
     int B = r->B, k, sh, exp;
 
     /* Status ignored on purpose. The detection stages validate
@@ -294,12 +311,12 @@ static void eval_tone_window(rxs_t *r, int64_t blk_idx, int64_t *metric_out,
     int n_band_bins = r->B / 2 - 1;
 
     for (b = 0; b < r->total_blocks; b++) {
-        int e = g_blk[r->inst][(off0 + b) & (BLK_CAP - 1)].exp;
+        int e = g_blk[r->blk_base + (int)((off0 + b) & r->blk_mask)].exp;
         if (e < e_min)
             e_min = e;
     }
     for (b = 0; b < r->total_blocks; b++) {
-        blk_sum_t *bs = &g_blk[r->inst][(off0 + b) & (BLK_CAP - 1)];
+        blk_sum_t *bs = &g_blk[r->blk_base + (int)((off0 + b) & r->blk_mask)];
         int s2 = 2 * (bs->exp - e_min);
         if (s2 > 62)
             s2 = 62;
@@ -319,7 +336,7 @@ static void eval_tone_window(rxs_t *r, int64_t blk_idx, int64_t *metric_out,
         int64_t sig0 = 0, sig1 = 0, band0 = 0, band1 = 0;
         int64_t rest0, rest1, c0, c1, metric;
         for (b = 0; b < r->tone0; b++) {
-            blk_sum_t *bs = &g_blk[r->inst][(off0 + b) & (BLK_CAP - 1)];
+            blk_sum_t *bs = &g_blk[r->blk_base + (int)((off0 + b) & r->blk_mask)];
             int s2 = 2 * (bs->exp - e_min);
             if (s2 > 62)
                 s2 = 62;
@@ -327,7 +344,7 @@ static void eval_tone_window(rxs_t *r, int64_t blk_idx, int64_t *metric_out,
             band0 += band_al[b];
         }
         for (b = r->tone0; b < r->total_blocks; b++) {
-            blk_sum_t *bs = &g_blk[r->inst][(off0 + b) & (BLK_CAP - 1)];
+            blk_sum_t *bs = &g_blk[r->blk_base + (int)((off0 + b) & r->blk_mask)];
             int s2 = 2 * (bs->exp - e_min);
             if (s2 > 62)
                 s2 = 62;

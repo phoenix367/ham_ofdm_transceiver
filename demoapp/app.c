@@ -1158,6 +1158,14 @@ int main(int argc, char **argv)
     g_rxs[0] = rxs_open(MODE_NORMAL, 0);
     g_rxs[1] = rxs_open(MODE_ROBUST, 0);
     g_rxs[2] = rxs_open(MODE_EXTREME, 0);
+    /* rxs_open refuses a mode whose tone window does not fit the summary
+     * slice sized for it -- a build-configuration error, not a runtime
+     * condition, but rxs_push would dereference the NULL. */
+    if (!g_rxs[0] || !g_rxs[1] || !g_rxs[2]) {
+        fprintf(stderr, "[%s] rxs_open failed: summary slice too small "
+                        "for a mode's tone window\n", g_name);
+        return 1;
+    }
     printf("[%s] connected to %s -- protocol bootstraps at EXTREME; "
            "type 'send <text>'\n> ", g_name, argv[1]);
     fflush(stdout);
