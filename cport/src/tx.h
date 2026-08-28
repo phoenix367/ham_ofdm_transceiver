@@ -42,4 +42,21 @@ int tx_build_burst(link_mode_t mode, const uint8_t *blocks, int pkt_bits_n,
                    int n_blocks, int typ, mod_type_t mod, cc_rate_t spd,
                    int resync_every, int16_t *out);
 
+/* ---------------- streaming transmitter ----------------
+ * Generates the waveform on demand instead of buffering a frame: the
+ * caller pulls chunks and transmits them. Bit-identical to
+ * tx_build_frame/tx_build_burst (asserted by the suites).
+ *
+ * resync_every == 0 with n_blocks == 1 builds a plain frame. */
+#define TXS_RING 64
+
+typedef struct txs_state txs_t;
+
+txs_t *txs_open(link_mode_t mode, const uint8_t *blocks, int pkt_bits_n,
+                int n_blocks, int typ, mod_type_t mod, cc_rate_t spd,
+                int resync_every, int use_ldpc, int *total_out);
+int txs_total(const txs_t *t);
+/* Pull up to max samples; returns the count written, 0 when finished. */
+int txs_pull(txs_t *t, int16_t *out, int max);
+
 #endif /* OFDM_TX_H */

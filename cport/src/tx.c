@@ -76,13 +76,16 @@ static void map_bits(const uint8_t *bits, mod_type_t mod, int n_carriers,
 }
 
 /* one tiled OFDM symbol (CP + tile * FFT_BINS) appended at *pos */
-static void modulate_symbol(const uint8_t *row, mod_type_t mod, int sym_tile,
-                            int64_t *sig, int *pos)
+/* One symbol's 128-sample tile: map, place carriers, IFFT. A tiled OFDM
+ * symbol is just this block repeated sym_tile times behind a CP that is
+ * its own tail -- which is what lets the streaming transmitter hold a
+ * symbol in 1 kB instead of buffering the frame. */
+static void symbol_tile(const uint8_t *row, mod_type_t mod, int64_t *sym_re)
 {
     int64_t sub_re[N_CHANNEL], sub_im[N_CHANNEL];
-    int64_t sym_re[FFT_BINS], sym_im[FFT_BINS];
+    int64_t sym_im[FFT_BINS];
     int64_t d_re[N_DATA_CARRIERS], d_im[N_DATA_CARRIERS];
-    int k, t;
+    int k;
 
     memset(sub_re, 0, sizeof(sub_re));
     memset(sub_im, 0, sizeof(sub_im));
@@ -96,7 +99,7 @@ static void modulate_symbol(const uint8_t *row, mod_type_t mod, int sym_tile,
         sub_im[PILOT_LOCAL_IDX[k]] = PILOT_IM[k];
     }
 
-    memset(sym_re, 0, sizeof(sym_re));
+    memset(sym_re, 0, FFT_BINS * sizeof(*sym_re));
     memset(sym_im, 0, sizeof(sym_im));
     for (k = 0; k < N_CHANNEL; k++) {
         int ci = CHANNEL_IDX[k];
@@ -107,13 +110,24 @@ static void modulate_symbol(const uint8_t *row, mod_type_t mod, int sym_tile,
     }
 
     ifft_fixed(sym_re, sym_im, FFT_BINS); /* real output in sym_re */
+}
 
-    /* CP = last CP_LEN samples of the (identical) tiles */
-    for (k = 0; k < CP_LEN; k++)
-        sig[(*pos)++] = sym_re[FFT_BINS - CP_LEN + k];
-    for (t = 0; t < sym_tile; t++)
-        for (k = 0; k < FFT_BINS; k++)
-            sig[(*pos)++] = sym_re[k];
+/* sample k of a tiled symbol: CP (the tile's tail) then sym_tile copies */
+static int64_t tile_sample(const int64_t *tile, int k)
+{
+    return k < CP_LEN ? tile[FFT_BINS - CP_LEN + k]
+                      : tile[(k - CP_LEN) % FFT_BINS];
+}
+
+static void modulate_symbol(const uint8_t *row, mod_type_t mod, int sym_tile,
+                            int64_t *sig, int *pos)
+{
+    int64_t sym_re[FFT_BINS];
+    int n = CP_LEN + sym_tile * FFT_BINS, k;
+
+    symbol_tile(row, mod, sym_re);
+    for (k = 0; k < n; k++)
+        sig[(*pos)++] = tile_sample(sym_re, k);
 }
 
 /* FEC-encode (conv or LDPC), pad to whole symbols, interleave, scramble;
@@ -325,4 +339,222 @@ int tx_build_frame(link_mode_t mode, const uint8_t *pkt_bits, int pkt_bits_n,
 {
     return tx_build_frame_ex(mode, pkt_bits, pkt_bits_n, typ, mod, spd, 0,
                              out);
+}
+
+/* ------------------------------------------------------------------ *
+ * Streaming transmitter: generate the waveform on demand
+ *
+ * The frame-at-once path holds every sample of a frame in g_sig -- 4.3 MB
+ * at EXTREME, the largest buffer in the port, for a waveform that is
+ * nothing but short periodic blocks repeated: tone A is 32 samples, tone
+ * B is 64, ZC is 128, and a data symbol is one 128-sample IFFT tile
+ * repeated sym_tile times behind a CP that is its own tail. So the
+ * generator needs one tile (1 kB), not one frame.
+ *
+ * The one thing that genuinely needs the whole waveform is the clip
+ * threshold, which is 2x its RMS. Rather than buffer for it, the
+ * generator runs TWICE: once to accumulate the energy, then again to
+ * emit. It is a pure function of its inputs, so the second pass
+ * reproduces the first exactly -- and the result is bit-identical to
+ * tx_build_frame/tx_build_burst, which the suites assert.
+ * ------------------------------------------------------------------ */
+
+enum { G_TONE_A, G_TONE_B, G_ZC_PRE, G_HDR, G_RESYNC, G_BLK, G_DONE };
+
+struct txs_state {
+    int mode, typ, mod, spd, resync_every, use_ldpc;
+    const uint8_t *blocks;
+    int pkt_bits_n, n_blocks, capacity, total;
+    int64_t thr;
+    /* generator cursor */
+    int stage, seg_k, blk, sym, n_syms;
+    int64_t tile[FFT_BINS];
+    uint8_t rows[TX_MAX_CODED];
+    uint8_t hdr_bits[HEADER_BITS];
+    /* output pipeline: clipped samples awaiting the 33-tap LPF */
+    int gen_idx, out_idx;
+    int64_t ring[TXS_RING];
+};
+
+static struct txs_state g_txs;
+
+static int txs_sym_len(const struct txs_state *t)
+{
+    return CP_LEN + MODES[t->mode].sym_tile * FFT_BINS;
+}
+
+static void txs_rewind(struct txs_state *t)
+{
+    t->stage = G_TONE_A;
+    t->seg_k = 0;
+    t->blk = 0;
+    t->sym = 0;
+}
+
+/* next raw (pre-clip, pre-filter) sample of the waveform */
+static int64_t txs_gen(struct txs_state *t)
+{
+    const tx_mode_t *mc = &MODES[t->mode];
+    int sym_len = txs_sym_len(t);
+
+    for (;;) {
+        switch (t->stage) {
+        case G_TONE_A:
+            if (t->seg_k < 2 * mc->tone_tiles * FFT_BINS)
+                return mc->tone_a[t->seg_k++ & 31];
+            t->seg_k = 0;
+            t->stage = G_TONE_B;
+            continue;
+        case G_TONE_B:
+            if (t->seg_k < mc->tone_tiles * FFT_BINS)
+                return mc->tone_b[t->seg_k++ & 63];
+            t->seg_k = 0;
+            t->stage = G_ZC_PRE;
+            continue;
+        case G_ZC_PRE:
+        case G_RESYNC:
+            if (t->seg_k < sym_len) {
+                int k = t->seg_k++;
+                return k < CP_LEN ? mc->zc[FFT_BINS - CP_LEN + k]
+                                  : mc->zc[(k - CP_LEN) % FFT_BINS];
+            }
+            t->seg_k = 0;
+            if (t->stage == G_ZC_PRE) {
+                t->n_syms = encode_block(t->hdr_bits, HEADER_BITS, CC_R13, 0,
+                                         N_DATA_CARRIERS, t->rows);
+                t->sym = 0;
+                t->stage = G_HDR;
+                symbol_tile(t->rows, MOD_BPSK, t->tile);
+            } else {
+                t->n_syms = encode_block(t->blocks
+                                             + (size_t)t->blk * t->pkt_bits_n,
+                                         t->pkt_bits_n, (cc_rate_t)t->spd,
+                                         t->use_ldpc, t->capacity, t->rows);
+                t->sym = 0;
+                t->stage = G_BLK;
+                symbol_tile(t->rows, (mod_type_t)t->mod, t->tile);
+            }
+            continue;
+        case G_HDR:
+            if (t->seg_k < sym_len)
+                return tile_sample(t->tile, t->seg_k++);
+            t->seg_k = 0;
+            if (++t->sym < t->n_syms) {
+                symbol_tile(t->rows + (size_t)t->sym * N_DATA_CARRIERS,
+                            MOD_BPSK, t->tile);
+                continue;
+            }
+            t->blk = 0;
+            t->stage = G_RESYNC;   /* block 0 never carries a resync ZC */
+            t->seg_k = sym_len;
+            continue;
+        case G_BLK:
+            if (t->seg_k < sym_len)
+                return tile_sample(t->tile, t->seg_k++);
+            t->seg_k = 0;
+            if (++t->sym < t->n_syms) {
+                symbol_tile(t->rows + (size_t)t->sym * t->capacity,
+                            (mod_type_t)t->mod, t->tile);
+                continue;
+            }
+            if (++t->blk >= t->n_blocks) {
+                t->stage = G_DONE;
+                continue;
+            }
+            t->stage = G_RESYNC;
+            /* skip the ZC unless this block boundary carries one */
+            t->seg_k = (t->resync_every > 0
+                        && t->blk % t->resync_every == 0) ? 0 : sym_len;
+            continue;
+        default:
+            return 0;
+        }
+    }
+}
+
+txs_t *txs_open(link_mode_t mode, const uint8_t *blocks, int pkt_bits_n,
+                int n_blocks, int typ, mod_type_t mod, cc_rate_t spd,
+                int resync_every, int use_ldpc, int *total_out)
+{
+    struct txs_state *t = &g_txs;
+    int64_t sum_sq = 0;
+    int max_bits = typ == PKT_TYP_EXT_DATA ? 36 + 8 * 255 : 255;
+    int k;
+
+    if (n_blocks < 1 || pkt_bits_n > max_bits)
+        return 0;
+    if (typ == PKT_TYP_EXT_DATA && use_ldpc)
+        return 0;
+
+    memset(t, 0, sizeof(*t));
+    t->mode = mode;
+    t->blocks = blocks;
+    t->pkt_bits_n = pkt_bits_n;
+    t->n_blocks = n_blocks;
+    t->typ = typ;
+    t->mod = mod;
+    t->spd = spd;
+    t->resync_every = resync_every;
+    t->use_ldpc = use_ldpc;
+    t->capacity = N_DATA_CARRIERS * mod_mu(mod);
+    t->total = n_blocks == 1 && resync_every == 0
+                   ? tx_frame_len_ex(mode, pkt_bits_n, mod, spd, use_ldpc)
+                   : tx_burst_len(mode, pkt_bits_n, mod, spd, n_blocks,
+                                  resync_every);
+    if (t->total < 0)
+        return 0;
+    header_encode(use_ldpc ? 2 : 1, typ, (int)mod, (int)spd,
+                  typ == PKT_TYP_EXT_DATA ? (pkt_bits_n - 36) / 8 : pkt_bits_n,
+                  t->hdr_bits);
+
+    /* pass 1: energy only, samples discarded */
+    txs_rewind(t);
+    for (k = 0; k < t->total; k++) {
+        int64_t v = txs_gen(t);
+        sum_sq += v * v;
+    }
+    t->thr = 2 * isqrt_i64(sum_sq / t->total);
+
+    /* pass 2 starts clean */
+    txs_rewind(t);
+    t->gen_idx = 0;
+    t->out_idx = 0;
+    if (total_out)
+        *total_out = t->total;
+    return t;
+}
+
+int txs_total(const txs_t *t)
+{
+    return t ? t->total : -1;
+}
+
+int txs_pull(txs_t *t, int16_t *out, int max)
+{
+    int half = (TX_LPF_N - 1) / 2, n = 0;
+
+    if (!t || !out || max <= 0)
+        return 0;
+    while (n < max && t->out_idx < t->total) {
+        int64_t acc = 0;
+        int j;
+        /* keep the filter's right half populated */
+        while (t->gen_idx <= t->out_idx + half && t->gen_idx < t->total) {
+            int64_t v = txs_gen(t);
+            if (v > t->thr)
+                v = t->thr;
+            else if (v < -t->thr)
+                v = -t->thr;
+            t->ring[t->gen_idx & (TXS_RING - 1)] = v;
+            t->gen_idx++;
+        }
+        for (j = 0; j < TX_LPF_N; j++) {
+            int idx = t->out_idx + half - j;
+            if (idx >= 0 && idx < t->total)
+                acc += (int64_t)TX_LPF_TAPS[j] * t->ring[idx & (TXS_RING - 1)];
+        }
+        out[n++] = sat16(rshift_round(acc, Q15) * (1 << OUTPUT_GAIN_SHIFT));
+        t->out_idx++;
+    }
+    return n;
 }

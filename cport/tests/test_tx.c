@@ -32,6 +32,47 @@ static uint64_t fnv64(const int16_t *s, int n)
 
 static int16_t g_frame[600000];
 
+/* fnv64 as a running state, so a streamed waveform can be checked
+ * against the golden hash without ever holding it whole */
+static uint64_t fnv64_upd(uint64_t h, const int16_t *s, int n)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        h ^= (uint16_t)s[i];
+        h *= UINT64_C(1099511628211);
+    }
+    return h;
+}
+
+/* Stream one frame/burst through txs_pull in small chunks, checking each
+ * chunk against the frame-at-once output as it arrives and folding it
+ * into a running hash. chunk deliberately does not divide a symbol, so
+ * the generator is exercised across every internal boundary. */
+static int stream_matches(link_mode_t mode, const uint8_t *blocks,
+                          int pkt_bits_n, int n_blocks, int typ,
+                          mod_type_t mod, cc_rate_t spd, int resync_every,
+                          const int16_t *ref, int ref_n, uint64_t want_hash,
+                          int chunk)
+{
+    static int16_t buf[4096];
+    uint64_t h = UINT64_C(14695981039346656037);
+    int total = 0, got, pos = 0;
+    txs_t *t = txs_open(mode, blocks, pkt_bits_n, n_blocks, typ, mod, spd,
+                        resync_every, 0, &total);
+
+    if (!t || total != ref_n)
+        return 0;
+    if (chunk > (int)(sizeof(buf) / sizeof(buf[0])))
+        chunk = (int)(sizeof(buf) / sizeof(buf[0]));
+    while ((got = txs_pull(t, buf, chunk)) > 0) {
+        if (pos + got > ref_n || memcmp(buf, ref + pos, (size_t)got * 2) != 0)
+            return 0;
+        h = fnv64_upd(h, buf, got);
+        pos += got;
+    }
+    return pos == ref_n && h == want_hash;
+}
+
 #define TX_CASE(TAG)                                                        \
     do {                                                                    \
         int pkt_n = (int)sizeof(TX_##TAG##_PKT);                            \
@@ -110,6 +151,51 @@ int main(void)
         check("1-block burst == frame",
               a == b && a > 0 && memcmp(g_frame, frame,
                                         sizeof(int16_t) * (size_t)a) == 0);
+    }
+
+    /* the streaming transmitter must be bit-identical to the
+     * frame-at-once path, checked chunk by chunk as it is pulled */
+    {
+        int n = tx_build_frame((link_mode_t)TX_NORM_QPSK_MODE,
+                               TX_NORM_QPSK_PKT,
+                               (int)sizeof(TX_NORM_QPSK_PKT), PKT_TYP_DATA,
+                               (mod_type_t)TX_NORM_QPSK_MOD,
+                               (cc_rate_t)TX_NORM_QPSK_SPD, g_frame);
+        check("txs frame NORM_QPSK bit-exact (137-sample chunks)",
+              stream_matches((link_mode_t)TX_NORM_QPSK_MODE,
+                             TX_NORM_QPSK_PKT,
+                             (int)sizeof(TX_NORM_QPSK_PKT), 1, PKT_TYP_DATA,
+                             (mod_type_t)TX_NORM_QPSK_MOD,
+                             (cc_rate_t)TX_NORM_QPSK_SPD, 0,
+                             g_frame, n, TX_NORM_QPSK_HASH, 137));
+    }
+    {
+        int n = tx_build_frame((link_mode_t)TX_EXTREME_BPSK_MODE,
+                               TX_EXTREME_BPSK_PKT,
+                               (int)sizeof(TX_EXTREME_BPSK_PKT), PKT_TYP_DATA,
+                               (mod_type_t)TX_EXTREME_BPSK_MOD,
+                               (cc_rate_t)TX_EXTREME_BPSK_SPD, g_frame);
+        check("txs frame EXTREME_BPSK bit-exact (1-sample chunks)",
+              stream_matches((link_mode_t)TX_EXTREME_BPSK_MODE,
+                             TX_EXTREME_BPSK_PKT,
+                             (int)sizeof(TX_EXTREME_BPSK_PKT), 1,
+                             PKT_TYP_DATA,
+                             (mod_type_t)TX_EXTREME_BPSK_MOD,
+                             (cc_rate_t)TX_EXTREME_BPSK_SPD, 0,
+                             g_frame, n, TX_EXTREME_BPSK_HASH, 1));
+    }
+    {
+        int n = tx_build_burst((link_mode_t)TX_BURST_MODE, TX_BURST_BITS,
+                               TX_BURST_PKT_BITS, TX_BURST_N, PKT_TYP_DATA,
+                               (mod_type_t)TX_BURST_MOD,
+                               (cc_rate_t)TX_BURST_SPD, TX_BURST_RESYNC,
+                               g_frame);
+        check("txs burst bit-exact (resync ZC crossed mid-chunk)",
+              stream_matches((link_mode_t)TX_BURST_MODE, TX_BURST_BITS,
+                             TX_BURST_PKT_BITS, TX_BURST_N, PKT_TYP_DATA,
+                             (mod_type_t)TX_BURST_MOD,
+                             (cc_rate_t)TX_BURST_SPD, TX_BURST_RESYNC,
+                             g_frame, n, TX_BURST_HASH, 999));
     }
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
