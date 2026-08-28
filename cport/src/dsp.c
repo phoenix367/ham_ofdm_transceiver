@@ -32,8 +32,12 @@ void nco_derotate(const int64_t *in_i, const int64_t *in_q, int n,
         int idx = (int)(phase >> (PHASE_BITS - NCO_LUT_BITS));
         int64_t c = NCO_COS[idx];
         int64_t s = NCO_COS[(idx + 3 * NCO_LUT_N / 4) & (NCO_LUT_N - 1)];
-        out_i[m] = rshift_round(in_i[m] * c + in_q[m] * s, Q15);
-        out_q[m] = rshift_round(in_q[m] * c - in_i[m] * s, Q15);
+        /* read both inputs BEFORE writing either output: this is called
+         * in place (rx_stream's tone stage does), and writing out_i[m]
+         * first would corrupt the in_i[m] that out_q[m] still needs */
+        int64_t vi = in_i[m], vq = in_q[m];
+        out_i[m] = rshift_round(vi * c + vq * s, Q15);
+        out_q[m] = rshift_round(vq * c - vi * s, Q15);
         phase += word;
     }
 }
