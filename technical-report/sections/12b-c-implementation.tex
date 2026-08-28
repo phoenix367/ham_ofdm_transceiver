@@ -228,16 +228,117 @@ bit-exactness enforced by the golden tests:
     \end{tabular}
 \end{table}
 
-RAM, with the shared-ring architecture: 288\,KB shared raw ring
-+ 8/35/69\,KB per-mode summaries and scratch + 53\,KB decoder state
-$\approx$ \textbf{453\,KB for the full three-mode station} (a
-single-mode NORMAL build, with the ring shrunk to its measured
-lookback, needs $\approx$40\,KB).  Against the chosen target ---
-STM32H723 (Cortex-M7 at 550\,MHz, 1\,MB flash, $\approx$496\,KB usable
-data RAM) --- the full three-mode station fits with margin, the code
-fits in the 64\,KB ITCM alone, and the CPU projections give
-$\le$10\,\% worst-case load (EXTREME acquisition, amortized), with
-everything else below 3\,\%.
+\subsubsection{RAM: Making the Cost Follow the Signal, Not the Capture}
+
+The host reference buffers whole captures because a workstation can
+afford to: the transmitter assembled a complete frame before clipping
+it, the detector materialised its entire search window, and the
+demodulator held a whole recording. Linked for Cortex-M7 that came to
+roughly 10\,MB of \texttt{.bss}, which is not an optimisation problem so
+much as a statement that the reference had never been asked the
+question. Five changes took it to 699\,KB, each verified bit-exact
+against the golden vectors on both x86 and Cortex-M7.
+
+\textbf{The transmitter generates on demand} (4.3\,MB $\rightarrow$
+10\,kB). The waveform is nothing but short periodic blocks repeated:
+tone field A is a 32-sample block, tone B is 64, ZC is 128, and a data
+symbol is one 128-sample IFFT tile repeated \texttt{sym\_tile} times
+behind a CP that is its own tail. So a generator needs one tile, not one
+frame. The obstacle is that the clip threshold is a \emph{whole}-waveform
+RMS --- the invariant that makes a burst not the concatenation of
+separately built frames. Rather than buffer for it, the generator runs
+twice: once to accumulate energy, once to emit. It is a pure function of
+its inputs, so the second pass reproduces the first exactly.
+
+\textbf{Detection pulls instead of being handed a window} (2.4\,MB
+$\rightarrow$ 220\,kB). The ZC scan sweeps up to 70\,688 samples at
+EXTREME --- 5.9\,s of audio --- but its \emph{live} span is only
+$\mathrm{preamble\_len}+1$: at position $p$ the correlation reads
+$[p, p{+}\mathrm{klen})$ and the energy term reads
+$m = p-(ng{-}1)\mathrm{klen}$ and $m+\mathrm{preamble\_len}$, which is
+the same leading edge because $ng \cdot \mathrm{klen} =
+\mathrm{preamble\_len}$ exactly. Likewise the two lag correlations use
+lags of 128 and 64 --- not a fraction of the segment --- so they need a
+128-sample delay line however long the segment is. A fetch-by-index
+source lets the scan read from the raw \texttt{int16} ring that already
+holds the audio, derotating on the way out (the phase at index $k$ is
+$k \cdot cw \bmod 2^{32}$, which is what makes random access possible).
+
+\textbf{One arena for scratch that is never co-resident} (646\,kB
+$\rightarrow$ 129\,kB). Classifying buffers by \emph{lifetime} rather
+than by name: the raw ring, the block summaries and the per-symbol LLR
+accumulators carry state across calls and cannot be shared, but
+everything else is call-scoped, and the phases are strictly sequential
+--- detection finishes before the first symbol is demodulated, demod
+before decode. One arena sized by the \emph{largest} phase replaces
+their sum. The subtlety worth recording is that demod is the largest,
+not detection: \texttt{eval\_hyp}'s derotation scratch is live
+\emph{while} the symbol samples still are, because it runs inside the
+symbol demodulator. Sizing from the buffer list rather than the actual
+nesting would have produced silent corruption.
+
+\textbf{Narrowing the sample and soft-decision types.} Measured peaks
+across the whole suite justify each: analytic samples 43\,077 (17 bits
+$\rightarrow$ \texttt{int32}), LLRs 1\,211\,062 (21 bits), correlation
+magnitudes 780\,982 (20 bits). Products of two narrowed values are
+widened explicitly --- on Cortex-M7 that is \texttt{SMULL}/\texttt{SMLAL},
+the same instruction count as \texttt{MUL}/\texttt{MLA}, so exactness is
+free.
+
+\textbf{Per-instance tone summaries} (204\,kB $\rightarrow$ 94\,kB).
+Every receiver instance had been given EXTREME's 128-block ring, but an
+instance only ever scans its own mode's window: 15/30/120 blocks.
+
+\begin{table}[H]
+    \centering
+    \caption{Measured Cortex-M7 RAM (\texttt{-Os}, \texttt{--gc-sections},
+             linked image referencing only the streaming APIs).}
+    \label{tab:cport_ram}
+    \small
+    \begin{tabular}{@{}lrl@{}}
+    \toprule
+    \textbf{Component} & \textbf{RAM} & \textbf{Sized by} \\
+    \midrule
+    Shared raw \texttt{int16} ring & 288\,KB & EXTREME re-anchor
+                                               lookback (124\,478) \\
+    Scratch arena (3 phases unioned) & 129\,KB & EXTREME ZC geometry \\
+    Tone summaries, 3 instances & 94\,KB & each instance's own mode \\
+    LLR buffers (\texttt{int32}) & 24\,KB & 192\,KB with EXT frames \\
+    Streaming transmitter & 10\,KB & one IFFT tile \\
+    Everything else & 154\,KB & --- \\
+    \midrule
+    \textbf{Total, three modes} & \textbf{699\,KB} & 929\,KB with EXT
+                                                     frames \\
+    Transmit-only image & 28\,KB & \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\textbf{Target fit, corrected.} An earlier estimate put the three-mode
+station at $\approx$453\,KB and concluded it fitted the STM32H723xG
+($\approx$496\,KB usable data RAM) with margin. The linked image does
+not: 699\,KB without extended frames, 929\,KB with. The estimate had
+costed per-mode summaries while the code gave every instance the
+EXTREME count, and assumed a build without EXT frames. Both are now
+addressed, and the remaining floor --- 288\,KB ring $+$ 129\,KB arena
+$+$ 94\,KB summaries $=$ 511\,KB --- still exceeds the part. The
+conclusion is an H743-class device, not the H723xG.
+
+Nor is a single-mode build the way out, though the arithmetic is
+tempting. Rung~0 of the ladder is EXTREME, and rung~0 is where both
+stations bootstrap, where the controller drops after four consecutive
+losses, and where staleness decay lands; rungs 1--3 are ROBUST. A build
+without EXTREME cannot acquire a link at all, nor recover one after a
+fade --- which is exactly when 64$\times$ tiling earns its cost.
+Per-mode sizing is a capability decision, not a memory knob.
+
+What the exercise changed is less the total than its \emph{shape}.
+Nothing in Table~\ref{tab:cport_ram} now scales with frame length,
+capture length, or search-window length; every remaining entry is sized
+by a property of the waveform. The arena is also visibly balanced --- its
+three phases sit within 6\,kB of each other --- which is the signal that
+the union has no slack left: it costs the maximum, so no single phase
+can be shrunk profitably alone.
 
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}
