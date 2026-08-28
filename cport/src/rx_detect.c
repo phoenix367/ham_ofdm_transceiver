@@ -11,6 +11,9 @@
 #define MAX_BLOCKS 2200          /* RXD_MAX_SAMPLES / 256 */
 #define ZC_WIN_MAX 71000         /* detect window, EXTREME worst case */
 #define ZC_KLEN_MAX (4 * FFT_BINS)
+/* cc[m] gathers mag[m + g*klen] for g < ng, so the scan needs
+ * (ng-1)*klen+1 magnitudes resident: EXTREME 15*512+1 = 7681. */
+#define ZC_MAG_RING (15 * ZC_KLEN_MAX + 1)
 
 typedef struct {
     int B, T, max_shift, thr_q10, n_mask_bins;
@@ -88,7 +91,18 @@ static int64_t rx_residual_word(const int64_t *di, const int64_t *dq, int n)
 }
 
 static int64_t g_pows[MAX_BLOCKS * DET_B_MAX];
-static int64_t g_seg_i[ZC_WIN_MAX], g_seg_q[ZC_WIN_MAX];
+/* This scratch is NOT a whole detection window. It holds either one
+ * coarse segment (2*T*FFT_BINS, EXTREME 40960) for the residual-CFO
+ * estimate, or one ZC preamble (zc_L*FFT_BINS, EXTREME 8192) for the
+ * lag-N word -- never ZC_WIN_MAX. Sizing it to the window cost 469 KB
+ * of nothing.
+ *
+ * It must stay SEPARATE from rx_stream's buffer of the same name, which
+ * looks like a duplicate and is not: rx_stream passes its buffer in as
+ * i_arr/q_arr and detect_zc derotates FROM that INTO this one, so
+ * sharing would alias the input with the output. */
+#define DET_SEG_MAX (2 * DET_T_EXTREME * FFT_BINS)
+static int64_t g_seg_i[DET_SEG_MAX], g_seg_q[DET_SEG_MAX];
 
 static int cmp_i64(const void *a, const void *b)
 {
@@ -233,8 +247,21 @@ static int detect_zc(const det_mode_t *d, const int64_t *i_arr,
                      const int64_t *q_arr, int n, int *time_out,
                      int64_t *word_out)
 {
-    static int64_t ecs[ZC_WIN_MAX + 1];
-    static int64_t mag[ZC_WIN_MAX], cc[ZC_WIN_MAX];
+    /* Streaming ZC scan: memory is a function of the PREAMBLE, not of the
+     * search window. The window is 70688 samples at EXTREME (5.9 s of
+     * audio) purely because 64x tiling stretches the tone stage's timing
+     * uncertainty; the information being extracted is a 512-sample kernel
+     * and a running peak.
+     *
+     *   ecs[] (a prefix sum of energy) is only ever read as
+     *     ecs[m+preamble_len] - ecs[m] -- a sliding window sum, and
+     *     i_arr/q_arr are still here, so it is a running scalar.
+     *   cc[] is consumed immediately by the argmax; only cc at the
+     *     winning index and the total survive the loop.
+     *   mag[] genuinely needs a window, because cc[m] gathers
+     *     mag[m + g*klen] for g < ng -- but that is (ng-1)*klen+1
+     *     entries, not the whole span. */
+    static int64_t mag[ZC_MAG_RING];
     static int64_t kr[ZC_KLEN_MAX], ki[ZC_KLEN_MAX];
     static int64_t rom_re[ZC_KLEN_MAX], rom_im[ZC_KLEN_MAX];
     int klen = d->zc_G * FFT_BINS;
@@ -246,10 +273,6 @@ static int detect_zc(const det_mode_t *d, const int64_t *i_arr,
 
     if (n < preamble_len + CP_LEN)
         return -1;
-
-    ecs[0] = 0;
-    for (k = 0; k < n; k++)
-        ecs[k + 1] = ecs[k] + i_arr[k] * i_arr[k] + q_arr[k] * q_arr[k];
 
     for (k = 0; k < klen; k++) {
         rom_re[k] = d->zc_rom_re[k];
@@ -264,52 +287,68 @@ static int detect_zc(const det_mode_t *d, const int64_t *i_arr,
         int64_t csum = 0, floor_v, ptf_q4, thr, metric2;
         int j;
 
+        int span = (ng - 1) * klen;   /* mag lookahead cc[m] needs */
+        int64_t we = 0, cc_j = 0, bm = -1;
+        int p;
+
         nco_derotate(rom_re, rom_im, klen, -w, 0u, kr, ki);
 
-        for (m = 0; m < n_corr; m++) {
+        if (n_pos > n_cc)
+            n_pos = n_cc;
+
+        /* energy of the first candidate window, [0, preamble_len) */
+        for (k = 0; k < preamble_len; k++)
+            we += i_arr[k] * i_arr[k] + q_arr[k] * q_arr[k];
+
+        j = 0;
+        for (p = 0; p < n_corr; p++) {
             int64_t a = 0, b2 = 0, aa, bb;
             for (k = 0; k < klen; k++) {
-                a += i_arr[m + k] * kr[k] + q_arr[m + k] * ki[k];
-                b2 += q_arr[m + k] * kr[k] - i_arr[m + k] * ki[k];
+                a += i_arr[p + k] * kr[k] + q_arr[p + k] * ki[k];
+                b2 += q_arr[p + k] * kr[k] - i_arr[p + k] * ki[k];
             }
             a = rshift_round(a, Q15);
             b2 = rshift_round(b2, Q15);
             aa = a < 0 ? -a : a;
             bb = b2 < 0 ? -b2 : b2;
-            mag[m] = (aa > bb ? aa : bb) + ((aa < bb ? aa : bb) >> 1);
-        }
-        for (m = 0; m < n_cc; m++) {
-            int64_t s = 0;
-            for (g = 0; g < ng; g++)
-                s += mag[g * klen + m];
-            cc[m] = s;
-            csum += s;
-        }
-        if (n_pos > n_cc)
-            n_pos = n_cc;
+            mag[p % ZC_MAG_RING] =
+                (aa > bb ? aa : bb) + ((aa < bb ? aa : bb) >> 1);
 
-        j = 0;
-        {
-            int64_t bm = -1;
-            for (m = 0; m < n_pos; m++) {
-                int64_t we = ecs[preamble_len + m] - ecs[m];
-                int64_t nm = (cc[m] >> 5) * (cc[m] >> 5);
-                int64_t dn = (((we >> 8) * ((ng * d->zc_ref_energy) >> 12)) >> 15);
-                int64_t m2;
-                if (dn < 1)
-                    dn = 1;
-                m2 = (nm << 10) / dn;
-                if (m2 > bm) {
-                    bm = m2;
-                    j = m;
+            /* mag[m .. m+span] are now resident, so cc[m] is complete */
+            m = p - span;
+            if (m < 0 || m >= n_cc)
+                continue;
+            {
+                int64_t sc = 0;
+                for (g = 0; g < ng; g++)
+                    sc += mag[(m + g * klen) % ZC_MAG_RING];
+                csum += sc;
+                if (m < n_pos) {
+                    int64_t nm = (sc >> 5) * (sc >> 5);
+                    int64_t dn = (((we >> 8)
+                                   * ((ng * d->zc_ref_energy) >> 12)) >> 15);
+                    int64_t m2;
+                    if (dn < 1)
+                        dn = 1;
+                    m2 = (nm << 10) / dn;
+                    if (m2 > bm) {
+                        bm = m2;
+                        j = m;
+                        cc_j = sc;    /* only the winner survives the loop */
+                    }
+                    /* slide the energy window to [m+1, m+1+preamble_len) */
+                    if (m + 1 < n_pos)
+                        we += i_arr[m + preamble_len] * i_arr[m + preamble_len]
+                              + q_arr[m + preamble_len] * q_arr[m + preamble_len]
+                              - i_arr[m] * i_arr[m] - q_arr[m] * q_arr[m];
                 }
             }
-            metric2 = bm;
         }
+        metric2 = bm;
 
         /* floor = int(np.mean(cc)) + 1: mirror the double division */
         floor_v = (int64_t)((double)csum / (double)n_cc) + 1;
-        ptf_q4 = (cc[j] << 4) / floor_v;
+        ptf_q4 = (cc_j << 4) / floor_v;
         thr = d->zc_thr_q10;
         if (ptf_q4 < 56) {
             int64_t t2 = thr + (thr * (56 - ptf_q4)) / 32;
