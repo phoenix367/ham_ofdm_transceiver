@@ -6,6 +6,7 @@
 #include "dsp.h"
 #include "rom_tables.h"
 #include "rom_modes.h"
+#include "rx_internal.h"
 
 #define DET_B_MAX 512
 #define MAX_BLOCKS 2200          /* RXD_MAX_SAMPLES / 256 */
@@ -15,6 +16,24 @@
  * (ng-1)*klen+1 magnitudes resident: EXTREME 15*512+1 = 7681. */
 #define ZC_MAG_RING (15 * ZC_KLEN_MAX + 1)
 #define ZC_PREAMBLE_MAX (64 * FFT_BINS)   /* zc_L, EXTREME */
+#define LAG_CHUNK 512
+#define LAG_HIST FFT_BINS
+#define ZC_SLIDE_BLK 2048
+#define ZC_SLIDE_W (ZC_PREAMBLE_MAX + ZC_SLIDE_BLK)
+
+/* carved from the shared arena -- see rx_internal.h for why this is
+ * safe; the offsets below must stay within RX_ARENA_I64 */
+#define DET_OFF_WI   0
+#define DET_OFF_WQ   (DET_OFF_WI + ZC_SLIDE_W)
+#define DET_OFF_MAG  (DET_OFF_WQ + ZC_SLIDE_W)
+#define DET_OFF_KR   (DET_OFF_MAG + ZC_MAG_RING)
+#define DET_OFF_KI   (DET_OFF_KR + ZC_KLEN_MAX)
+#define DET_OFF_RRE  (DET_OFF_KI + ZC_KLEN_MAX)
+#define DET_OFF_RIM  (DET_OFF_RRE + ZC_KLEN_MAX)
+#define DET_OFF_BI   (DET_OFF_RIM + ZC_KLEN_MAX)
+#define DET_OFF_BQ   (DET_OFF_BI + LAG_CHUNK + LAG_HIST)
+#define DET_OFF_END  (DET_OFF_BQ + LAG_CHUNK + LAG_HIST)
+typedef char det_arena_fits[DET_OFF_END <= RX_ARENA_I64 ? 1 : -1];
 
 typedef struct {
     int B, T, max_shift, thr_q10, n_mask_bins;
@@ -72,13 +91,12 @@ static int64_t lag_word(const int64_t *di, const int64_t *dq, int n, int lag)
  *
  * Accumulates the same terms in the same order as lag_word(), so the
  * cordic input is identical and the result is bit-exact. */
-#define LAG_CHUNK 512
-#define LAG_HIST FFT_BINS
 
 static void lag_words_src(const zc_src_t *src, int n, int want_coarse,
                           int64_t *fine_out, int64_t *coarse_out)
 {
-    static int64_t bi[LAG_CHUNK + LAG_HIST], bq[LAG_CHUNK + LAG_HIST];
+    int64_t *const bi = rx_arena + DET_OFF_BI;
+    int64_t *const bq = rx_arena + DET_OFF_BQ;
     int64_t rr1 = 0, ri1 = 0, rr2 = 0, ri2 = 0, ang, mag;
     const int L1 = FFT_BINS, L2 = FFT_BINS / 2;
     int pos = 0, hist = 0;
@@ -343,10 +361,9 @@ static int detect_newman(const det_mode_t *d, const int64_t *i_arr,
  * the scan advances. Each sample is fetched exactly once per pass: the
  * retained tail is moved down rather than re-read. 164 kB at EXTREME,
  * against 1.1 MB to materialise the window. */
-#define ZC_SLIDE_BLK 2048
-#define ZC_SLIDE_W (ZC_PREAMBLE_MAX + ZC_SLIDE_BLK)
 
-static int64_t g_wi[ZC_SLIDE_W], g_wq[ZC_SLIDE_W];
+static int64_t *const g_wi = rx_arena + DET_OFF_WI;
+static int64_t *const g_wq = rx_arena + DET_OFF_WQ;
 static int g_wbase, g_wfill;
 
 static void win_open(const zc_src_t *src, int n)
@@ -410,9 +427,11 @@ static int detect_zc(const det_mode_t *d, const zc_src_t *src,
      *   mag[] genuinely needs a window, because cc[m] gathers
      *     mag[m + g*klen] for g < ng -- but that is (ng-1)*klen+1
      *     entries, not the whole span. */
-    static int64_t mag[ZC_MAG_RING];
-    static int64_t kr[ZC_KLEN_MAX], ki[ZC_KLEN_MAX];
-    static int64_t rom_re[ZC_KLEN_MAX], rom_im[ZC_KLEN_MAX];
+    int64_t *const mag = rx_arena + DET_OFF_MAG;
+    int64_t *const kr = rx_arena + DET_OFF_KR;
+    int64_t *const ki = rx_arena + DET_OFF_KI;
+    int64_t *const rom_re = rx_arena + DET_OFF_RRE;
+    int64_t *const rom_im = rx_arena + DET_OFF_RIM;
     int klen = d->zc_G * FFT_BINS;
     int ng = d->zc_groups;
     int preamble_len = d->zc_L * FFT_BINS;

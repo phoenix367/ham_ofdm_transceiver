@@ -17,6 +17,8 @@
 #define MAX_WINDOW 40        /* top-3 coarse windows of 11 */
 #define RXD_MAX_SAMPLES 560000
 
+int64_t rx_arena[RX_ARENA_I64];
+
 static int64_t g_i[RXD_MAX_SAMPLES], g_q[RXD_MAX_SAMPLES];
 
 static const double TILE_DBS[3] = { TILE_DB_NORMAL, TILE_DB_ROBUST,
@@ -58,7 +60,9 @@ static int64_t eval_hyp(const rxd_t *r, const int64_t *si, const int64_t *sq,
                         int ct, int *exp_out, int64_t *spec_re,
                         int64_t *spec_im)
 {
-    static int64_t di[CP_LEN + 64 * FFT_BINS], dq[CP_LEN + 64 * FFT_BINS];
+    /* arena, after si/sq: those stay live across this call */
+    int64_t *const di = rx_arena + 2 * (CP_LEN + 64 * FFT_BINS);
+    int64_t *const dq = di + (CP_LEN + 64 * FFT_BINS);
     int64_t acc_i[FFT_BINS], acc_q[FFT_BINS];
     int64_t word = cfo_word + r->search_words[k];
     uint32_t start_phase = (uint32_t)((uint64_t)(uint32_t)word * (uint64_t)pos);
@@ -162,7 +166,7 @@ static int coarse_window(rxd_t *r, const int64_t *si, const int64_t *sq,
  * llr receives capacity = N_DATA_CARRIERS * mu values; returns the BFP exp */
 int rxd_demod_symbol(rxd_t *r, const int64_t *seg_i, const int64_t *seg_q,
                      int pos, int64_t cfo_word, int mu,
-                     const int *window, int win_n, int64_t *llr)
+                     const int *window, int win_n, llr_t *llr)
 {
     static int win_buf[MAX_WINDOW];
     int64_t spec_re[FFT_BINS], spec_im[FFT_BINS];
@@ -251,7 +255,7 @@ int rxd_demod_symbol(rxd_t *r, const int64_t *seg_i, const int64_t *seg_q,
 
 /* n_syms symbols with the slew-limited tracker; exponent-aligned stream */
 static int demod_block(rxd_t *r, int start, int64_t cfo_word, int n_syms,
-                       int mu, int64_t *arr)
+                       int mu, llr_t *arr)
 {
     int exps[MAX_SYMS] = { 0 }; /* n_syms >= 1 always writes exps[0] */
     int cap = N_DATA_CARRIERS * mu;
@@ -281,13 +285,19 @@ static int demod_block(rxd_t *r, int start, int64_t cfo_word, int n_syms,
             e_min = exps[s];
     for (s = 0; s < n_syms; s++) {
         int sh = 2 * (exps[s] - e_min);
+        /* BFP spreads can exceed the width. Shifting an int32 by >=32 is
+         * undefined, and clamping to 31 is EXACT for any value that fits
+         * one: the int64 result of v>>34 is 0 for v>=0 and -1 for v<0,
+         * which is what v>>31 gives. */
+        if (sh > 31)
+            sh = 31;
         for (k = 0; k < cap; k++)
             arr[s * cap + k] >>= sh;
     }
     return 2 * e_min; /* scale_log2, for the calibrate path later */
 }
 
-void rxd_quantize(const int64_t *arr, int n, int target_bits, int64_t *out)
+void rxd_quantize(const llr_t *arr, int n, int target_bits, llr_t *out)
 {
     int64_t peak = 0;
     int i, bl = 0, shift;
@@ -311,10 +321,12 @@ void rxd_quantize(const int64_t *arr, int n, int target_bits, int64_t *out)
 }
 
 /* descramble -> deinterleave -> crop -> Viterbi / LDPC min-sum */
-void rxd_decode_block(const int64_t *llrs, int n_total, cc_rate_t rate,
+void rxd_decode_block(const llr_t *llrs, int n_total, cc_rate_t rate,
                       int use_ldpc, int bits_count, uint8_t *out)
 {
-    static int64_t descr[MAX_LLRS], deint[MAX_LLRS];
+    /* decode phase: detection and demod are both finished with the arena */
+    llr_t *const descr = (llr_t *)(rx_arena + MAX_LLRS / 2);
+    llr_t *const deint = (llr_t *)(rx_arena + MAX_LLRS);
     static uint8_t work[CONV_STATES / 8 * CONV_MAX_STEPS_PUB];
 
     descramble_llrs(llrs, n_total, descr);
@@ -355,7 +367,7 @@ static int bit_length_i64(int64_t v)
     return bl;
 }
 
-static int64_t peak_abs(const int64_t *a, int n)
+static int64_t peak_abs(const llr_t *a, int n)
 {
     int64_t p = 0;
     int i;
@@ -369,7 +381,7 @@ static int64_t peak_abs(const int64_t *a, int n)
 
 /* header-based integer temperature fit; returns alpha_q12 or 0 on a
  * degenerate fit; *fit_shift receives the h64 alignment shift */
-int64_t rxd_fit_alpha_q12(const int64_t *h64, const int8_t *ref, int n,
+int64_t rxd_fit_alpha_q12(const llr_t *h64, const int8_t *ref, int n,
                           int *fit_shift)
 {
     int64_t m = 0, ssq = 0, den;
@@ -393,8 +405,8 @@ int64_t rxd_fit_alpha_q12(const int64_t *h64, const int8_t *ref, int n,
 }
 
 /* calibrated-domain data LLRs through the reliability ROM */
-void rxd_calibrated_llrs(const int64_t *d64, int n, int scale_d,
-                         int64_t alpha_q12, int hdr_scale_fit, int64_t *out)
+void rxd_calibrated_llrs(const llr_t *d64, int n, int scale_d,
+                         int64_t alpha_q12, int hdr_scale_fit, llr_t *out)
 {
     int shift = scale_d - hdr_scale_fit;
     int i;
@@ -411,10 +423,10 @@ void rxd_calibrated_llrs(const int64_t *d64, int n, int scale_d,
 }
 
 /* gain-weighted per-column moments of one LLR block (fading-robust) */
-int rxd_snr_block_moments(const int64_t *arr, const int8_t *ref, int n,
+int rxd_snr_block_moments(const llr_t *arr, const int8_t *ref, int n,
                           int cap, int64_t *num_out, int64_t *den_out)
 {
-    static int64_t hf[MAX_LLRS];
+    static llr_t hf[MAX_LLRS];
     static int64_t g[MAX_SYMS];
     int rows = n / cap;
     int sh = bit_length_i64(peak_abs(arr, n)) - 10;
@@ -467,8 +479,8 @@ int rxd_log2_q4(int64_t v)
  * Shared by the frame and burst receivers -- a burst pays for it once.
  * Returns 0, -1 on header CRC, -2 on an unsupported ver. */
 static int header_stage(rxd_t *r, int start, int64_t cfo_word,
-                        rxd_header_t *hdr, uint8_t *hdr_bits, int64_t *h64,
-                        int64_t *q64, int *scale_h, int *n_hdr_out)
+                        rxd_header_t *hdr, uint8_t *hdr_bits, llr_t *h64,
+                        llr_t *q64, int *scale_h, int *n_hdr_out)
 {
     int n_hdr = (conv_cc_elements(CC_R13, HEADER_BITS) + N_DATA_CARRIERS - 1)
                 / N_DATA_CARRIERS;
@@ -493,8 +505,11 @@ static int receive_common(rxd_t *r, int start, int64_t cfo_word,
                           const int64_t *prev_llrs, int prev_n,
                           int64_t *llrs_out, int *llrs_n_out)
 {
-    static int64_t h64[MAX_LLRS], d64[MAX_LLRS], q64[MAX_LLRS];
-    static int64_t comb[MAX_LLRS];
+    static llr_t h64[MAX_LLRS], d64[MAX_LLRS], q64[MAX_LLRS];
+    /* HARQ combining: quantised LLRs are <= +-254 each, so a sum is <= +-508
+ * -- llr_t is ample, and prev_llrs stays int64 because it crosses the
+ * public station interface. */
+static llr_t *const comb = (llr_t *)(rx_arena + 3 * MAX_LLRS / 2);
     static int8_t ref[MAX_LLRS];
     static uint8_t coded[MAX_LLRS];
     uint8_t hdr_bits[HEADER_BITS];
@@ -539,7 +554,12 @@ static int receive_common(rxd_t *r, int start, int64_t cfo_word,
     }
 
     if (llrs_out) {
-        memcpy(llrs_out, q64, sizeof(int64_t) * (size_t)n_llr);
+        /* widen element-wise: q64 is llr_t now, and llrs_out crosses the
+         * public interface as int64 (HARQ storage). A memcpy here would
+         * copy int64-sized bytes out of an int32 array. */
+        int i;
+        for (i = 0; i < n_llr; i++)
+            llrs_out[i] = q64[i];
         if (llrs_n_out)
             *llrs_n_out = n_llr;
     }
@@ -550,7 +570,7 @@ static int receive_common(rxd_t *r, int start, int64_t cfo_word,
     if (!ok && prev_llrs && prev_n == n_llr) {
         int i;
         for (i = 0; i < n_llr; i++)
-            comb[i] = q64[i] + prev_llrs[i];
+            comb[i] = (llr_t)(q64[i] + prev_llrs[i]);
         rxd_decode_block(comb, n_llr, (cc_rate_t)hdr->spd, use_ldpc,
                      bits_count, pkt_bits);
         ok = data_check_crc(pkt_bits, bits_count) == 0;
@@ -682,7 +702,7 @@ int rxd_receive_burst(rxd_t *r, const int16_t *samples, int n_samples,
                       uint8_t *pkt_bits, int *ok_flags, int *start_out,
                       int64_t *cfo_word_out, int *n_resync_out)
 {
-    static int64_t h64[MAX_LLRS], d64[MAX_LLRS], q64[MAX_LLRS];
+    static llr_t h64[MAX_LLRS], d64[MAX_LLRS], q64[MAX_LLRS];
     static int8_t ref[MAX_LLRS];
     static uint8_t coded[MAX_LLRS];
     uint8_t hdr_bits[HEADER_BITS];

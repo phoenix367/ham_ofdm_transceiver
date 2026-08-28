@@ -78,14 +78,27 @@ static int g_pool_next;
  * entirely (2 B/sample raw vs 8 B/sample analytic per instance). */
 static int16_t g_raw[RXS_RAW_RING_LEN];
 static blk_sum_t g_blk[RXS_MAX_INST][BLK_CAP];
-static int64_t g_h64[RXS_MAX_INST][MAX_LLRS], g_d64[RXS_MAX_INST][MAX_LLRS];
+static llr_t g_h64[RXS_MAX_INST][MAX_LLRS], g_d64[RXS_MAX_INST][MAX_LLRS];
 static int g_hexps[RXS_MAX_INST][MAX_SYMS], g_dexps[RXS_MAX_INST][MAX_SYMS];
 /* per-call scratch (never live across rxs_push calls) */
 /* No segment scratch: the tone stage's residual and the ZC scan both
  * pull through zc_ring_fetch, which reads the shared raw ring directly
  * and derotates on the way out. This pair held 1.1 MB. */
 
-static int64_t g_q64[MAX_LLRS];
+/* decode phase, arena slot 0 (see rx_internal.h) */
+static llr_t *const g_q64 = (llr_t *)rx_arena;
+/* One symbol's samples, shared by the header and data demod states.
+ *
+ * Both are call-scoped -- ring_copy fills it and rxd_demod_symbol
+ * consumes it within the same step, nothing survives the return -- and
+ * the states are mutually exclusive: the header completes before the
+ * first data symbol. Two separate copies cost 128 kB to hold the same
+ * thing at different times. */
+/* also from the shared arena: demod runs only after detection has
+ * finished with it (see rx_internal.h) */
+typedef char sym_arena_fits[2 * STREAM_MAX_SYM <= RX_ARENA_I64 ? 1 : -1];
+static int64_t *const g_sym_i = rx_arena;
+static int64_t *const g_sym_q = rx_arena + STREAM_MAX_SYM;
 
 /* analytic extraction: recompute the streaming Hilbert from the raw
  * ring, bit-identical to the former write-time FIR (zero prehistory;
@@ -385,6 +398,8 @@ static int finish_frame(rxs_t *r, rxs_event_t *ev)
             e_min = g_dexps[r->inst][s];
     for (s = 0; s < r->n_data; s++) {
         int sh = 2 * (g_dexps[r->inst][s] - e_min);
+        if (sh > 31)   /* see rx_demod: exact for values that fit int32 */
+            sh = 31;
         for (k = 0; k < r->cap; k++)
             g_d64[r->inst][s * r->cap + k] >>= sh;
     }
@@ -549,7 +564,7 @@ static int advance(rxs_t *r, rxs_event_t *ev)
             continue;
         }
         case S_HEADER: {
-            static int64_t si[STREAM_MAX_SYM], sq[STREAM_MAX_SYM];
+            int64_t *si = g_sym_i, *sq = g_sym_q;
             int64_t pos = r->start_abs + (int64_t)r->sym_idx
                           * r->demod.symbol_len;
             int win_buf[5], win_n = 0;
@@ -584,6 +599,8 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                         e_min = g_hexps[r->inst][s];
                 for (s = 0; s < r->n_hdr; s++) {
                     int sh = 2 * (g_hexps[r->inst][s] - e_min);
+                    if (sh > 31)   /* see rx_demod */
+                        sh = 31;
                     for (k = 0; k < N_DATA_CARRIERS; k++)
                         g_h64[r->inst][s * N_DATA_CARRIERS + k] >>= sh;
                 }
@@ -629,7 +646,7 @@ static int advance(rxs_t *r, rxs_event_t *ev)
             continue;
         }
         case S_DATA: {
-            static int64_t si[STREAM_MAX_SYM], sq[STREAM_MAX_SYM];
+            int64_t *si = g_sym_i, *sq = g_sym_q;
             int64_t pos = r->data_base
                           + (int64_t)r->sym_idx * r->demod.symbol_len;
             int win_buf[5], win_n = 0;
