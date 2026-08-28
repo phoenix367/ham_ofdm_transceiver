@@ -96,9 +96,10 @@ static llr_t *const g_q64 = (llr_t *)rx_arena;
  * thing at different times. */
 /* also from the shared arena: demod runs only after detection has
  * finished with it (see rx_internal.h) */
-typedef char sym_arena_fits[2 * STREAM_MAX_SYM <= RX_ARENA_I64 ? 1 : -1];
-static int64_t *const g_sym_i = rx_arena;
-static int64_t *const g_sym_q = rx_arena + STREAM_MAX_SYM;
+typedef char sym_arena_fits[4 * STREAM_MAX_SYM * sizeof(samp_t)
+                            <= RX_ARENA_BYTES ? 1 : -1];
+static samp_t *const g_sym_i = (samp_t *)rx_arena;
+static samp_t *const g_sym_q = (samp_t *)(rx_arena + STREAM_MAX_SYM * sizeof(samp_t));
 
 /* analytic extraction: recompute the streaming Hilbert from the raw
  * ring, bit-identical to the former write-time FIR (zero prehistory;
@@ -129,7 +130,7 @@ static int ring_resident(const rxs_t *r, int64_t abs_start, int n)
 }
 
 static int ring_copy(rxs_t *r, int64_t abs_start, int n,
-                     int64_t *di, int64_t *dq)
+                     samp_t *di, samp_t *dq)
 {
     int k, j;
     int ok = ring_resident(r, abs_start, n);
@@ -149,10 +150,10 @@ static int ring_copy(rxs_t *r, int64_t abs_start, int n,
             if (--idx < 0)
                 idx += RXS_RAW_RING_LEN;
         }
-        dq[k] = rshift_round(acc, Q15);
+        dq[k] = (samp_t)rshift_round(acc, Q15);
         di[k] = abs >= HILBERT_DELAY
-                    ? g_raw[(int)((abs - HILBERT_DELAY)
-                                  % RXS_RAW_RING_LEN)]
+                    ? (samp_t)g_raw[(int)((abs - HILBERT_DELAY)
+                                          % RXS_RAW_RING_LEN)]
                     : 0;
     }
     return ok ? 0 : -1;
@@ -171,7 +172,7 @@ typedef struct {
     int64_t base_abs, cw;
 } zc_ring_ctx_t;
 
-static void zc_ring_fetch(void *ctx, int k, int n, int64_t *di, int64_t *dq)
+static void zc_ring_fetch(void *ctx, int k, int n, samp_t *di, samp_t *dq)
 {
     zc_ring_ctx_t *z = (zc_ring_ctx_t *)ctx;
     ring_copy(z->r, z->base_abs + k, n, di, dq);
@@ -250,7 +251,15 @@ static void block_summary(rxs_t *r, int64_t blk_idx)
      * instead was measured to throw away GOOD acquisitions: with a ring
      * deliberately undersized to 8192, aborting here took a receiver
      * that decoded 16 of 16 blocks down to 0. */
-    ring_copy(r, blk_idx * B, B, re, im);
+    {   /* the ring yields samp_t; the FFT works in int64 */
+        samp_t sre[512], sim[512];   /* DET_B max */
+        int t;
+        ring_copy(r, blk_idx * B, B, sre, sim);
+        for (t = 0; t < B; t++) {
+            re[t] = sre[t];
+            im[t] = sim[t];
+        }
+    }
     fft_bfp(re, im, B, 13, &exp);
     bs->exp = exp;
     bs->band = 0;
@@ -564,7 +573,7 @@ static int advance(rxs_t *r, rxs_event_t *ev)
             continue;
         }
         case S_HEADER: {
-            int64_t *si = g_sym_i, *sq = g_sym_q;
+            samp_t *si = g_sym_i, *sq = g_sym_q;
             int64_t pos = r->start_abs + (int64_t)r->sym_idx
                           * r->demod.symbol_len;
             int win_buf[5], win_n = 0;
@@ -646,7 +655,7 @@ static int advance(rxs_t *r, rxs_event_t *ev)
             continue;
         }
         case S_DATA: {
-            int64_t *si = g_sym_i, *sq = g_sym_q;
+            samp_t *si = g_sym_i, *sq = g_sym_q;
             int64_t pos = r->data_base
                           + (int64_t)r->sym_idx * r->demod.symbol_len;
             int win_buf[5], win_n = 0;

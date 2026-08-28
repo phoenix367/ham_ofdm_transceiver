@@ -17,9 +17,9 @@
 #define MAX_WINDOW 40        /* top-3 coarse windows of 11 */
 #define RXD_MAX_SAMPLES 560000
 
-int64_t rx_arena[RX_ARENA_I64];
+union rx_arena_u rx_arena_store;
 
-static int64_t g_i[RXD_MAX_SAMPLES], g_q[RXD_MAX_SAMPLES];
+static samp_t g_i[RXD_MAX_SAMPLES], g_q[RXD_MAX_SAMPLES];
 
 static const double TILE_DBS[3] = { TILE_DB_NORMAL, TILE_DB_ROBUST,
                                     TILE_DB_EXTREME };
@@ -55,14 +55,14 @@ void rxd_init(rxd_t *r, link_mode_t mode)
 
 /* derotate [pos, pos+span) by cfo_word + words[k], accumulate ct tiles
  * after the CP, BFP-FFT; returns in-band energy, spectrum optional */
-static int64_t eval_hyp(const rxd_t *r, const int64_t *si, const int64_t *sq,
+static int64_t eval_hyp(const rxd_t *r, const samp_t *si, const samp_t *sq,
                         int pos, int64_t cfo_word, int k,
                         int ct, int *exp_out, int64_t *spec_re,
                         int64_t *spec_im)
 {
     /* arena, after si/sq: those stay live across this call */
-    int64_t *const di = rx_arena + 2 * (CP_LEN + 64 * FFT_BINS);
-    int64_t *const dq = di + (CP_LEN + 64 * FFT_BINS);
+    samp_t *const di = (samp_t *)(rx_arena + 2 * (CP_LEN + 64 * FFT_BINS) * sizeof(samp_t));
+    samp_t *const dq = di + (CP_LEN + 64 * FFT_BINS);
     int64_t acc_i[FFT_BINS], acc_q[FFT_BINS];
     int64_t word = cfo_word + r->search_words[k];
     uint32_t start_phase = (uint32_t)((uint64_t)(uint32_t)word * (uint64_t)pos);
@@ -104,7 +104,7 @@ static int energy_gt(int64_t ea, int xa, int64_t eb, int xb)
 
 /* coarse pass of the gated two-stage search; fills window[], returns the
  * window length, or 0 = below the contrast gate (run the full grid) */
-static int coarse_window(rxd_t *r, const int64_t *si, const int64_t *sq,
+static int coarse_window(rxd_t *r, const samp_t *si, const samp_t *sq,
                          int pos, int64_t cfo_word, int *window)
 {
     int64_t vals[(MAX_SEARCH + 3) / 4];
@@ -164,7 +164,7 @@ static int coarse_window(rxd_t *r, const int64_t *si, const int64_t *sq,
 
 /* one symbol: hypothesis search + channel estimate + matched-filter LLRs.
  * llr receives capacity = N_DATA_CARRIERS * mu values; returns the BFP exp */
-int rxd_demod_symbol(rxd_t *r, const int64_t *seg_i, const int64_t *seg_q,
+int rxd_demod_symbol(rxd_t *r, const samp_t *seg_i, const samp_t *seg_q,
                      int pos, int64_t cfo_word, int mu,
                      const int *window, int win_n, llr_t *llr)
 {
@@ -325,8 +325,8 @@ void rxd_decode_block(const llr_t *llrs, int n_total, cc_rate_t rate,
                       int use_ldpc, int bits_count, uint8_t *out)
 {
     /* decode phase: detection and demod are both finished with the arena */
-    llr_t *const descr = (llr_t *)(rx_arena + MAX_LLRS / 2);
-    llr_t *const deint = (llr_t *)(rx_arena + MAX_LLRS);
+    llr_t *const descr = (llr_t *)(rx_arena + MAX_LLRS * sizeof(llr_t));
+    llr_t *const deint = (llr_t *)(rx_arena + 2 * MAX_LLRS * sizeof(llr_t));
     static uint8_t work[CONV_STATES / 8 * CONV_MAX_STEPS_PUB];
 
     descramble_llrs(llrs, n_total, descr);
@@ -509,7 +509,7 @@ static int receive_common(rxd_t *r, int start, int64_t cfo_word,
     /* HARQ combining: quantised LLRs are <= +-254 each, so a sum is <= +-508
  * -- llr_t is ample, and prev_llrs stays int64 because it crosses the
  * public station interface. */
-static llr_t *const comb = (llr_t *)(rx_arena + 3 * MAX_LLRS / 2);
+static llr_t *const comb = (llr_t *)(rx_arena + 3 * MAX_LLRS * sizeof(llr_t));
     static int8_t ref[MAX_LLRS];
     static uint8_t coded[MAX_LLRS];
     uint8_t hdr_bits[HEADER_BITS];
@@ -675,7 +675,7 @@ static int resync_win(const rxd_t *r)
 static int burst_resync(rxd_t *r, int pos, int n_total, int64_t *cfo_word,
                         int *n_resync)
 {
-    static int64_t wi[RXD_RESYNC_MAX], wq[RXD_RESYNC_MAX];
+    static samp_t wi[RXD_RESYNC_MAX], wq[RXD_RESYNC_MAX];
     int win = resync_win(r);
     int nominal = pos + r->symbol_len;
     int a = pos - win < 0 ? 0 : pos - win;

@@ -23,17 +23,20 @@
 
 /* carved from the shared arena -- see rx_internal.h for why this is
  * safe; the offsets below must stay within RX_ARENA_I64 */
+/* byte offsets: samples are samp_t, the mag ring stays int64 (it holds
+ * accumulated correlation magnitudes), so it goes first at an 8-aligned
+ * boundary */
 #define DET_OFF_WI   0
-#define DET_OFF_WQ   (DET_OFF_WI + ZC_SLIDE_W)
-#define DET_OFF_MAG  (DET_OFF_WQ + ZC_SLIDE_W)
-#define DET_OFF_KR   (DET_OFF_MAG + ZC_MAG_RING)
-#define DET_OFF_KI   (DET_OFF_KR + ZC_KLEN_MAX)
-#define DET_OFF_RRE  (DET_OFF_KI + ZC_KLEN_MAX)
-#define DET_OFF_RIM  (DET_OFF_RRE + ZC_KLEN_MAX)
-#define DET_OFF_BI   (DET_OFF_RIM + ZC_KLEN_MAX)
-#define DET_OFF_BQ   (DET_OFF_BI + LAG_CHUNK + LAG_HIST)
-#define DET_OFF_END  (DET_OFF_BQ + LAG_CHUNK + LAG_HIST)
-typedef char det_arena_fits[DET_OFF_END <= RX_ARENA_I64 ? 1 : -1];
+#define DET_OFF_WQ   (DET_OFF_WI + ZC_SLIDE_W * (int)sizeof(samp_t))
+#define DET_OFF_MAG  (DET_OFF_WQ + ZC_SLIDE_W * (int)sizeof(samp_t))
+#define DET_OFF_KR   (DET_OFF_MAG + ZC_MAG_RING * (int)sizeof(int64_t))
+#define DET_OFF_KI   (DET_OFF_KR + ZC_KLEN_MAX * (int)sizeof(samp_t))
+#define DET_OFF_RRE  (DET_OFF_KI + ZC_KLEN_MAX * (int)sizeof(samp_t))
+#define DET_OFF_RIM  (DET_OFF_RRE + ZC_KLEN_MAX * (int)sizeof(samp_t))
+#define DET_OFF_BI   (DET_OFF_RIM + ZC_KLEN_MAX * (int)sizeof(samp_t))
+#define DET_OFF_BQ   (DET_OFF_BI + (LAG_CHUNK + LAG_HIST) * (int)sizeof(samp_t))
+#define DET_OFF_END  (DET_OFF_BQ + (LAG_CHUNK + LAG_HIST) * (int)sizeof(samp_t))
+typedef char det_arena_fits[DET_OFF_END <= RX_ARENA_BYTES ? 1 : -1];
 
 typedef struct {
     int B, T, max_shift, thr_q10, n_mask_bins;
@@ -67,13 +70,13 @@ static int64_t div_round_signed(int64_t a, int64_t b)
 }
 
 /* phase estimate of a derotated segment at an arbitrary lag */
-static int64_t lag_word(const int64_t *di, const int64_t *dq, int n, int lag)
+static int64_t lag_word(const samp_t *di, const samp_t *dq, int n, int lag)
 {
     int64_t rr = 0, ri = 0, ang, mag;
     int k;
     for (k = 0; k < n - lag; k++) {
-        rr += di[k] * di[k + lag] + dq[k] * dq[k + lag];
-        ri += di[k] * dq[k + lag] - dq[k] * di[k + lag];
+        rr += (int64_t)di[k] * di[k + lag] + (int64_t)dq[k] * dq[k + lag];
+        ri += (int64_t)di[k] * dq[k + lag] - (int64_t)dq[k] * di[k + lag];
     }
     cordic_atan2(ri, rr, &ang, &mag);
     return div_round_signed(ang, lag);
@@ -95,8 +98,8 @@ static int64_t lag_word(const int64_t *di, const int64_t *dq, int n, int lag)
 static void lag_words_src(const zc_src_t *src, int n, int want_coarse,
                           int64_t *fine_out, int64_t *coarse_out)
 {
-    int64_t *const bi = rx_arena + DET_OFF_BI;
-    int64_t *const bq = rx_arena + DET_OFF_BQ;
+    samp_t *const bi = (samp_t *)(rx_arena + DET_OFF_BI);
+    samp_t *const bq = (samp_t *)(rx_arena + DET_OFF_BQ);
     int64_t rr1 = 0, ri1 = 0, rr2 = 0, ri2 = 0, ang, mag;
     const int L1 = FFT_BINS, L2 = FFT_BINS / 2;
     int pos = 0, hist = 0;
@@ -111,18 +114,18 @@ static void lag_words_src(const zc_src_t *src, int n, int want_coarse,
         /* absolute index a = pos + j; a-L1 must still be in the buffer */
         j0 = pos < L1 ? L1 - pos : L1;
         for (j = j0; j < total; j++) {
-            rr1 += bi[j - L1] * bi[j] + bq[j - L1] * bq[j];
-            ri1 += bi[j - L1] * bq[j] - bq[j - L1] * bi[j];
+            rr1 += (int64_t)bi[j - L1] * bi[j] + (int64_t)bq[j - L1] * bq[j];
+            ri1 += (int64_t)bi[j - L1] * bq[j] - (int64_t)bq[j - L1] * bi[j];
             if (want_coarse) {
-                rr2 += bi[j - L2] * bi[j] + bq[j - L2] * bq[j];
-                ri2 += bi[j - L2] * bq[j] - bq[j - L2] * bi[j];
+                rr2 += (int64_t)bi[j - L2] * bi[j] + (int64_t)bq[j - L2] * bq[j];
+                ri2 += (int64_t)bi[j - L2] * bq[j] - (int64_t)bq[j - L2] * bi[j];
             }
         }
         if (total > LAG_HIST) {
             memmove(bi, bi + total - LAG_HIST,
-                    (size_t)LAG_HIST * sizeof(int64_t));
+                    (size_t)LAG_HIST * sizeof(*bi));
             memmove(bq, bq + total - LAG_HIST,
-                    (size_t)LAG_HIST * sizeof(int64_t));
+                    (size_t)LAG_HIST * sizeof(*bq));
             pos += total - LAG_HIST;
             hist = LAG_HIST;
         } else {
@@ -140,16 +143,16 @@ static void lag_words_src(const zc_src_t *src, int n, int want_coarse,
 /* array + derotation, and source + derotation: the phase at index k is
  * k*word, so a fetch can start anywhere */
 typedef struct {
-    const int64_t *i_arr, *q_arr;
+    const samp_t *i_arr, *q_arr;
     int off;
     int64_t w;
 } zc_rot_ctx_t;
 
-static void zc_rot_fetch(void *ctx, int k, int n, int64_t *di, int64_t *dq)
+static void zc_rot_fetch(void *ctx, int k, int n, samp_t *di, samp_t *dq)
 {
     const zc_rot_ctx_t *a = (const zc_rot_ctx_t *)ctx;
-    memcpy(di, a->i_arr + a->off + k, (size_t)n * sizeof(int64_t));
-    memcpy(dq, a->q_arr + a->off + k, (size_t)n * sizeof(int64_t));
+    memcpy(di, a->i_arr + a->off + k, (size_t)n * sizeof(*di));
+    memcpy(dq, a->q_arr + a->off + k, (size_t)n * sizeof(*dq));
     nco_derotate(di, dq, n, a->w,
                  (uint32_t)((int64_t)(uint32_t)a->w * k), di, dq);
 }
@@ -160,7 +163,7 @@ typedef struct {
     int64_t w;
 } zc_rot2_ctx_t;
 
-static void zc_rot2_fetch(void *ctx, int k, int n, int64_t *di, int64_t *dq)
+static void zc_rot2_fetch(void *ctx, int k, int n, samp_t *di, samp_t *dq)
 {
     const zc_rot2_ctx_t *a = (const zc_rot2_ctx_t *)ctx;
     a->inner->fetch(a->inner->ctx, a->off + k, n, di, dq);
@@ -184,7 +187,7 @@ int64_t rx_residual_word_src(const zc_src_t *src, int n)
     return fine + k * ambig;
 }
 
-int64_t rx_lag_n_word(const int64_t *di, const int64_t *dq, int n)
+int64_t rx_lag_n_word(const samp_t *di, const samp_t *dq, int n)
 {
     return lag_word(di, dq, n, FFT_BINS);
 }
@@ -219,8 +222,8 @@ static int cmp_i64(const void *a, const void *b)
 #include <stdlib.h> /* qsort for the median (host reference) */
 
 /* tone stage: returns 0 + (sample_index, cfo_word), -1 on no lock */
-static int detect_newman(const det_mode_t *d, const int64_t *i_arr,
-                         const int64_t *q_arr, int n, int *start_out,
+static int detect_newman(const det_mode_t *d, const samp_t *i_arr,
+                         const samp_t *q_arr, int n, int *start_out,
                          int64_t *word_out)
 {
     static int64_t block_band[MAX_BLOCKS], band0[MAX_BLOCKS], band1[MAX_BLOCKS];
@@ -240,8 +243,13 @@ static int detect_newman(const det_mode_t *d, const int64_t *i_arr,
 
     for (b = 0; b < num_blocks; b++) {
         int64_t re[DET_B_MAX], im[DET_B_MAX];
-        memcpy(re, i_arr + b * B, sizeof(int64_t) * (size_t)B);
-        memcpy(im, q_arr + b * B, sizeof(int64_t) * (size_t)B);
+        {   /* samples are samp_t, the FFT works in int64 */
+            int t;
+            for (t = 0; t < B; t++) {
+                re[t] = i_arr[b * B + t];
+                im[t] = q_arr[b * B + t];
+            }
+        }
         fft_bfp(re, im, B, 13, &exp);
         exps[b] = exp;
         for (k = 0; k < B; k++)
@@ -362,8 +370,8 @@ static int detect_newman(const det_mode_t *d, const int64_t *i_arr,
  * retained tail is moved down rather than re-read. 164 kB at EXTREME,
  * against 1.1 MB to materialise the window. */
 
-static int64_t *const g_wi = rx_arena + DET_OFF_WI;
-static int64_t *const g_wq = rx_arena + DET_OFF_WQ;
+static samp_t *const g_wi = (samp_t *)(rx_arena + DET_OFF_WI);
+static samp_t *const g_wq = (samp_t *)(rx_arena + DET_OFF_WQ);
 static int g_wbase, g_wfill;
 
 static void win_open(const zc_src_t *src, int n)
@@ -391,8 +399,8 @@ static void win_need(const zc_src_t *src, int n, int hi, int back)
         int keep = g_wfill - shift;
         if (keep < 0)
             keep = 0;
-        memmove(g_wi, g_wi + shift, (size_t)keep * sizeof(int64_t));
-        memmove(g_wq, g_wq + shift, (size_t)keep * sizeof(int64_t));
+        memmove(g_wi, g_wi + shift, (size_t)keep * sizeof(*g_wi));
+        memmove(g_wq, g_wq + shift, (size_t)keep * sizeof(*g_wq));
         g_wbase = new_base;
         g_wfill = keep;
     }
@@ -427,11 +435,11 @@ static int detect_zc(const det_mode_t *d, const zc_src_t *src,
      *   mag[] genuinely needs a window, because cc[m] gathers
      *     mag[m + g*klen] for g < ng -- but that is (ng-1)*klen+1
      *     entries, not the whole span. */
-    int64_t *const mag = rx_arena + DET_OFF_MAG;
-    int64_t *const kr = rx_arena + DET_OFF_KR;
-    int64_t *const ki = rx_arena + DET_OFF_KI;
-    int64_t *const rom_re = rx_arena + DET_OFF_RRE;
-    int64_t *const rom_im = rx_arena + DET_OFF_RIM;
+    int64_t *const mag = (int64_t *)(void *)(rx_arena + DET_OFF_MAG);
+    samp_t *const kr = (samp_t *)(rx_arena + DET_OFF_KR);
+    samp_t *const ki = (samp_t *)(rx_arena + DET_OFF_KI);
+    samp_t *const rom_re = (samp_t *)(rx_arena + DET_OFF_RRE);
+    samp_t *const rom_im = (samp_t *)(rx_arena + DET_OFF_RIM);
     int klen = d->zc_G * FFT_BINS;
     int ng = d->zc_groups;
     int preamble_len = d->zc_L * FFT_BINS;
@@ -468,15 +476,15 @@ static int detect_zc(const det_mode_t *d, const zc_src_t *src,
         win_open(src, n);
         win_need(src, n, preamble_len - 1, preamble_len);
         for (k = 0; k < preamble_len; k++)
-            we += WI(k) * WI(k) + WQ(k) * WQ(k);
+            we += (int64_t)WI(k) * WI(k) + (int64_t)WQ(k) * WQ(k);
 
         j = 0;
         for (p = 0; p < n_corr; p++) {
             int64_t a = 0, b2 = 0, aa, bb;
             win_need(src, n, p + klen < n ? p + klen : n - 1, preamble_len);
             for (k = 0; k < klen; k++) {
-                a += WI(p + k) * kr[k] + WQ(p + k) * ki[k];
-                b2 += WQ(p + k) * kr[k] - WI(p + k) * ki[k];
+                a += (int64_t)WI(p + k) * kr[k] + (int64_t)WQ(p + k) * ki[k];
+                b2 += (int64_t)WQ(p + k) * kr[k] - (int64_t)WI(p + k) * ki[k];
             }
             a = rshift_round(a, Q15);
             b2 = rshift_round(b2, Q15);
@@ -509,9 +517,12 @@ static int detect_zc(const det_mode_t *d, const zc_src_t *src,
                     }
                     /* slide the energy window to [m+1, m+1+preamble_len) */
                     if (m + 1 < n_pos)
-                        we += WI(m + preamble_len) * WI(m + preamble_len)
-                              + WQ(m + preamble_len) * WQ(m + preamble_len)
-                              - WI(m) * WI(m) - WQ(m) * WQ(m);
+                        we += (int64_t)WI(m + preamble_len)
+                                  * WI(m + preamble_len)
+                              + (int64_t)WQ(m + preamble_len)
+                                  * WQ(m + preamble_len)
+                              - (int64_t)WI(m) * WI(m)
+                              - (int64_t)WQ(m) * WQ(m);
                 }
             }
         }
@@ -555,17 +566,17 @@ static int detect_zc(const det_mode_t *d, const zc_src_t *src,
 /* array-backed source, so callers that already hold the window are
  * unchanged (the frame-at-once path, and the golden-vector tests) */
 typedef struct {
-    const int64_t *i_arr, *q_arr;
+    const samp_t *i_arr, *q_arr;
 } zc_arr_ctx_t;
 
-static void zc_arr_fetch(void *ctx, int k, int n, int64_t *di, int64_t *dq)
+static void zc_arr_fetch(void *ctx, int k, int n, samp_t *di, samp_t *dq)
 {
     const zc_arr_ctx_t *a = (const zc_arr_ctx_t *)ctx;
-    memcpy(di, a->i_arr + k, (size_t)n * sizeof(int64_t));
-    memcpy(dq, a->q_arr + k, (size_t)n * sizeof(int64_t));
+    memcpy(di, a->i_arr + k, (size_t)n * sizeof(*di));
+    memcpy(dq, a->q_arr + k, (size_t)n * sizeof(*dq));
 }
 
-int rx_detect(link_mode_t mode, const int64_t *i_arr, const int64_t *q_arr,
+int rx_detect(link_mode_t mode, const samp_t *i_arr, const samp_t *q_arr,
               int n, int *start, int64_t *cfo_word)
 {
     const det_mode_t *d = &DET[mode];
@@ -580,7 +591,7 @@ int rx_detect(link_mode_t mode, const int64_t *i_arr, const int64_t *q_arr,
     if (cs + win > n)
         win = n - cs;
     {
-        static int64_t wi[ZC_WIN_MAX], wq[ZC_WIN_MAX];
+        static samp_t wi[ZC_WIN_MAX], wq[ZC_WIN_MAX];
         uint32_t sp = 0u; /* python derotates the slice from phase 0 */
         nco_derotate(i_arr + cs, q_arr + cs, win, cw, sp, wi, wq);
         {
@@ -601,8 +612,8 @@ int rx_detect(link_mode_t mode, const int64_t *i_arr, const int64_t *q_arr,
     return 0;
 }
 
-int rx_detect_zc_window(link_mode_t mode, const int64_t *i_arr,
-                        const int64_t *q_arr, int n, int *time_out,
+int rx_detect_zc_window(link_mode_t mode, const samp_t *i_arr,
+                        const samp_t *q_arr, int n, int *time_out,
                         int64_t *word_out)
 {
     zc_arr_ctx_t a;

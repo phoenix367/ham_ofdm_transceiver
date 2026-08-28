@@ -4,7 +4,7 @@
 
 #define CORDIC_ITERS 16
 
-void hilbert_analytic(const int16_t *x, int n, int64_t *out_i, int64_t *out_q)
+void hilbert_analytic(const int16_t *x, int n, samp_t *out_i, samp_t *out_q)
 {
     /* direct-form FIR over a zero-prehistory, matching the Python model's
      * zero padding: q[m] = sum_k taps[k] * x[m - (N-1) + k] */
@@ -21,9 +21,9 @@ void hilbert_analytic(const int16_t *x, int n, int64_t *out_i, int64_t *out_q)
     }
 }
 
-void nco_derotate(const int64_t *in_i, const int64_t *in_q, int n,
+void nco_derotate(const samp_t *in_i, const samp_t *in_q, int n,
                   int64_t phase_word, uint32_t start_phase,
-                  int64_t *out_i, int64_t *out_q)
+                  samp_t *out_i, samp_t *out_q)
 {
     uint32_t phase = start_phase;
     uint32_t word = (uint32_t)phase_word; /* modulo 2^32, sign folds in */
@@ -35,9 +35,9 @@ void nco_derotate(const int64_t *in_i, const int64_t *in_q, int n,
         /* read both inputs BEFORE writing either output: this is called
          * in place (rx_stream's tone stage does), and writing out_i[m]
          * first would corrupt the in_i[m] that out_q[m] still needs */
-        int64_t vi = in_i[m], vq = in_q[m];
-        out_i[m] = rshift_round(vi * c + vq * s, Q15);
-        out_q[m] = rshift_round(vq * c - vi * s, Q15);
+        int64_t vi = in_i[m], vq = in_q[m];   /* widen for the products */
+        out_i[m] = (samp_t)rshift_round(vi * c + vq * s, Q15);
+        out_q[m] = (samp_t)rshift_round(vq * c - vi * s, Q15);
         phase += word;
     }
 }

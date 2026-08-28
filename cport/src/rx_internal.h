@@ -5,6 +5,7 @@
 #define OFDM_RX_INTERNAL_H
 
 #include <stdint.h>
+#include "dsp.h"
 #include "rx_demod.h"
 #include "conv.h"
 
@@ -37,10 +38,19 @@ typedef int32_t llr_t;
  *
  * What must NOT live here: g_raw, g_blk, g_h64/g_d64 all carry state
  * across pushes. */
-/* demod is the largest phase: one symbol's samples (si/sq) stay live
- * while eval_hyp uses its own derotation scratch (di/dq) inside. */
-#define RX_ARENA_I64 32896
-extern int64_t rx_arena[RX_ARENA_I64];
+/* Sized in BYTES, because the phases mix sample (samp_t), LLR (llr_t)
+ * and accumulator (int64) widths. Detect is the largest once samples are
+ * int32: its mag ring stays int64.
+ *
+ *   detect 156680   demod 131584   decode 131072
+ *
+ * The union forces int64 alignment for the accumulator views. */
+#define RX_ARENA_BYTES 156680
+extern union rx_arena_u {
+    int64_t align;
+    unsigned char b[RX_ARENA_BYTES];
+} rx_arena_store;
+#define rx_arena (rx_arena_store.b)
 
 #define MAX_LLRS 8192 /* 255-byte EXT frame at BPSK 1/3 */
 #define MAX_SYMS 400
@@ -48,7 +58,7 @@ extern int64_t rx_arena[RX_ARENA_I64];
 /* one symbol at seg (>= symbol_len samples), absolute position `pos` for
  * the CFO phase reference; window = NULL -> coarse/full search. llr
  * receives N_DATA_CARRIERS * mu values; returns the BFP exponent. */
-int rxd_demod_symbol(rxd_t *r, const int64_t *seg_i, const int64_t *seg_q,
+int rxd_demod_symbol(rxd_t *r, const samp_t *seg_i, const samp_t *seg_q,
                      int pos, int64_t cfo_word, int mu,
                      const int *window, int win_n, llr_t *llr);
 

@@ -11,7 +11,7 @@
 #define BC_MAX_SAMPLES 600000
 #define BC_PKT_BITS 2600
 
-static int64_t g_bi[BC_MAX_SAMPLES], g_bq[BC_MAX_SAMPLES];
+static samp_t g_bi[BC_MAX_SAMPLES], g_bq[BC_MAX_SAMPLES];
 static uint8_t g_blocks[BC_MAX_GROUP * BC_PKT_BITS];
 static int g_ok[BC_MAX_GROUP];
 
@@ -91,8 +91,8 @@ int bc_receive(link_mode_t mode, const int16_t *samples, int n, int group,
     pre = bc_preamble_len(mode);
 
     hilbert_analytic(samples, n, g_bi, g_bq);
-    memset(g_bi + n, 0, sizeof(int64_t) * (size_t)symbol_len);
-    memset(g_bq + n, 0, sizeof(int64_t) * (size_t)symbol_len);
+    memset(g_bi + n, 0, sizeof(*g_bi) * (size_t)symbol_len);
+    memset(g_bq + n, 0, sizeof(*g_bq) * (size_t)symbol_len);
 
     while (pos + pre < n) {
         rxd_header_t hdr;

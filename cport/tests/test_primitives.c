@@ -73,21 +73,34 @@ int main(void)
     }
 
     {
-        static int64_t oi[2048], oq[2048];
+        /* golden vectors are int64; the pipeline carries samples as
+         * samp_t (int32) -- widen at the comparison boundary */
+        static samp_t oi[2048], oq[2048];
+        static int64_t wi[2048], wq[2048];
+        int i;
         hilbert_analytic(HILBERT_IN, 2048, oi, oq);
-        check("hilbert analytic", arr_eq(oi, HILBERT_OUT_I, 2048) &&
-                                  arr_eq(oq, HILBERT_OUT_Q, 2048));
+        for (i = 0; i < 2048; i++) { wi[i] = oi[i]; wq[i] = oq[i]; }
+        check("hilbert analytic", arr_eq(wi, HILBERT_OUT_I, 2048) &&
+                                  arr_eq(wq, HILBERT_OUT_Q, 2048));
     }
 
     {
-        static int64_t oi[1024], oq[1024];
-        nco_derotate(NCO_IN_I, NCO_IN_Q, 1024, NCO_WORD,
+        static samp_t oi[1024], oq[1024], ini[1024], inq[1024];
+        static int64_t wi[1024], wq[1024];
+        int i;
+        for (i = 0; i < 1024; i++) {
+            ini[i] = (samp_t)NCO_IN_I[i];
+            inq[i] = (samp_t)NCO_IN_Q[i];
+        }
+        nco_derotate(ini, inq, 1024, NCO_WORD,
                      (uint32_t)NCO_START, oi, oq);
-        check("nco derotate", arr_eq(oi, NCO_OUT_I, 1024) &&
-                              arr_eq(oq, NCO_OUT_Q, 1024));
-        nco_derotate(NCO_IN_I, NCO_IN_Q, 1024, NCO_WORD2, 7u, oi, oq);
+        for (i = 0; i < 1024; i++) { wi[i] = oi[i]; wq[i] = oq[i]; }
+        check("nco derotate", arr_eq(wi, NCO_OUT_I, 1024) &&
+                              arr_eq(wq, NCO_OUT_Q, 1024));
+        nco_derotate(ini, inq, 1024, NCO_WORD2, 7u, oi, oq);
+        for (i = 0; i < 1024; i++) { wi[i] = oi[i]; wq[i] = oq[i]; }
         check("nco derotate (negative word)",
-              arr_eq(oi, NCO_OUT2_I, 1024) && arr_eq(oq, NCO_OUT2_Q, 1024));
+              arr_eq(wi, NCO_OUT2_I, 1024) && arr_eq(wq, NCO_OUT2_Q, 1024));
     }
 
     {
