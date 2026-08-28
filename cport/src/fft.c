@@ -74,9 +74,16 @@ int fft_bfp(int64_t *re, int64_t *im, int n, int target_bits, int *exp)
     int e = block_exponent(re, im, n, target_bits);
     int i;
     if (e >= 0) {
+        /* multiply, do not shift: BFP scaling runs over signed spectra
+         * and "negative << n" is undefined behaviour in C (UBSan flags
+         * it on every suite that touches the FFT). gcc emits an
+         * arithmetic shift, so the result has always been right -- but
+         * relying on UB is what makes host and target free to differ.
+         * The multiply is well defined and bit-identical. */
+        int64_t scale = (int64_t)1 << e;
         for (i = 0; i < n; i++) {
-            re[i] <<= e;
-            im[i] <<= e;
+            re[i] *= scale;
+            im[i] *= scale;
         }
     } else {
         for (i = 0; i < n; i++) {

@@ -215,7 +215,12 @@ static void finish(int total, int16_t *out)
             if (idx >= 0 && idx < total)
                 acc += (int64_t)TX_LPF_TAPS[j] * g_sig[idx];
         }
-        out[k] = sat16(rshift_round(acc, Q15) << OUTPUT_GAIN_SHIFT);
+        /* multiply, do not shift: acc is routinely negative here and
+         * "negative << n" is undefined behaviour in C (UBSan flags it).
+         * gcc happens to emit an arithmetic shift, which is why this has
+         * always worked -- but UB is exactly what differs between hosts
+         * and targets. The multiply is well defined and identical. */
+        out[k] = sat16(rshift_round(acc, Q15) * (1 << OUTPUT_GAIN_SHIFT));
     }
 }
 
