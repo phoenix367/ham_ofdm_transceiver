@@ -29,7 +29,7 @@
 #define DET_OFF_WI   0
 #define DET_OFF_WQ   (DET_OFF_WI + ZC_SLIDE_W * (int)sizeof(samp_t))
 #define DET_OFF_MAG  (DET_OFF_WQ + ZC_SLIDE_W * (int)sizeof(samp_t))
-#define DET_OFF_KR   (DET_OFF_MAG + ZC_MAG_RING * (int)sizeof(int64_t))
+#define DET_OFF_KR   (DET_OFF_MAG + ZC_MAG_RING * (int)sizeof(int32_t))
 #define DET_OFF_KI   (DET_OFF_KR + ZC_KLEN_MAX * (int)sizeof(samp_t))
 #define DET_OFF_RRE  (DET_OFF_KI + ZC_KLEN_MAX * (int)sizeof(samp_t))
 #define DET_OFF_RIM  (DET_OFF_RRE + ZC_KLEN_MAX * (int)sizeof(samp_t))
@@ -435,7 +435,9 @@ static int detect_zc(const det_mode_t *d, const zc_src_t *src,
      *   mag[] genuinely needs a window, because cc[m] gathers
      *     mag[m + g*klen] for g < ng -- but that is (ng-1)*klen+1
      *     entries, not the whole span. */
-    int64_t *const mag = (int64_t *)(void *)(rx_arena + DET_OFF_MAG);
+    /* int32: measured peak magnitude is 780982 (20 bits), a 2750x
+     * margin. The cc sums that gather 16 of these stay int64. */
+    int32_t *const mag = (int32_t *)(void *)(rx_arena + DET_OFF_MAG);
     samp_t *const kr = (samp_t *)(rx_arena + DET_OFF_KR);
     samp_t *const ki = (samp_t *)(rx_arena + DET_OFF_KI);
     samp_t *const rom_re = (samp_t *)(rx_arena + DET_OFF_RRE);
@@ -491,7 +493,7 @@ static int detect_zc(const det_mode_t *d, const zc_src_t *src,
             aa = a < 0 ? -a : a;
             bb = b2 < 0 ? -b2 : b2;
             mag[p % ZC_MAG_RING] =
-                (aa > bb ? aa : bb) + ((aa < bb ? aa : bb) >> 1);
+                (int32_t)((aa > bb ? aa : bb) + ((aa < bb ? aa : bb) >> 1));
 
             /* mag[m .. m+span] are now resident, so cc[m] is complete */
             m = p - span;

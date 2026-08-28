@@ -45,7 +45,7 @@ typedef int32_t llr_t;
  *   detect 156680   demod 131584   decode 131072
  *
  * The union forces int64 alignment for the accumulator views. */
-#define RX_ARENA_BYTES 156680
+#define RX_ARENA_BYTES 131584
 extern union rx_arena_u {
     int64_t align;
     unsigned char b[RX_ARENA_BYTES];

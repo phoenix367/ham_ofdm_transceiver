@@ -89,15 +89,15 @@ references only the streaming APIs, not projected:
 | Image | Flash | RAM (.bss) |
 |---|---|---|
 | Transmit only (`txs_open`/`txs_pull`) | 20 KB | **28 KB** |
-| **Full station, all three modes, no EXT frames** | **50 KB** | **723 KB** |
-| Full station, all three modes + EXT frames | 50 KB | 954 KB |
+| **Full station, all three modes, no EXT frames** | **50 KB** | **699 KB** |
+| Full station, all three modes + EXT frames | 50 KB | 929 KB |
 
 Where the station's RAM goes:
 
 | Component | Size |
 |---|---|
 | Shared raw int16 ring (147456 samples, all instances) | 288 KB |
-| Scratch arena (detect / demod / decode, unioned) | 153 KB |
+| Scratch arena (detect / demod / decode, unioned) | 129 KB |
 | Tone summaries, each instance sized to its own mode | 94 KB |
 | LLR buffers, 3 instances (int32) | 24 KB (192 KB with EXT frames) |
 | FEC encode scratch + streaming TX | 33 KB |
@@ -177,8 +177,8 @@ acquisition ≈ 9 % amortized, everything else < 3 %. Flash: the whole
 | Configuration (MEASURED, linked image) | RAM | Fits ~496 KB? |
 |---|---|---|
 | Transmit only | 28 KB | yes |
-| All three modes, no EXT frames (`-DMAX_LLRS=1024`) | 723 KB | **no** |
-| All three modes + EXT frames (as built) | 954 KB | **no** |
+| All three modes, no EXT frames (`-DMAX_LLRS=1024`) | 699 KB | **no** |
+| All three modes + EXT frames (as built) | 929 KB | **no** |
 
 **This verdict is a correction.** The table previously read "all three
 modes ≈ 453 KB, fits with ~43 KB to spare". That was an estimate, and
@@ -194,13 +194,23 @@ the linked image does not meet it. Two places the estimate was optimistic:
 - it assumed a build without EXT frames. That is a real option and is
   now measurable (`-DMAX_LLRS=1024`), worth 236 KB.
 
-Even with both taken, the floor is the 288 KB raw ring plus the 153 KB
-arena plus 94 KB of summaries: 535 KB before anything else, against
+Even with both taken, the floor is the 288 KB raw ring plus the 129 KB
+arena plus 94 KB of summaries: 511 KB before anything else, against
 ~496 KB usable. The ring is not negotiable while EXTREME is supported
-(measured lookback 124478 samples), so closing the rest means the
-arena, whose detect phase is dominated by a 40960-sample ZC slide
-window -- an incremental correlator could shrink it the way the mag
-ring already was. Failing that, an H743-class part.
+(measured lookback 124478 samples).
+
+The arena is close to spent too, and the reason is worth recording: its
+three phases are now within 6 KB of each other (detect 125956, demod
+131584, decode 131072). A union costs the MAXIMUM, so shrinking any one
+buys nothing until all three come down together. Streaming eval_hyp's
+derotation per tile, for instance, would cut demod to 65792 and move the
+arena by 512 bytes, because decode immediately binds. The slide window
+inside detect is likewise at its floor: the scan's live span IS
+preamble_len+1 = 8193 samples and it holds 10240 (that plus one slide
+block); a smaller block trades RAM for 8x the memmove traffic.
+
+So an H743-class part, unless a deployment drops EXT frames AND the
+ring shrinks with a lower bootstrap mode.
 
 What has NOT changed: flash is comfortable at 50 KB against 1 MB, and
 the CPU projections stand.
@@ -213,7 +223,7 @@ the CPU projections stand.
   brings it to ~5 % if EXTREME-on-M4 is wanted.
 - **G3 (≤ 60 % load, RAM within target)**: load **PASS**; RAM
   **QUALIFIED** — see "Target fit" above. The measured three-mode image
-  is 723 KB without EXT frames and 954 KB with, so it needs a ~1 MB
+  is 699 KB without EXT frames and 929 KB with, so it needs a ~1 MB
   part (STM32H743 class) rather than the H723xG named as the target.
   Single-mode figures are NOT a way out: rung 0 is EXTREME, so a build
   without it cannot bootstrap or recover a link at all. The path back to
