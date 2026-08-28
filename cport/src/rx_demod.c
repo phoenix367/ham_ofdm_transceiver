@@ -17,7 +17,15 @@
 #define MAX_WINDOW 40        /* top-3 coarse windows of 11 */
 #define RXD_MAX_SAMPLES 560000
 
-union rx_arena_u rx_arena_store;
+
+/* The two arena regions this file carves (arena.h). Demod is the larger
+ * and sets the receiver's arena size: eval_hyp's derotation scratch sits
+ * ABOVE the symbol samples, because those stay live across the call. */
+typedef char demod_arena_fits[4 * (CP_LEN + 64 * FFT_BINS)
+                              * (int)sizeof(samp_t)
+                              <= RX_ARENA_BYTES ? 1 : -1];
+typedef char decode_arena_fits[4 * MAX_LLRS * (int)sizeof(llr_t)
+                               <= RX_ARENA_BYTES ? 1 : -1];
 
 static samp_t g_i[RXD_MAX_SAMPLES], g_q[RXD_MAX_SAMPLES];
 
@@ -174,6 +182,7 @@ int rxd_demod_symbol(rxd_t *r, const samp_t *seg_i, const samp_t *seg_q,
     int64_t h_re[N_CHANNEL], h_im[N_CHANNEL];
     int64_t best_e = 0;
     int best_exp = 0, best_k = -1, exp, i, k;
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
 
     if (window == 0 && r->coarse_enabled && r->n_words > 9) {
         int wn = coarse_window(r, seg_i, seg_q, pos, cfo_word, win_buf);
@@ -328,6 +337,7 @@ void rxd_decode_block(const llr_t *llrs, int n_total, cc_rate_t rate,
     llr_t *const descr = (llr_t *)(rx_arena + MAX_LLRS * sizeof(llr_t));
     llr_t *const deint = (llr_t *)(rx_arena + 2 * MAX_LLRS * sizeof(llr_t));
     static uint8_t work[CONV_STATES / 8 * CONV_MAX_STEPS_PUB];
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
 
     descramble_llrs(llrs, n_total, descr);
     deinterleave_i64(descr, n_total, N_DATA_CARRIERS, deint);
@@ -630,6 +640,7 @@ int rxd_receive_genie(rxd_t *r, const int16_t *samples, int n_samples,
                       int start, int64_t cfo_word,
                       rxd_header_t *hdr, uint8_t *pkt_bits)
 {
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
     fill_analytic(r, samples, n_samples);
     return receive_common(r, start, cfo_word, hdr, pkt_bits, 0, 0, 0, 0);
 }
@@ -640,6 +651,7 @@ int rxd_receive_genie_harq(rxd_t *r, const int16_t *samples, int n_samples,
                            const int64_t *prev_llrs, int prev_n,
                            int64_t *llrs_out, int *llrs_n_out)
 {
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
     fill_analytic(r, samples, n_samples);
     return receive_common(r, start, cfo_word, hdr, pkt_bits,
                           prev_llrs, prev_n, llrs_out, llrs_n_out);
@@ -710,6 +722,7 @@ int rxd_receive_burst(rxd_t *r, const int16_t *samples, int n_samples,
     int scale_h, scale_d, k, rc, delivered = 0, n_resync = 0, n_total;
     int64_t cfo_word, alpha = 0;
     int fit_shift = 0;
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
 
     if (n_blocks < 1)
         return -1;
@@ -791,6 +804,7 @@ int rxd_receive(rxd_t *r, const int16_t *samples, int n_samples,
 {
     int start;
     int64_t cfo_word;
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
 
     hilbert_analytic(samples, n_samples, g_i, g_q);
     if (rx_detect(r->mode, g_i, g_q, n_samples, &start, &cfo_word) != 0)

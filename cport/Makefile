@@ -5,7 +5,7 @@ CC      = gcc
 CFLAGS  = -std=c99 -Wall -Wextra -Werror -O2
 BUILD   = build
 
-SRC     = src/fft.c src/dsp.c src/bits.c src/conv.c src/packets.c src/tx.c \
+SRC     = src/arena.c src/fft.c src/dsp.c src/bits.c src/conv.c src/packets.c src/tx.c \
           src/broadcast.c \
           src/rx_demod.c src/rx_detect.c src/rx_stream.c src/ldpc.c \
           src/link.c src/station.c
@@ -26,26 +26,26 @@ $(BUILD)/test_bits: tests/test_bits.c $(SRC) $(GEN) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tests/test_bits.c src/bits.c src/conv.c src/ldpc.c
 
 $(BUILD)/test_tx: tests/test_tx.c $(SRC) $(GEN) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ tests/test_tx.c src/tx.c src/packets.c \
+	$(CC) $(CFLAGS) -o $@ tests/test_tx.c src/arena.c src/tx.c src/packets.c \
 	    src/bits.c src/conv.c src/ldpc.c src/fft.c
 
 $(BUILD)/test_link: tests/test_link.c $(SRC) $(GEN) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ tests/test_link.c src/link.c src/station.c \
+	$(CC) $(CFLAGS) -o $@ tests/test_link.c src/arena.c src/link.c src/station.c \
 	    src/rx_demod.c src/rx_detect.c src/ldpc.c src/tx.c src/packets.c \
 	    src/bits.c src/conv.c src/fft.c src/dsp.c -lm
 
 $(BUILD)/test_stream: tests/test_stream.c $(SRC) $(GEN) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ tests/test_stream.c src/rx_stream.c src/rx_demod.c \
+	$(CC) $(CFLAGS) -o $@ tests/test_stream.c src/arena.c src/rx_stream.c src/rx_demod.c \
 	    src/rx_detect.c src/ldpc.c src/tx.c src/packets.c src/bits.c \
 	    src/conv.c src/fft.c src/dsp.c
 
 $(BUILD)/test_broadcast: tests/test_broadcast.c $(SRC) $(GEN) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ tests/test_broadcast.c src/broadcast.c \
+	$(CC) $(CFLAGS) -o $@ tests/test_broadcast.c src/arena.c src/broadcast.c \
 	    src/rx_demod.c src/rx_detect.c src/ldpc.c src/tx.c src/packets.c \
 	    src/bits.c src/conv.c src/fft.c src/dsp.c src/link.c src/station.c -lm
 
 $(BUILD)/test_rx: tests/test_rx.c $(SRC) $(GEN) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ tests/test_rx.c src/rx_demod.c src/rx_detect.c src/rx_stream.c src/ldpc.c \
+	$(CC) $(CFLAGS) -o $@ tests/test_rx.c src/arena.c src/rx_demod.c src/rx_detect.c src/rx_stream.c src/ldpc.c \
           src/link.c src/station.c \
 	    src/tx.c src/packets.c src/bits.c src/conv.c src/fft.c src/dsp.c
 
@@ -108,4 +108,33 @@ qemu: $(GEN) | $(BUILD)
 	    -semihosting-config enable=on,target=native \
 	    -kernel $(BUILD)/$(SUITE).elf
 
-.PHONY: bench armsize qemu
+# Cortex-M7 RAM/flash of a station image (FEASIBILITY.md "Memory").
+# --gc-sections is REQUIRED: without it the linker keeps whole objects
+# and the frame-at-once buffers stay resident, overstating RAM by
+# megabytes. ARMMEAS_DEFS=-DMAX_LLRS=1024 measures a build without
+# extended frames.
+# QEMUFLAGS without the suites' -u _printf_float: pulling newlib's float
+# formatter in costs ~10 kB of flash that a station does not spend.
+# A transmit-only image must also LINK transmit-only: the receiver's
+# arena regions assert their fit at compile time, so leaving those files
+# in the build defeats a shrunken -DOFDM_ARENA_BYTES (loudly, which is
+# the point). ARMMEAS_SRC=$(TXSRC) selects the transmit half.
+TXSRC = src/arena.c src/fft.c src/bits.c src/conv.c src/ldpc.c \
+        src/packets.c src/tx.c
+ARMMEAS_SRC ?= $(SRC)
+ARMMEAS_DEFS ?=
+ARMMEASFLAGS = -std=c99 -Os -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 \
+               -mfloat-abi=hard -ffunction-sections -fdata-sections \
+               -Isrc -nostartfiles -specs=nano.specs
+
+armmeas: $(GEN) | $(BUILD)
+	$(QEMUCC) $(ARMMEASFLAGS) $(ARMMEAS_DEFS) -T qemu/mps2.ld \
+	    -Wl,--gc-sections qemu/startup.c bench/armmeas.c $(ARMMEAS_SRC) -lm \
+	    -o $(BUILD)/armmeas.elf
+	@$(QEMUSIZE) $(BUILD)/armmeas.elf
+	@echo "--- .bss objects >= 8 kB ---"
+	@$(QEMUCC:gcc=nm) --size-sort -S --radix=d $(BUILD)/armmeas.elf | \
+	    awk '$$3=="b"||$$3=="B"{t+=$$2; if($$2>=8000) printf "%9d  %s\n",$$2,$$4} \
+	         END{printf "%9d  TOTAL .bss\n",t}' | sort -rn
+
+.PHONY: bench armsize qemu armmeas

@@ -6,6 +6,7 @@
 
 #include "../src/packets.h"
 #include "../src/tx.h"
+#include "../src/arena.h"
 #include "test_vectors.h"
 
 static int g_pass, g_fail;
@@ -196,6 +197,28 @@ int main(void)
                              (mod_type_t)TX_BURST_MOD,
                              (cc_rate_t)TX_BURST_SPD, TX_BURST_RESYNC,
                              g_frame, n, TX_BURST_HASH, 999));
+    }
+
+    {   /* The generator shares the receiver's scratch arena, which is
+         * only safe because the link is half duplex (arena.h). Prove the
+         * net under it: claim the arena for a receive phase mid-pull and
+         * the transmission must STOP and say so, rather than carry on
+         * emitting samples generated from someone else's leftovers. */
+        int total = 0, first, after, clean;
+        txs_t *t = txs_open((link_mode_t)TX_BURST_MODE, TX_BURST_BITS,
+                            TX_BURST_PKT_BITS, TX_BURST_N, PKT_TYP_DATA,
+                            (mod_type_t)TX_BURST_MOD,
+                            (cc_rate_t)TX_BURST_SPD, TX_BURST_RESYNC,
+                            0, &total);
+
+        first = t ? txs_pull(t, g_frame, 256) : -1;
+        clean = !txs_faulted();
+        arena_claim(ARENA_RX);          /* a receive phase runs */
+        after = t ? txs_pull(t, g_frame, 256) : -1;
+        check("txs: a pull before the arena changes hands succeeds",
+              first == 256 && clean);
+        check("txs: a half-duplex violation stops the transmission",
+              after == 0 && txs_faulted() && total > 512);
     }
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

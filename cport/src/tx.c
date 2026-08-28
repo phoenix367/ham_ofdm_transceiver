@@ -8,6 +8,7 @@
 #include "packets.h"
 #include "rom_tables.h"
 #include "rom_modes.h"
+#include "arena.h"
 
 #define QPSK_AMP 23170   /* round(Q15_MAX / sqrt(2)) */
 #define QAM16_AMP 10362  /* round(Q15_MAX / sqrt(10)) */
@@ -18,6 +19,14 @@
  * whole frame; an MCU TX streams symbol by symbol instead) */
 #define TX_MAX_SAMPLES 540672
 #define TX_MAX_CODED 8448
+
+/* Transmit-side layout of the shared arena (arena.h). The FEC scratch
+ * leads because its offsets must be known here, above the generator
+ * state whose size closes the region (TX_OFF_END, asserted below). Both
+ * multiples of 8, so the state keeps the arena's int64 alignment. */
+#define TX_OFF_CODED 0
+#define TX_OFF_IL    (TX_OFF_CODED + TX_MAX_CODED)
+#define TX_OFF_STATE (TX_OFF_IL + TX_MAX_CODED)
 
 static int64_t g_sig[TX_MAX_SAMPLES];
 
@@ -135,7 +144,8 @@ static void modulate_symbol(const uint8_t *row, mod_type_t mod, int sym_tile,
 static int encode_block(const uint8_t *bits, int bits_n, cc_rate_t rate,
                         int use_ldpc, int capacity, uint8_t *rows)
 {
-    static uint8_t coded[TX_MAX_CODED], il[TX_MAX_CODED];
+    uint8_t *const coded = (uint8_t *)(ofdm_arena + TX_OFF_CODED);
+    uint8_t *const il = (uint8_t *)(ofdm_arena + TX_OFF_IL);
     int n = use_ldpc ? ldpc_cc_elements(bits_n) : conv_encoded_len(rate, bits_n);
     int n_syms = (n + capacity - 1) / capacity;
     int total = n_syms * capacity;
@@ -376,7 +386,17 @@ struct txs_state {
     int64_t ring[TXS_RING];
 };
 
-static struct txs_state g_txs;
+/* The generator state is live across txs_pull calls; encode_block's
+ * scratch is not, but it runs *inside* a pull, so the two need separate
+ * room. rows[] lives inside the state and is aliased with neither. */
+#define TX_OFF_END (TX_OFF_STATE + (int)sizeof(struct txs_state))
+typedef char tx_arena_fits[TX_OFF_END <= OFDM_ARENA_BYTES ? 1 : -1];
+
+#define g_txs (*(struct txs_state *)(void *)(ofdm_arena + TX_OFF_STATE))
+
+/* Set when a pull found the arena in someone else's hands. It cannot
+ * live in the arena for the obvious reason. */
+static int g_txs_fault;
 
 static int txs_sym_len(const struct txs_state *t)
 {
@@ -486,6 +506,11 @@ txs_t *txs_open(link_mode_t mode, const uint8_t *blocks, int pkt_bits_n,
     if (typ == PKT_TYP_EXT_DATA && use_ldpc)
         return 0;
 
+    /* claim before the first write: pass 1 below already runs the
+     * generator, and encode_block writes its own arena slots */
+    arena_claim(ARENA_TX);
+    g_txs_fault = 0;
+
     memset(t, 0, sizeof(*t));
     t->mode = mode;
     t->blocks = blocks;
@@ -526,7 +551,14 @@ txs_t *txs_open(link_mode_t mode, const uint8_t *blocks, int pkt_bits_n,
 
 int txs_total(const txs_t *t)
 {
-    return t ? t->total : -1;
+    if (!t || !arena_held_by(ARENA_TX))
+        return -1;
+    return t->total;
+}
+
+int txs_faulted(void)
+{
+    return g_txs_fault;
 }
 
 int txs_pull(txs_t *t, int16_t *out, int max)
@@ -535,6 +567,14 @@ int txs_pull(txs_t *t, int16_t *out, int max)
 
     if (!t || !out || max <= 0)
         return 0;
+    /* Half duplex is the contract that lets the generator share the
+     * receiver's arena (arena.h). If a receive phase ran since txs_open,
+     * everything below would be reading its leftovers: stop instead, and
+     * say so through txs_faulted(). */
+    if (!arena_held_by(ARENA_TX)) {
+        g_txs_fault = 1;
+        return 0;
+    }
     while (n < max && t->out_idx < t->total) {
         int64_t acc = 0;
         int j;

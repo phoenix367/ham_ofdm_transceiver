@@ -83,25 +83,36 @@ bit-exact. This supersedes the earlier "synthesize EXTREME at init"
 idea (better ratio, no synthesis code, no init time).
 
 RAM (streaming architecture, as implemented). These are MEASURED on a
-linked Cortex-M7 image (`arm-none-eabi-gcc -Os`, `--gc-sections`) that
-references only the streaming APIs, not projected:
+linked Cortex-M7 image, not projected, and they are REPRODUCIBLE:
+
+    make armmeas                                    # as built
+    make armmeas ARMMEAS_DEFS=-DMAX_LLRS=1024       # no EXT frames
+    make armmeas ARMMEAS_SRC='$(TXSRC)' \
+         ARMMEAS_DEFS='-DARMMEAS_TX_ONLY -DOFDM_ARENA_BYTES=27000'
+
+`bench/armmeas.c` is the reference main. It exists because these figures
+depend entirely on which entry points an image REFERENCES -- every static
+buffer here is a worst case and `--gc-sections` drops what is unreachable
+-- so a number measured from an ad-hoc main is not a number anyone can
+check. (The earlier 50 KB / 929 KB pair came from a main that is no
+longer known; the flash figure differs from it mostly because that one
+linked newlib's float formatter, which a station does not.)
 
 | Image | Flash | RAM (.bss) |
 |---|---|---|
-| Transmit only (`txs_open`/`txs_pull`) | 20 KB | **28 KB** |
-| **Full station, all three modes, no EXT frames** | **50 KB** | **699 KB** |
-| Full station, all three modes + EXT frames | 50 KB | 929 KB |
+| Transmit only (`txs_open`/`txs_pull`) | 24 KB | **27 KB** |
+| **Full station, all three modes, no EXT frames** | **61 KB** | **690 KB** |
+| Full station, all three modes + EXT frames | 61 KB | 921 KB |
 
 Where the station's RAM goes:
 
 | Component | Size |
 |---|---|
 | Shared raw int16 ring (147456 samples, all instances) | 288 KB |
-| Scratch arena (detect / demod / decode, unioned) | 129 KB |
-| Tone summaries, each instance sized to its own mode | 94 KB |
+| Scratch arena (RX detect/demod/decode + TX generator, unioned) | 128.5 KB |
+| Tone summaries, each instance sized to its own mode | 93.5 KB |
 | LLR buffers, 3 instances (int32) | 24 KB (192 KB with EXT frames) |
-| FEC encode scratch + streaming TX | 33 KB |
-| Everything else (station/link state, small buffers) | ~131 KB |
+| Everything else (station/link state, FEC and LDPC scratch) | ~156 KB |
 
 A caution about single-mode builds. **Rung 0 of the ladder is EXTREME**
 (`LADDER_MODE[0] == 2`), and rung 0 is where both stations bootstrap,
@@ -125,7 +136,17 @@ How the figures got here (they were ~10 MB of `.bss` before):
   (646 kB -> 153 kB). Note demod is the largest, not detect: `eval_hyp`'s
   derotation scratch is live *while* the symbol samples still are;
 - LLRs are int32 (measured peak 1211062) and analytic samples are int32
-  (measured peak 43077), halving both.
+  (measured peak 43077), halving both;
+- the TRANSMITTER shares that same arena (26992 B). A station is half
+  duplex, so the streaming generator's state -- the one buffer here that
+  is live across calls -- can never overlap a receive phase in time. The
+  assumption is checked rather than trusted: receive entry points stamp
+  an owner tag and `txs_pull` refuses to continue a generator whose state
+  a receive phase walked over, reporting it through `txs_faulted()`
+  (`test_tx` asserts both halves). It also un-penalises a transmit-only
+  image, which no longer carries the receiver's arena size: 27 KB with
+  `-DOFDM_ARENA_BYTES=27000`, and every region asserts its own fit at
+  compile time so a too-small override fails the build by name.
 
 Memory-shape notes (why the budgets are what they are):
 - **Viterbi traceback is 1 bit per state per step** — the predecessor
@@ -176,9 +197,9 @@ acquisition ≈ 9 % amortized, everything else < 3 %. Flash: the whole
 
 | Configuration (MEASURED, linked image) | RAM | Fits ~496 KB? |
 |---|---|---|
-| Transmit only | 28 KB | yes |
-| All three modes, no EXT frames (`-DMAX_LLRS=1024`) | 699 KB | **no** |
-| All three modes + EXT frames (as built) | 929 KB | **no** |
+| Transmit only | 27 KB | yes |
+| All three modes, no EXT frames (`-DMAX_LLRS=1024`) | 690 KB | **no** |
+| All three modes + EXT frames (as built) | 921 KB | **no** |
 
 **This verdict is a correction.** The table previously read "all three
 modes ≈ 453 KB, fits with ~43 KB to spare". That was an estimate, and
@@ -194,10 +215,14 @@ the linked image does not meet it. Two places the estimate was optimistic:
 - it assumed a build without EXT frames. That is a real option and is
   now measurable (`-DMAX_LLRS=1024`), worth 236 KB.
 
-Even with both taken, the floor is the 288 KB raw ring plus the 129 KB
-arena plus 94 KB of summaries: 511 KB before anything else, against
+Even with both taken, the floor is the 288 KB raw ring plus the 128.5 KB
+arena plus 93.5 KB of summaries: 510 KB before anything else, against
 ~496 KB usable. The ring is not negotiable while EXTREME is supported
-(measured lookback 124478 samples).
+(measured lookback 124478 samples). Folding the transmitter into the
+arena (above) is worth 26 KB and does not change that verdict: the three
+floor terms are all receive-side, and the largest of them is set by how
+far back an EXTREME acquisition must look, not by anything a buffer
+policy can reach.
 
 The arena is close to spent too, and the reason is worth recording: its
 three phases are now within 6 KB of each other (detect 125956, demod

@@ -174,6 +174,7 @@ static void zc_rot2_fetch(void *ctx, int k, int n, samp_t *di, samp_t *dq)
 int64_t rx_lag_n_word_src(const zc_src_t *src, int n)
 {
     int64_t fine = 0, coarse = 0;
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
     lag_words_src(src, n, 0, &fine, &coarse);
     return fine;
 }
@@ -181,6 +182,7 @@ int64_t rx_lag_n_word_src(const zc_src_t *src, int n)
 int64_t rx_residual_word_src(const zc_src_t *src, int n)
 {
     int64_t fine = 0, coarse = 0, ambig = (int64_t)1 << PHASE_BITS, k;
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
     lag_words_src(src, n, 1, &fine, &coarse);
     ambig /= FFT_BINS;
     k = div_round_signed(coarse - fine, ambig);
@@ -584,6 +586,7 @@ int rx_detect(link_mode_t mode, const samp_t *i_arr, const samp_t *q_arr,
     const det_mode_t *d = &DET[mode];
     int cs, ft, win;
     int64_t cw, fw;
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
 
     if (detect_newman(d, i_arr, q_arr, n, &cs, &cw) != 0)
         return -1;
@@ -620,6 +623,7 @@ int rx_detect_zc_window(link_mode_t mode, const samp_t *i_arr,
 {
     zc_arr_ctx_t a;
     zc_src_t src;
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
     a.i_arr = i_arr;
     a.q_arr = q_arr;
     src.ctx = &a;
@@ -630,5 +634,6 @@ int rx_detect_zc_window(link_mode_t mode, const samp_t *i_arr,
 int rx_detect_zc_src(link_mode_t mode, const zc_src_t *src, int n,
                      int *time_out, int64_t *word_out)
 {
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
     return detect_zc(&DET[mode], src, n, time_out, word_out);
 }

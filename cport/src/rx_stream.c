@@ -729,6 +729,7 @@ static int advance(rxs_t *r, rxs_event_t *ev)
 int rxs_push(rxs_t *r, const int16_t *chunk, int n, rxs_event_t *ev)
 {
     int got = 0, m;
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
     for (m = 0; m < n; m++) {
         g_raw[(int)(r->abs_n % RXS_RAW_RING_LEN)] = chunk[m];
         r->abs_n++;
@@ -747,6 +748,7 @@ int rxs_flush(rxs_t *r, rxs_event_t *ev)
 {
     static const int16_t zeros[512];
     int left = r->demod.symbol_len, got = 0;
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
     while (left > 0 && !got) {
         int n = left > 512 ? 512 : left;
         got = rxs_push(r, zeros, n, ev);
@@ -758,6 +760,7 @@ int rxs_flush(rxs_t *r, rxs_event_t *ev)
 int rxs_continue_burst(rxs_t *r, int resync_every)
 {
     int64_t base;
+    arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
 
     if (r->burst_resume_abs <= 0)
         return 0;

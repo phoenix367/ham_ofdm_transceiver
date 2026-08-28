@@ -8,6 +8,7 @@
 #include "dsp.h"
 #include "rx_demod.h"
 #include "conv.h"
+#include "arena.h"
 
 /* LLR sample type. These hold demodulated soft values, measured peak
  * 1211062 across the suites -- 21 bits, so int32 keeps a ~1770x margin
@@ -23,34 +24,24 @@
 typedef int32_t llr_t;
 #endif
 
-/* Shared scratch arena.
- *
- * These phases are strictly sequential within one rxs_push, and every
- * buffer below is CALL-SCOPED -- none survives the return:
+/* Shared scratch arena -- see arena.h for the contract. The receiver's
+ * three phases are strictly sequential within one rxs_push, and every
+ * buffer below is CALL-SCOPED, so none survives the return:
  *
  *   detect  g_wi/g_wq slide window, mag ring, ZC kernel, lag delay line
  *   demod   one symbol's samples
  *   decode  quantised LLRs, descramble/deinterleave/HARQ
  *
  * Detection finishes before the first symbol is demodulated, and demod
- * before decode, so they share storage. Sized by the largest phase
- * (detect, 31489 int64) rather than their sum (514568 B).
+ * before decode, so they share storage: 131584 B rather than 514568.
+ * Demod is the largest, not detect -- eval_hyp's derotation scratch is
+ * live *while* the symbol samples still are.
  *
  * What must NOT live here: g_raw, g_blk, g_h64/g_d64 all carry state
- * across pushes. */
-/* Sized in BYTES, because the phases mix sample (samp_t), LLR (llr_t)
- * and accumulator (int64) widths. Detect is the largest once samples are
- * int32: its mag ring stays int64.
- *
- *   detect 156680   demod 131584   decode 131072
- *
- * The union forces int64 alignment for the accumulator views. */
-#define RX_ARENA_BYTES 131584
-extern union rx_arena_u {
-    int64_t align;
-    unsigned char b[RX_ARENA_BYTES];
-} rx_arena_store;
-#define rx_arena (rx_arena_store.b)
+ * across pushes. The transmitter's generator state does too, but it is
+ * live only while transmitting, which is why it can share (arena.h). */
+#define RX_ARENA_BYTES OFDM_ARENA_BYTES
+#define rx_arena ofdm_arena
 
 /* Sized for a 255-byte EXT frame at BPSK 1/3. A build without
  * PKT_TYP_EXT_DATA can set this to 1024 (-DMAX_LLRS=1024), which is a

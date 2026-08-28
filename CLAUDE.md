@@ -177,6 +177,24 @@ Cross-module invariants that are easy to break:
   unambiguous over +-fs/N and picks the right lag-N cycle. Do not remove
   it, and do not "fix" this in `_detect_zc` — the ZC stage was always
   answering correctly for the frequency it was given.
+- One scratch arena serves the whole C modem (`cport/src/arena.h`).
+  Two separate facts make it safe and BOTH must hold: the receiver's
+  detect/demod/decode scratch is call-scoped (nothing survives the
+  return from `rxs_push`), and the link is HALF DUPLEX, which is the
+  only reason the streaming transmitter's generator state -- live
+  across `txs_pull` calls -- may share it. Anything live across calls
+  that is NOT transmit state must stay out (`g_raw`, `g_blk`,
+  `g_h64`/`g_d64`). Every region asserts its own fit at compile time,
+  so `OFDM_ARENA_BYTES` is a safe knob: a transmit-only build sets it
+  to 27000 and a too-small value fails the build naming the region.
+  The half-duplex half is checked at runtime, not trusted: receive
+  entry points call `arena_claim(ARENA_RX)` and `txs_pull` aborts a
+  generator whose state a receive phase overwrote (`txs_faulted()`).
+  If you add a receive entry point that reaches arena-using code
+  without going through `rxs_push`/`rxd_receive*`/`rx_detect*`, stamp
+  it too. Measure the result with `make armmeas`, never by hand --
+  these figures depend on which entry points an image references, and
+  the previously documented pair came from a main nobody kept.
 - Mixing float and fixed receivers: the fixed chain's detector returns
   positions in ANALYTIC index space, offset by the 31-sample Hilbert
   group delay. It cancels inside `FixedReceiver.receive()` but any

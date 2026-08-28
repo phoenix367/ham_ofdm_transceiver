@@ -19,7 +19,7 @@ LDFLAGS += -Wl,--gc-sections
 BUILD   = build
 CPORT   = ../cport
 
-CSRC = $(CPORT)/src/fft.c $(CPORT)/src/dsp.c $(CPORT)/src/bits.c \
+CSRC = $(CPORT)/src/arena.c $(CPORT)/src/fft.c $(CPORT)/src/dsp.c $(CPORT)/src/bits.c \
        $(CPORT)/src/conv.c $(CPORT)/src/ldpc.c $(CPORT)/src/packets.c \
        $(CPORT)/src/tx.c $(CPORT)/src/rx_demod.c $(CPORT)/src/rx_detect.c \
        $(CPORT)/src/rx_stream.c $(CPORT)/src/link.c $(CPORT)/src/station.c
