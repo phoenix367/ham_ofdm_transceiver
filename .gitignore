@@ -15,3 +15,6 @@ technical-report/build/
 
 # files the demo stations receive at runtime (rx_<basename>, rx_broadcast.bin)
 demoapp/rx_*
+
+# machine-local Claude Code permissions (absolute paths, not portable)
+.claude/settings.local.json
