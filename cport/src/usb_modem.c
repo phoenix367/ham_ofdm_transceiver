@@ -199,7 +199,7 @@ void usb_modem_diag(void *ctx, int ev, int a, int b, int c, int d,
     int n;
 
     if (!m->diag_on || m->txq_len > UM_TXQ / 2) {
-        m->dropped++;
+        m->diag_suppressed++;
         return;
     }
     n = up_encode_diag(ev, a, b, c, d, (uint32_t)(t * 1000.0),

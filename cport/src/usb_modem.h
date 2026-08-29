@@ -24,7 +24,13 @@ typedef struct {
     up_parser_t parser;
     uint8_t txq[UM_TXQ];
     int txq_head, txq_len;   /* ring */
-    uint32_t dropped;        /* frames the host was too slow to collect */
+    uint32_t dropped;        /* frames LOST: staging ring was full */
+    uint32_t diag_suppressed;/* diag events not sent because the stream
+                              * is off, or shed under backpressure --
+                              * NOT a loss. Kept separate because a
+                              * single 'dropped' counter that mixed the
+                              * two read as data loss during a wedge
+                              * diagnosis when nothing had been lost. */
     up_info_t info;
     int delivered_seen;      /* how much of the delivered log we have sent */
     double now;              /* protocol time, set by the caller */

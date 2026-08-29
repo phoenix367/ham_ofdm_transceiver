@@ -48,6 +48,17 @@ off-target.
     ./host/ofdm_modem.py                           # finds it by VID/PID
     ./host/ofdm_modem.py --serial 2400...3436      # or by unit
 
+On open the driver **drains** EP_IN -- reads until the device goes quiet
+and discards the backlog -- and reports it:
+
+    drained   185 stale bytes left by a previous session
+
+That is deliberate and must stay. The device pushes status unprompted,
+so its IN endpoint is usually armed with a frame when a host opens; the
+obvious alternative, `clear_halt(EP_IN)`, wedges TinyUSB's endpoint
+after exactly one packet (`cport/usb/README.md`, "What the stall was").
+Any other client for this device must drain, not reset.
+
 ## What is NOT here
 
 **The USB peripheral driver.** Everything above is transport-agnostic:

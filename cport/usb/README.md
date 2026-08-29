@@ -120,64 +120,99 @@ in place; `reset halt` does not work here because NRST is not wired to
 the probe. A flashed build should install its own table and report
 faults.
 
-## Status of the station binding: INCOMPLETE, but correctly narrowed
+## Status of the station binding: WORKING
 
 `usb_main.c` runs a real `station_t` behind the endpoints through
-`usb_modem.c`, with a stub PHY (no codec on this board, so the link
-layer's timers and rate ladder run for real while the samples go
-nowhere). It **enumerates** and stays mounted; the data path does not
-work: it emits ~11-15 frames and then goes quiet, and never answers
-`CMD_INFO` at all.
+`usb_modem.c`, interrupt-driven with its own vector table, with a stub
+PHY (no codec on this board, so the link layer's timers and rate ladder
+run for real while the samples go nowhere). Verified on the part:
 
-The image is now **interrupt-driven** with its own vector table (VTOR),
-which is better engineering regardless of this bug -- see below.
+    open #1  drained 1924 stale bytes   ping ok   submit ok   resyncs 0
+    open #2  drained  185               ping ok   submit ok   resyncs 0
+    open #3  drained  111               ping ok   submit ok   resyncs 0
+    killed mid-read at 3 s, reopened:
+             drained   37               ping ok   submit ok   resyncs 0
 
-Instrumenting the stall settled what it is NOT. At the moment it is
-stuck:
+    beacon after: isr_count 293, fault 0, dropped 0, write_avail 401
 
-    txq_len      0     the staging queue is EMPTY
-    dropped      0     nothing was discarded
-    write_avail  150   the endpoint has room
-    last_poll    0     there is nothing to send
-    mounted_now  1     still enumerated
+### What the stall was
 
-So the device is not blocked by flow control, a full FIFO, or a lost
-frame. It simply stops PRODUCING. The earlier reading -- that 549 bytes
-was suspiciously close to `CFG_TUD_VENDOR_TX_BUFSIZE` (512) -- was a
-coincidence, and chasing it cost time. The search belongs in
-`usb_modem.c`'s command path: `rx_bytes` shows the five bytes of
-`CMD_INFO` arriving, and no `RSP_INFO` ever comes back.
+For most of a day the station image enumerated, answered nothing, and
+went quiet after one packet. The instrumentation that finally settled
+it read, at the moment of the stall:
 
-Hypotheses tested and DISPROVEN, each by measurement:
+    txq_len       0        staging queue empty
+    write_avail 150        of a 512-byte TinyUSB TX FIFO
+    tx_bytes    399
 
-- **the diagnostic firehose** -- gated behind `UP_CFG_DIAG_STREAM` (off
-  by default now, and dropped above a half-full queue, which is right on
-  its own merits). Stall unchanged.
-- **loop starvation under polling** -- `station_poll_tx()` every
-  iteration cut the loop from 653 M to 6.6 M; rate-limiting restored it.
-  Stall unchanged.
-- **cache versus dwc2 DMA** -- `CFG_TUD_DWC2_DMA_ENABLE` defaults to 0
-  and slave mode to 1, so the CPU copies every byte and the D-cache is
-  irrelevant.
-- **polling instead of interrupts** -- a real hypothesis, since in slave
-  mode the driver refills the IN FIFO from the TX-FIFO-empty interrupt.
-  Now genuinely interrupt-driven, `isr_count` 12.4 M, no faults. Stall
-  unchanged.
-- **the clock** -- `s_cycles` reads 52.6 s of real time at 400 MHz.
+362 bytes were sitting INSIDE TinyUSB's transmit FIFO, unsent -- and
+362 = 29 (the `RSP_INFO` reply) + 9 x 37 (status frames), exactly, while
+399 - 362 = 37 = precisely one status frame ever reached the wire. An
+earlier reading of the same numbers as "the device stops producing" was
+wrong: it was producing fine, and TinyUSB was accepting the frames into
+a FIFO it never drained. The endpoint was wedged after its first
+transfer, and `tud_vendor_write_flush()` refuses to start another while
+it believes one is in flight.
 
-Three real bugs were found and fixed along the way, none of them the
-cause:
+The cause is an interaction between an ordinary host habit and TinyUSB's
+clear-stall handling, confirmed from the source:
 
-- the drain loop called `usb_modem_poll()`, which REMOVES bytes, before
-  checking `tud_vendor_write_available()` -- a briefly full endpoint
-  discarded data mid-frame and desynchronised the host's parser;
-- `station_on_tx_end()` was never called, so the station believed it was
-  permanently transmitting;
-- installing a vector table immediately caught `ICSR = 0x80F`, an
-  unhandled **SysTick** left running, with `CFSR` and `HFSR` both zero.
-  Treating every vector as fatal turns any stray source into a dead
-  device, so a genuine fault now stops and reports while an unexpected
-  interrupt is masked, counted and survived.
+1. The device pushes status unprompted every 0.5 s, so by the time a
+   host opens it, EP_IN is already **armed** in hardware with a frame
+   waiting for an IN token. (The stub image never spoke first, which is
+   the only reason it worked.)
+2. The host driver called `clear_halt(EP_IN)` on open -- a common
+   recovery idiom, and one I had added myself three fixes earlier.
+3. `usbd_edpt_clear_stall` (`usbd.c:1698`) clears its software BUSY flag
+   *unconditionally* -- its own comment calls this "long-standing
+   behavior" -- while the dwc2 `dcd_edpt_clear_stall` (`dcd_dwc2.c:715`)
+   only clears the STALL bit and resets the PID. **Nothing disarms the
+   hardware.**
+4. The next flush sees "not busy" and re-arms the endpoint on top of the
+   live transfer: DIEPTSIZ rewritten with EPENA already set, which the
+   dwc2 core does not define. One packet escapes; the completion no
+   longer matches what TinyUSB thinks it started; BUSY never clears.
+5. Side signature: `isr_count` climbs to tens of millions, because the
+   TX-FIFO-empty interrupt is level-triggered and stays asserted.
 
-The **stub** image (commit 74a3936) remains the one that demonstrably
-exchanges data over USB end to end.
+Tested by prediction, both ways. Gating status frames until the host had
+spoken (so EP_IN was idle at open) made the first open work and -- as
+the mechanism predicts -- every later open still wedged, since by then
+the device was pushing again. That is what turned a hypothesis into a
+cause.
+
+### The fix
+
+Host-side: **consume the armed transfer instead of resetting the
+endpoint.** `_UsbTransport` reads EP_IN with short timeouts until it
+goes quiet and discards what it finds (the parser resyncs past stale
+frames anyway). `clear_halt` is kept for EP_OUT only, where three
+consecutive opens against an armed endpoint were measured harmless.
+The device is unchanged in behaviour: it pushes status whenever mounted,
+which is the right thing for a modem to do, and is the case a driver
+must handle.
+
+The device is not made robust to `clear_halt(EP_IN)` itself; that would
+mean changing TinyUSB's clear-stall path, which is its business and not
+this project's. Any other host driver for this device must drain, not
+reset.
+
+### Five hypotheses disproven on the way, each by measurement
+
+- the diagnostic firehose (gated behind `UP_CFG_DIAG_STREAM`, off by
+  default, and shed under backpressure -- right on its own merits, but
+  not the cause);
+- loop starvation under polling (rate-limiting the station restored
+  the loop from 6.6 M to 14.5 M iterations; stall unchanged);
+- cache versus dwc2 DMA (`CFG_TUD_DWC2_DMA_ENABLE` defaults to 0 --
+  slave mode, the CPU copies every byte);
+- polling instead of interrupts (a real hypothesis in slave mode; made
+  genuinely interrupt-driven, 12.4 M ISRs, no faults, stall unchanged);
+- the clock (`s_cycles` read 52.6 s of real time).
+
+Three unrelated bugs fixed on the way: a drain loop that removed bytes
+from the queue before checking the endpoint had room (discarding data
+mid-frame); `station_on_tx_end()` never being called; and an unhandled
+SysTick that a catch-all fault handler treated as fatal (`ICSR` 0x80F,
+`CFSR`/`HFSR` zero) -- genuine faults now stop and report, unexpected
+interrupts are masked, counted and survived.

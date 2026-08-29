@@ -322,6 +322,12 @@ int main(void)
                 tx_busy = 0;
             }
 
+            /* Status is pushed unprompted, twice a second, whenever the
+             * device is mounted -- including when no host process is
+             * reading. That means EP_IN is normally ARMED when a host
+             * opens, and the host must consume that transfer rather
+             * than reset the endpoint: see the drain in
+             * host/ofdm_modem.py and the wedge it avoids. */
             usb_modem_tick(&g_modem, t, t - last_status >= 0.5);
             if (t - last_status >= 0.5)
                 last_status = t;

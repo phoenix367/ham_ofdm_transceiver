@@ -166,20 +166,49 @@ class _UsbTransport:
         self.dev = matches[0]
         self.dev.set_configuration()
         usb.util.claim_interface(self.dev, 0)
-        # Clear any halt left behind by a previous session. A process
-        # killed mid-transfer can leave an endpoint halted, and the next
-        # open then inherits it: writes are accepted by libusb and never
-        # reach the device, which looks exactly like unresponsive
-        # firmware. Observed here after a hung read was SIGTERMed --
-        # rx_bytes on the device stayed frozen while the host saw no
-        # error at all.
-        for ep in (EP_OUT, EP_IN):
-            try:
-                self.dev.clear_halt(ep)
-            except Exception:
-                pass          # not halted, or the device disallows it
+        # Recover the OUT endpoint from a previous session that died
+        # mid-transfer. Empirically harmless here: three consecutive
+        # opens against an armed OUT endpoint all worked.
+        try:
+            self.dev.clear_halt(EP_OUT)
+        except Exception:
+            pass              # not halted, or the device disallows it
+        # Deliberately NOT clear_halt(EP_IN). The device pushes status
+        # unprompted, so EP_IN is usually ARMED with a frame when we
+        # open. TinyUSB's usbd_edpt_clear_stall drops its software BUSY
+        # flag unconditionally (usbd.c, "long-standing behavior") while
+        # the dwc2 dcd_edpt_clear_stall never disarms the hardware --
+        # so the next flush re-arms on top of a live transfer and the
+        # endpoint wedges after exactly one packet. Measured twice:
+        # first open works only if the device stayed quiet, every later
+        # open fails, isr_count climbs into the tens of millions on a
+        # level-triggered TX-FIFO-empty interrupt. Consuming the armed
+        # transfer through the normal path is the safe recovery.
         self.serial = usb.util.get_string(self.dev, self.dev.iSerialNumber)
         self.desc = f"usb:{VID:04x}:{PID:04x}/{self.serial}"
+        self.stale = self._drain()
+
+    def _drain(self, quiet_s=0.15, max_s=2.0):
+        """Read EP_IN until it goes quiet; returns bytes discarded.
+
+        The device may have been pushing status frames to nobody since
+        the last session closed, and whatever is armed comes out here
+        rather than colliding with our first command. quiet_s must be
+        shorter than the device's status period (0.5 s) or this never
+        returns while the device is healthy.
+        """
+        import usb.core
+        t0, n = time.time(), 0
+        while time.time() - t0 < max_s:
+            try:
+                data = bytes(self.dev.read(EP_IN, 4096,
+                                           timeout=int(quiet_s * 1000)))
+            except usb.core.USBTimeoutError:
+                break
+            if not data:
+                break
+            n += len(data)
+        return n
 
     def write(self, data):
         self.dev.write(EP_OUT, data, timeout=1000)
@@ -307,6 +336,8 @@ def main():
     emu = args.emulate.split() if args.emulate else None
     with OfdmModem(serial=args.serial, emulate=emu) as m:
         print(f"transport: {m.t.desc}")
+        if getattr(m.t, "stale", 0):
+            print(f"drained   {m.t.stale} stale bytes left by a previous session")
         info = m.info()
         if not info:
             print("no response to CMD_INFO", file=sys.stderr)
