@@ -31,19 +31,73 @@ scenario (all three bench sessions decode).
 | LDPC, non-converging 60 iters | 0.88 ms | worst case; converges in a few iters on good frames |
 | TX EXTREME frame | 9.5 ms | for 20.9 s of audio |
 
-## Cortex-M projection (analytic MACs vs DSP throughput)
+## Cortex-M7: MEASURED, on an STM32H743
 
-Assumed sustained integer-MAC throughput (SMLAD-class, ×2 overhead
-margin): Cortex-M4 @ 168 MHz ≈ 80 MMAC/s; Cortex-M7 @ 480 MHz ≈
-400 MMAC/s. C674x/SHARC-class DSPs: ≥ 10× the M7 — omitted (trivial).
+The projection below used to assume "SMLAD-class, x2 overhead margin:
+M7 @480 MHz = 400 MMAC/s". That assumption was the weakest line in this
+document, and it was **3-13x optimistic**. `bench/armbench.c` now
+measures it with the DWT cycle counter on the real part, loaded into RAM
+over `tools/esp32-probe` (the target's flash is never written).
 
-| Load | MMAC/s | M4 @168 | M7 @480 |
+Cycle counts are clock-independent; the ms column assumes 400 MHz
+(`RCC` on the part under test reads SWS=PLL1, DIVM1=5, DIVN1=160,
+DIVP1=/2, i.e. **HSE x 16**).
+
+| primitive | cycles | per unit | @400 MHz |
 |---|---|---|---|
-| Continuous (Hilbert + tone detect + tracked demod) | ≤ 2.5 | 3 % | <1 % |
-| EXTREME first symbol, gated (typ.) / full grid (worst) | 2.4 / 13 | 3 / 16 % | <1 / 3 % |
-| EXTREME ZC acquisition (amortized over 5.8 s preamble) | ~40 | **50 %** | 10 % |
-| NORMAL/ROBUST ZC acquisition | ≤ 4 | 5 % | 1 % |
-| Decoders (per frame) | ≪ 1 | — | — |
+| `fft_bfp` 128-point | 91376 | 714 /bin | 0.228 ms |
+| `ifft_fixed` 128-point | 84310 | 659 /bin | 0.211 ms |
+| `hilbert_analytic` | 3970631 / 4096 | **969 /sample** | 9.93 ms/4096 |
+| `nco_derotate` | 159763 / 4096 | **39 /sample** | 0.40 ms/4096 |
+| `cordic_atan2` | 365 | 365 /call | 0.9 us |
+| `conv_encode` 255 bits r1/3 | 19529 | 77 /bit | 0.049 ms |
+| **`conv_decode` (Viterbi) 255 bits r1/3** | 2465972 | 9670 /bit | **6.17 ms** |
+| `ldpc_encode` 128 bits | 7598 | 59 /bit | 0.019 ms |
+| **`ldpc_decode_int` 128 bits, 60 iters** | 21885598 | — | **54.7 ms** |
+
+### The result that matters: memory, not arithmetic
+
+The same complex-MAC correlation loop, run twice over identical data,
+differing only in where the operands live:
+
+| operands in | cycles / 2048 iters | per complex MAC | MMAC/s @400 |
+|---|---|---|---|
+| DTCM (zero wait state) | 26640 | **3.25** | **123** |
+| AXI-SRAM (D-cache on) | 106508 | **13.01** | **31** |
+
+**A factor of 4, from placement alone.** The Cortex-M7's D-cache is
+16 kB; the four operand arrays are 64 kB and are streamed, so the AXI
+case misses on essentially every line. The compiler is not the problem
+-- the loop does emit `smull`/`smlal`, and `hilbert_analytic` emits
+`smlalbb`, the optimal 16x16 MAC. (Also checked and found NOT to matter:
+putting `.rodata` in ITCM, where data reads could contend with
+instruction fetch. Measured difference 1.00x.)
+
+Re-scaling the projection with measured throughput (x480/400):
+
+| Load | MMAC/s | old assumption (400 MMAC/s) | operands in DTCM (148) | operands in AXI (37) |
+|---|---|---|---|---|
+| Continuous (Hilbert + tone detect + tracked demod) | ≤ 2.5 | <1 % | 1.7 % | 6.8 % |
+| EXTREME first symbol, gated / full grid | 2.4 / 13 | <1 / 3 % | 1.6 / 8.8 % | 6.5 / **35 %** |
+| EXTREME ZC acquisition (amortized over 5.8 s) | ~40 | 10 % | 27 % | **108 %** |
+| NORMAL/ROBUST ZC acquisition | ≤ 4 | 1 % | 2.7 % | 11 % |
+
+**EXTREME acquisition does not fit if its operands stream from AXI**, and
+it cannot avoid doing so: the ZC scan reads `g_raw`, which is 288 kB and
+therefore cannot live in the 128 kB DTCM. The gap between the two
+columns is the real design question this port now faces, and it is a
+memory-hierarchy question, not a MIPS one.
+
+Caveats, so this is not over-read:
+- **D2 SRAM is not measured.** The AXI column is AXI-SRAM; `g_raw` is
+  placed in D2, which sits further out on the AHB matrix and is likely
+  worse, not better.
+- The higher-level stages (full acquisition, tracked demod) are not yet
+  measured on target -- they need the streaming receiver's ~699 kB of
+  `.bss` spread across four regions, which the RAM-resident bench does
+  not yet do. The host-relative ratios above are analytic MAC counts,
+  not measurements.
+- Cortex-M4 numbers remain projections; nothing was run on an M4.
 
 ## Memory
 
