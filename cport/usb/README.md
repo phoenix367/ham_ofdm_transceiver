@@ -64,24 +64,65 @@ So the bring-up image masks the line and polls `tud_int_handler()`
 instead. A flashed build should install a table and use
 `ofdm_usb_bsp_irq_enable()`.
 
-## Status
+## Status: enumerates
 
-Software chain verified on a live STM32H743, all read back from the
-part: HSI48 selected as the USB clock (`RCC_D2CCIP2R` USBSEL=3),
-OTG_FS clocked (`RCC_AHB1ENR` bit 27), PA11/PA12 in AF10, `GCCFG`
-PWRDWN set and VBDEN clear, `DCTL` soft-disconnect released, supply
-ready, firmware looping.
+Confirmed on a live STM32H743 with the image running from RAM:
 
-**Not yet enumerated by a host.** With the above all correct and a cable
-attached, no device appeared on the bus -- which points at D+/D- from
-the connector not reaching PA11/PA12 on this particular board rather
-than at anything above. Worth checking, in order: that the cable is a
-data cable and not charge-only; that the connector used is the MCU's and
-not an on-board debugger's; and what the board's schematic actually
-routes to PA11/PA12.
+    Bus 001 Device 035: ID 1209:0001 Generic pid.codes Test PID
+      bDeviceClass          255 Vendor Specific Class
+      iProduct                2 OFDM Modem
+      iSerial                 3 240041000551333438363436
+      bInterfaceClass       255 Vendor Specific Class
+      bInterfaceSubClass     79 (0x4F)
+      bInterfaceProtocol      1
+        bEndpointAddress     0x01  EP 1 OUT
+        bEndpointAddress     0x81  EP 1 IN
 
-The OTG_HS alternative (PB14/PB15, `-DOFDM_USB_RHPORT=1`) was tried and
-is **inconclusive**: that core came back with `GCCFG` = 0 (PHY powered
-down) and `DCTL` soft-disconnect asserted, i.e. it never initialised, so
-it was not a fair test of that wiring. Making the HS port come up is the
-next thing to try if the schematic says the connector goes there.
+and device-side `stage` = 6 (mounted), `used_regulator` = 0. The serial
+is the part's own 96-bit unique ID, which is the whole point: two modems
+on one host are distinguishable, and `/dev/ofdm-modem-<serial>` is
+stable.
+
+Remaining to talk to it: the raw node comes up `root:root`, so libusb
+cannot open it as a user until the rule is installed --
+
+    sudo cp host/99-ofdm-modem.rules /etc/udev/rules.d/
+    sudo udevadm control --reload && sudo udevadm trigger
+
+## Three things that cost real time
+
+**A USB-C-to-C cable will not work on most dev boards.** They omit the
+CC pull-down resistors (Rd, 5.1 kOhm) that mark the board as a device,
+so a C-to-C host never detects an attach and never sources VBUS.
+Nothing appears on the bus and every register on the device reads
+correct, which is an expensive combination to debug. A C-to-A cable
+needs no CC negotiation and works. This is what the first failure was.
+
+**VDD33USB has two sources needing OPPOSITE settings.** A board feeding
+it from its own 3.3 V rail wants `USB33DEN` alone; one deriving it from
+VBUS also wants `USBREGEN`. Setting `USBREGEN` on the first kind does
+not just waste a regulator -- `USB33RDY` stays low and the device never
+comes up. Measured: `PWR_CR3` = `0x03000042` with both enables set and
+ready clear, then `0x05000042` the instant `USBREGEN` was cleared.
+`ofdm_usb_bsp_supply_ready()` tries external first and falls back,
+recording which worked. The board under test uses the external supply.
+
+**A RAM-resident image has no vector table, and faults vanish into the
+previous firmware.** TinyUSB enables the OTG interrupt inside
+`dcd_init()`, so the bring-up image masks the line and polls
+`tud_int_handler()`. But that only covers interrupts: after poking
+`DCTL` over JTAG and restarting in place, the image faulted and `PC`
+came back as `0x080051be` -- the *resident* firmware's HardFault
+handler, reached through the stale VTOR. The beacon showed `stage` 4,
+`loops` 1 and nothing else, which looks like a hang. Restart from a
+clean core (`SYSRESETREQ` via `0xE000ED0C = 0x05FA0004`) rather than
+in place; `reset halt` does not work here because NRST is not wired to
+the probe. A flashed build should install its own table and report
+faults.
+
+## Next
+
+`usb_main.c` answers the protocol itself; `usb_modem.c` binds it to a
+real station and is already tested against the host driver over a pipe.
+Swapping one for the other is the remaining step, and needs no new
+USB work.

@@ -35,13 +35,28 @@ const uint8_t *tud_descriptor_device_cb(void)
 /* --- configuration --- */
 enum { ITF_VENDOR = 0, ITF_COUNT };
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN)
+#define CONFIG_TOTAL_LEN (9 + 9 + 7 + 7)   /* config + interface + 2 EPs */
 
 static const uint8_t desc_config[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_COUNT, 0, CONFIG_TOTAL_LEN, 0x00, 100),
-    TUD_VENDOR_DESCRIPTOR(ITF_VENDOR, OFDM_USB_STR_IF,
-                          OFDM_USB_EP_OUT, OFDM_USB_EP_IN,
-                          OFDM_USB_EP_SIZE)
+
+    /* The interface is written out rather than built with
+     * TUD_VENDOR_DESCRIPTOR, which hardcodes bInterfaceSubClass and
+     * bInterfaceProtocol to zero. usb_desc.h declares 0x4F and 0x01 to
+     * identify this protocol version ON THE WIRE, so that a future
+     * incompatible framing can be told apart by a host before it opens
+     * anything -- and a declared identity that is not actually
+     * transmitted is worse than no declaration at all. lsusb showed the
+     * macro's zeros, which is how this was caught. */
+    9, TUSB_DESC_INTERFACE, ITF_VENDOR, 0, 2,
+    OFDM_USB_IF_CLASS, OFDM_USB_IF_SUBCLASS, OFDM_USB_IF_PROTOCOL,
+    OFDM_USB_STR_IF,
+
+    7, TUSB_DESC_ENDPOINT, OFDM_USB_EP_OUT, TUSB_XFER_BULK,
+       U16_TO_U8S_LE(OFDM_USB_EP_SIZE), 0,
+
+    7, TUSB_DESC_ENDPOINT, OFDM_USB_EP_IN, TUSB_XFER_BULK,
+       U16_TO_U8S_LE(OFDM_USB_EP_SIZE), 0
 };
 
 const uint8_t *tud_descriptor_configuration_cb(uint8_t index)
