@@ -60,6 +60,18 @@ int txs_total(const txs_t *t);
  * shared arena mid-transmission -- a half-duplex violation (arena.h).
  * Cleared by the next txs_open. */
 int txs_faulted(void);
+
+/* --- test hook: interleaving generation with receive phases ------------
+ * The generator shares the receiver's arena, which is only safe because
+ * a station is half duplex (arena.h) -- so a caller that alternates
+ * txs_pull with a receive phase trips the guard, by design. A BENCH may
+ * legitimately want exactly that (feeding a generated waveform straight
+ * into the receiver, when buffering the frame would need ~1 MB), so it
+ * can save the generator's state across the receive phase and put it
+ * back. Not for production use: if real code needs this, the half-duplex
+ * assumption has been broken and the arena sharing is no longer sound. */
+const void *txs_state_blob(int *size);
+void txs_state_restore(const void *blob, int size);
 /* Pull up to max samples; returns the count written, 0 when finished. */
 int txs_pull(txs_t *t, int16_t *out, int max);
 

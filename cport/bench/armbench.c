@@ -28,6 +28,9 @@
 #include "conv.h"
 #include "ldpc.h"
 #include "rom_modes.h"
+#include "packets.h"
+#include "tx.h"
+#include "rx_stream.h"
 
 /* --- Cortex-M7 debug/trace registers ---------------------------------- */
 #define DEMCR    (*(volatile uint32_t *)0xE000EDFCu)
@@ -123,64 +126,12 @@ static uint8_t bits_in[256], bits_out[256];
 static uint8_t vwork[CONV_STATES / 8 * CONV_MAX_STEPS_PUB];
 static uint8_t coded[2048];
 
-/* --- the ZC scan, in each of the three memories it could live in ------
- *
- * This is the case that decides the port: EXTREME acquisition is a
- * sliding correlation whose working set (the slide window) is far larger
- * than the M7's 16 kB D-cache, so where the window lives sets the cost.
- * The three arrays below are identical in size and content and differ
- * only in placement -- DTCM (zero wait state), AXI-SRAM (D1, cached),
- * and D2 SRAM (further out on the AHB matrix, and where `g_raw` actually
- * sits today). */
-#define WIN_N   8192            /* samples; 2 arrays x 4 B = 64 kB */
-#define KLEN     512            /* ZC correlation kernel, ZC_G * FFT_BINS */
-#define N_OFF   4096            /* offsets swept; touches ~37 kB > 16 kB */
-
-#define DTCM_BSS __attribute__((section(".dtcm_bss")))
-#define D2_BSS   __attribute__((section(".d2_bss")))
-
-static samp_t wi_dtcm[WIN_N] DTCM_BSS, wq_dtcm[WIN_N] DTCM_BSS;
-static samp_t kr_k[KLEN] DTCM_BSS, ki_k[KLEN] DTCM_BSS;  /* kernel: always hot */
-static samp_t wi_axi[WIN_N], wq_axi[WIN_N];
-static samp_t wi_d2[WIN_N] D2_BSS, wq_d2[WIN_N] D2_BSS;
-
-/* Volatile sink. Without it gcc infers zc_correlate() is pure, sees its
- * result is never read, and deletes all three calls -- which measured as
- * exactly 0 cycles, the one result that is obviously a bug rather than a
- * surprise. */
-static volatile int64_t g_sink;
-
-/* forward: assigned inside the correlator, see the note there */
-
-/* noinline and pointer-taking, so all three cases execute the SAME
- * instructions and only the addresses differ */
-static int64_t __attribute__((noinline))
-zc_correlate(const samp_t *wi, const samp_t *wq,
-             const samp_t *kr, const samp_t *ki, int n_off, int klen)
-{
-    int64_t acc = 0;
-    int m, k;
-
-    for (m = 0; m < n_off; m++) {
-        int64_t rr = 0, ri = 0;
-        for (k = 0; k < klen; k++) {
-            rr += (int64_t)wi[m + k] * kr[k] + (int64_t)wq[m + k] * ki[k];
-            ri += (int64_t)wq[m + k] * kr[k] - (int64_t)wi[m + k] * ki[k];
-        }
-        rr >>= 16;
-        ri >>= 16;
-        acc += rr * rr + ri * ri;
-    }
-    /* The volatile store is what keeps this function honest. Marked pure
-     * (no side effects, result written to a dead array) gcc first deleted
-     * the calls outright, and then -- once a volatile sink was assigned
-     * OUTSIDE -- hoisted them clear of the two volatile CYCCNT reads, so
-     * both attempts measured ~0 cycles. A side effect INSIDE the timed
-     * region is what pins it there; a "memory" clobber does not, because
-     * a pure call has no memory effects to order against. */
-    g_sink = acc;
-    return acc;
-}
+/* The three-memory ZC A/B that used to live here is done and recorded
+ * (FEASIBILITY.md, "Where the ZC window lives does NOT matter"): all
+ * three SRAMs measured an identical 3.27 cyc/MAC once the inherited MPU
+ * was disabled. Its 192 kB of windows is now needed by the real
+ * streaming receiver below, so it has been removed rather than kept as
+ * a monument. */
 
 /* deterministic filler -- an LCG, so every run measures the same data */
 static uint32_t lcg = 22695477u;
@@ -188,6 +139,103 @@ static int32_t noise(int32_t amp)
 {
     lcg = lcg * 1103515245u + 12345u;
     return (int32_t)((lcg >> 16) % (uint32_t)(2 * amp)) - amp;
+}
+
+/* --- the real thing: a whole EXTREME frame through the streaming
+ * receiver, on target -------------------------------------------------
+ *
+ * Everything above is a primitive. This is the stage FEASIBILITY.md's
+ * projections are actually about, and it is measured by piping the
+ * streaming TRANSMITTER straight into the streaming RECEIVER: txs_pull
+ * generates a chunk (untimed), rxs_push consumes it (timed). Nothing
+ * holds a frame -- at EXTREME that would be ~950 kB of int16 -- which is
+ * the same reason the port streams in the first place.
+ *
+ * Cycles are split at the preamble boundary: everything the receiver
+ * spends before PREAMBLE_LEN_EXTREME is acquisition (tone search, ZC
+ * lock, CFO), everything after is header and data demodulation. */
+
+#define RX_CHUNK 512
+
+#define ZC_COMMIT_ABS 131072   /* just past the measured 124478 lookback */
+static uint64_t g_tone_cyc, g_acq_cyc, g_demod_cyc;
+static uint32_t g_tone_samp, g_acq_samp, g_demod_samp;
+static int g_ev_type, g_ev_seen, g_ev_n;
+static uint32_t g_ev_at, g_hwm, g_miss, g_total;
+
+static void bench_frame(void)
+{
+    static uint8_t pkt[280];
+    uint8_t payload[27];
+    int pkt_n, total = 0, got, i;
+    int64_t abs_n = 0;
+    rxs_t *r;
+    txs_t *t;
+    static int16_t chunk[RX_CHUNK];
+    static uint8_t save[16384];
+    const void *blob;
+    int blob_n = 0;
+    rxs_event_t ev;
+
+    for (i = 0; i < 27; i++)
+        payload[i] = (uint8_t)(i * 7 + 3);
+    pkt_n = data_encode(123, payload, 27, pkt);
+
+    r = rxs_open(MODE_EXTREME, 0);
+    t = txs_open(MODE_EXTREME, pkt, pkt_n, 1, PKT_TYP_DATA,
+                 MOD_BPSK, CC_R13, 0, 0, &total);
+    if (!r || !t)
+        return;
+
+    /* The generator lives in the arena the receiver is about to scribble
+     * on, so its state is lifted out and put back around each push. This
+     * is untimed, and it is why txs_state_blob() exists (tx.h). Without
+     * it the very first rxs_push claims the arena and the next txs_pull
+     * correctly refuses to continue -- which is exactly what the guard
+     * is for, and what this bench first ran into. */
+    blob = txs_state_blob(&blob_n);
+    while ((got = txs_pull(t, chunk, RX_CHUNK)) > 0) {
+        uint32_t t0, d;
+        int hit;
+
+        memcpy(save, blob, (size_t)blob_n);
+        t0 = cyc();
+        hit = rxs_push(r, chunk, got, &ev);
+        d = cyc() - t0;
+        txs_state_restore(save, blob_n);
+        /* Three phases, split where the receiver actually changes job.
+         * NOT at the preamble boundary: the tone detector takes the
+         * argmax over the whole above-threshold region, so it cannot
+         * commit until roughly TWO tone fields in (measured ring
+         * lookback 124478, which is exactly that). Until then it is
+         * folding 512-sample blocks into summaries; after it, it runs
+         * the ZC scan and then demodulates symbols -- reading back
+         * through g_raw, which is why the ring has to be that deep. */
+        if (abs_n < PREAMBLE_LEN_EXTREME) {
+            g_tone_cyc += d;  g_tone_samp += (uint32_t)got;
+        } else if (abs_n < ZC_COMMIT_ABS) {
+            g_acq_cyc += d;   g_acq_samp += (uint32_t)got;
+        } else {
+            g_demod_cyc += d; g_demod_samp += (uint32_t)got;
+        }
+        if (hit) {
+            g_ev_n++;
+            if (!g_ev_seen) {
+                g_ev_seen = 1;
+                g_ev_type = ev.type;
+                g_ev_at = (uint32_t)abs_n;
+            }
+        }
+        abs_n += got;
+    }
+    if (rxs_flush(r, &ev) && !g_ev_seen) {
+        g_ev_seen = 1;
+        g_ev_type = ev.type;
+        g_ev_at = (uint32_t)abs_n;
+    }
+    g_hwm = (uint32_t)rxs_ring_hwm(r);
+    g_miss = (uint32_t)rxs_ring_miss(r);
+    g_total = (uint32_t)total;
 }
 
 int main(void)
@@ -289,69 +337,26 @@ int main(void)
     /* ---- the ZC acquisition inner loop, which dominates EXTREME.
      * A complex multiply-accumulate over the correlation kernel is what
      * the MMAC budget in FEASIBILITY.md actually counts. ---- */
-    /* ---- the decisive case: identical correlation, three memories ---- */
-    for (i = 0; i < WIN_N; i++) {
-        samp_t vi = noise(20000), vq = noise(20000);
-        wi_dtcm[i] = vi;  wq_dtcm[i] = vq;
-        wi_axi[i]  = vi;  wq_axi[i]  = vq;
-        wi_d2[i]   = vi;  wq_d2[i]   = vq;
-    }
-    for (i = 0; i < KLEN; i++) {
-        kr_k[i] = noise(20000);
-        ki_k[i] = noise(20000);
-    }
-    dcache_set(1);   /* do not inherit the previous image's cache state */
-    {
-        const uint32_t macs = (uint32_t)N_OFF * KLEN * 4;
-        MEASURE(2, macs, "ZC corr, window in DTCM", {
-            g_sink = zc_correlate(wi_dtcm, wq_dtcm, kr_k, ki_k, N_OFF, KLEN);
-        });
-        MEASURE(2, macs, "ZC corr, window in AXI", {
-            g_sink = zc_correlate(wi_axi, wq_axi, kr_k, ki_k, N_OFF, KLEN);
-        });
-        MEASURE(2, macs, "ZC corr, window in D2", {
-            g_sink = zc_correlate(wi_d2, wq_d2, kr_k, ki_k, N_OFF, KLEN);
-        });
+    /* The board's resident firmware leaves an MPU region over AXI-SRAM
+     * marked shareable, which on a Cortex-M7 (no coherency unit) makes
+     * it effectively uncached and cost 2.3x. Measured, then removed --
+     * see FEASIBILITY.md. Disable it so AXI is cacheable, as a real
+     * deployment would configure deliberately. */
+    out->mpu_ctrl_seen = MPU_CTRL;
+    MPU_CTRL = 0;
+    __asm__ volatile("dsb; isb");
+    dcache_set(1);
 
-        /* Same three, with the D-cache explicitly OFF. The inner loop
-         * re-reads 512 samples per offset and advances by one, so the
-         * reuse is ~99.8 % -- if the cache were doing anything, these
-         * should be far worse than the three above. */
-        dcache_set(0);
-        MEASURE(2, macs, "ZC DTCM, DC off", {
-            g_sink = zc_correlate(wi_dtcm, wq_dtcm, kr_k, ki_k, N_OFF, KLEN);
-        });
-        MEASURE(2, macs, "ZC AXI, DC off", {
-            g_sink = zc_correlate(wi_axi, wq_axi, kr_k, ki_k, N_OFF, KLEN);
-        });
-        MEASURE(2, macs, "ZC D2, DC off", {
-            g_sink = zc_correlate(wi_d2, wq_d2, kr_k, ki_k, N_OFF, KLEN);
-        });
-        dcache_set(1);
-
-        /* The AXI case above is slower than D2 for a reason that has
-         * nothing to do with the H743: the firmware resident on this
-         * board leaves an MPU region covering AXI-SRAM (base 0x24000000,
-         * 512 kB) with TEX=0 C=1 B=0 S=1 -- Normal, write-through, and
-         * SHAREABLE. The Cortex-M7 has no cache coherency unit, so a
-         * shareable Normal region is effectively uncached, which is
-         * exactly what "the D-cache wins 1.00x on AXI" measured.
-         *
-         * We inherit that config because the core is never reset. Turn
-         * the MPU off and the default map applies (Normal, write-back,
-         * write-allocate, non-shareable), which is what a deployment
-         * would configure deliberately. */
-        out->mpu_ctrl_seen = MPU_CTRL;
-        MPU_CTRL = 0;
-        __asm__ volatile("dsb; isb");
-        dcache_set(1);
-        MEASURE(2, macs, "ZC AXI, MPU off", {
-            g_sink = zc_correlate(wi_axi, wq_axi, kr_k, ki_k, N_OFF, KLEN);
-        });
-        MEASURE(2, macs, "ZC D2, MPU off", {
-            g_sink = zc_correlate(wi_d2, wq_d2, kr_k, ki_k, N_OFF, KLEN);
-        });
-    }
+    /* ---- the stage the projections are actually about ---- */
+    bench_frame();
+    record("tone search (kcyc)", (uint32_t)(g_tone_cyc / 1000), g_tone_samp);
+    record("EXTREME acq (kcyc)", (uint32_t)(g_acq_cyc / 1000), g_acq_samp);
+    record("EXTREME demod (kcyc)", (uint32_t)(g_demod_cyc / 1000),
+           g_demod_samp);
+    record("frame ev type+8", (uint32_t)(g_ev_type + 8), (uint32_t)g_ev_seen);
+    record("events / first at", (uint32_t)g_ev_n, g_ev_at);
+    record("ring hwm / miss", g_hwm, g_miss);
+    record("tx frame samples", g_total, 1);
 
     out->cpu_hz_hint = SCB_CCR;   /* bit16 = DC, bit17 = IC, as measured */
     out->magic = BENCH_MAGIC;   /* written last: the completion flag */

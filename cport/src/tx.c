@@ -561,6 +561,22 @@ int txs_faulted(void)
     return g_txs_fault;
 }
 
+const void *txs_state_blob(int *size)
+{
+    if (size)
+        *size = (int)sizeof(struct txs_state);
+    return (const void *)(ofdm_arena + TX_OFF_STATE);
+}
+
+void txs_state_restore(const void *blob, int size)
+{
+    if (!blob || size != (int)sizeof(struct txs_state))
+        return;
+    memcpy(ofdm_arena + TX_OFF_STATE, blob, (size_t)size);
+    arena_claim(ARENA_TX);
+    g_txs_fault = 0;
+}
+
 int txs_pull(txs_t *t, int16_t *out, int max)
 {
     int half = (TX_LPF_N - 1) / 2, n = 0;

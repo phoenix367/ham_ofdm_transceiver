@@ -105,12 +105,58 @@ and should not be.
 Also checked and found NOT to matter: `.rodata` in ITCM, where data
 reads could contend with instruction fetch (1.00x).
 
+### The whole frame, on target
+
+No longer analytic. `bench_frame()` pipes the streaming TRANSMITTER
+straight into the streaming RECEIVER on the part -- `txs_pull` generates
+a chunk untimed, `rxs_push` consumes it timed -- so nothing ever holds a
+frame (at EXTREME that would be ~1 MB of int16). `g_raw` is placed in D2
+by the linker script, the rest of `.bss` in AXI, code in ITCM.
+
+An EXTREME BPSK 1/3 frame, 521984 samples = 43.5 s of audio, decoded
+CRC-clean (`ev.type == 1`), `rxs_ring_miss` zero, and
+**`rxs_ring_hwm` 124478 -- matching the host to the sample**:
+
+| phase | samples | audio | Mcycles | @400 MHz | @480 MHz |
+|---|---|---|---|---|---|
+| tone search (block summaries) | 70144 | 5.85 s | 94.6 | 4.0 % | 3.4 % |
+| **acquisition (commit + ZC lock)** | 60928 | 5.08 s | **4050.4** | **199 %** | **166 %** |
+| demod: header + data symbols | 390912 | 32.58 s | 809.0 | 6.2 % | 5.2 % |
+| **whole frame** | 521984 | 43.50 s | **4954.0** | **28.5 %** | **23.7 %** |
+
+Averaged over a frame the receiver costs a quarter of a 480 MHz core.
+But the cost is not spread evenly, and that is the finding:
+
+**The acquisition burst does not run in real time.** It needs 8.44 s of
+CPU inside a 5.08 s window at 480 MHz -- it falls behind by 3.36 s and
+catches up later out of the ring, which is the second reason `g_raw`
+exists (the first being the ZC re-anchor lookback). The two demands ADD:
+
+    ring capacity      147456 samples  (12.29 s)
+    measured lookback  124478 samples  (10.37 s)   <- re-anchor reach-back
+    headroom            22978 samples   (1.91 s)
+    processing lag @480  40332 samples   (3.36 s)  <- MEASURED here
+
+    needed = lookback + lag = 164810  >  147456   OVERRUN by 17354
+
+So on this part, at 480 MHz, an EXTREME acquisition needs about 2.4 s
+more ring than exists. This is a DERIVED conclusion, not a direct
+observation: the bench feeds samples as fast as the CPU takes them, so
+it has no real-time constraint and duly reported `rxs_ring_miss == 0`.
+A real 12 kHz feed would not be so forgiving. Ways out, in rough order
+of appeal: cut the acquisition work (the ring-size note in
+`rx_stream.h` already describes halving the reach-back, which cuts
+BOTH terms); enlarge the ring, which is RAM the largest build does not
+have; or accept a longer effective preamble. Demod, at 5.2 %, is not
+the problem and never was.
+
 Caveats, so this is not over-read:
-- These are primitive-level counts. The higher-level stages (full
-  acquisition, tracked demod) are not yet measured on target -- they
-  need the streaming receiver's ~699 kB of `.bss` spread across four
-  regions, which the RAM-resident bench does not do. The MMAC/s figures
-  they are scaled against remain analytic.
+- The frame above is noiseless. A real channel spends longer in
+  acquisition, retries, and re-locks.
+- One receiver instance. `demoapp` runs three concurrently, one per
+  mode, and the idle tone search (3.4 %) is paid by each.
+- The MMAC/s primitive figures above are still what the per-stage
+  analytic projections are scaled against.
 - A pattern with NO reuse (streaming a buffer once) is a different
   regime and is genuinely bandwidth-bound; nothing here measures it.
 - Cortex-M4 numbers remain projections; nothing was run on an M4.

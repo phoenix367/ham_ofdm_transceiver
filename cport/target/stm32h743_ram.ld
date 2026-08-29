@@ -63,6 +63,17 @@ SECTIONS
         . = ALIGN(8);
     } > DTCM
 
+    /* D2 SRAM1+2+3. Clock-gated: the bench turns it on before use.
+     * g_raw is 288 kB and lands here BY NAME -- with -fdata-sections it
+     * has its own .bss.g_raw section, so no source change is needed.
+     * It has to leave AXI: g_raw + g_blk + the arena is 522 kB against
+     * AXI's 512, and D2 is exactly 288 kB, which g_raw exactly fills. */
+    .d2_bss (NOLOAD) : {
+        *(.bss.g_raw)
+        *(.d2_bss*)
+        . = ALIGN(8);
+    } > D2
+
     .bss (NOLOAD) : {
         _bss_start = .;
         *(.bss*)
@@ -70,12 +81,6 @@ SECTIONS
         . = ALIGN(8);
         _bss_end = .;
     } > AXI
-
-    /* D2 SRAM1+2+3. Clock-gated: the bench turns it on before use. */
-    .d2_bss (NOLOAD) : {
-        *(.d2_bss*)
-        . = ALIGN(8);
-    } > D2
 
     /DISCARD/ : { *(.ARM.exidx*) *(.comment) }
 }
