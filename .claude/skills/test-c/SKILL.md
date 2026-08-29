@@ -26,25 +26,17 @@ model — no tolerances. A failure is a behavioural change.
 
 ## Run the sanitizers too
 
-The suites passing is **not** sufficient evidence after a width or
-buffer change. Three defects in this codebase's history were invisible
-to the suites and caught only here:
+The suites passing is **not** sufficient evidence after a width, buffer,
+index or shift change -- three defects here were invisible to them. That
+is its own skill now, with a single target:
 
 ```bash
-gcc -std=c99 -g -O1 -fsanitize=address,undefined -Isrc -Itests \
-    -o /tmp/ub_test_rx tests/test_rx.c src/*.c -lm && /tmp/ub_test_rx
+cd cport && make sanitize      # all 8 suites under ASan+UBSan, plus the parser fuzz
 ```
 
-Repeat per suite (`test_rx` and `test_stream` exercise the most). Expect
-zero `runtime error` and zero `ERROR:` lines.
-
-What they have caught here: a `memcpy` with a hardcoded `sizeof(int64_t)`
-into a narrowed array (a 2x buffer overrun the whole suite passed), a
-`>>= sh` with `sh` up to 34 that is undefined on a 32-bit type, and
-`negative << n` in the FFT's block scaling.
-
+See `test-sanitize` for when it is mandatory and how to read a report.
 **Rule of thumb: after any change to a type width, grep for hardcoded
-`sizeof(int64_t)` and run the sanitizers.** `sizeof(*ptr)` is the fix.
+`sizeof(int64_t)` and run it.** `sizeof(*ptr)` is the fix.
 
 ## Configuration knobs worth testing
 

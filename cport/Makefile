@@ -213,4 +213,35 @@ analogfw: $(GEN) | $(BUILD)
 	    -o $(BUILD)/analog_loop.elf
 	@$(QEMUSIZE) -A $(BUILD)/analog_loop.elf | grep -E '^\.(text|bss|d2_bss|dtcm_bss|results)'
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw
+# --- sanitizers -----------------------------------------------------
+# Every suite under AddressSanitizer + UndefinedBehaviorSanitizer, and
+# the host-link parser under 40 MB of random input. The suites passing
+# is NOT sufficient after a width or buffer change: three defects here
+# were invisible to them and caught only this way (see
+# .claude/skills/test-sanitize). -fno-sanitize-recover=all makes the
+# first report fatal, so a failure cannot scroll past.
+SAN_CFLAGS = -std=c99 -g -O1 -fsanitize=address,undefined \
+             -fno-sanitize-recover=all -Isrc -Itests
+SAN_ALL = src/arena.c src/fft.c src/dsp.c src/bits.c src/conv.c \
+          src/packets.c src/tx.c src/broadcast.c src/rx_demod.c \
+          src/rx_detect.c src/rx_stream.c src/ldpc.c src/link.c \
+          src/station.c
+SAN_SUITES = test_primitives test_bits test_tx test_rx test_stream \
+             test_link test_broadcast test_usb
+
+sanitize: $(GEN) | $(BUILD)
+	@for s in $(SAN_SUITES); do \
+	    if [ $$s = test_usb ]; then srcs=src/usb_proto.c; \
+	    else srcs="$(SAN_ALL)"; fi; \
+	    $(CC) $(SAN_CFLAGS) -o $(BUILD)/san_$$s tests/$$s.c $$srcs -lm \
+	        || exit 1; \
+	    printf '%-16s ' $$s; \
+	    ./$(BUILD)/san_$$s 2>&1 | grep -E 'runtime error|ERROR:|passed,' \
+	        | tail -1 || exit 1; \
+	    ./$(BUILD)/san_$$s >/dev/null 2>&1 || exit 1; \
+	done
+	@$(CC) $(SAN_CFLAGS) -o $(BUILD)/san_fuzz_usb bench/fuzz_usb.c \
+	    src/usb_proto.c && printf '%-16s ' fuzz_usb && ./$(BUILD)/san_fuzz_usb
+	@echo "sanitize: clean"
+
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize
