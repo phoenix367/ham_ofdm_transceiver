@@ -251,6 +251,53 @@ Cross-module invariants that are easy to break:
   Signature: every timeout on one station, zero on the other, each
   followed at once by the reply. Measured 22 timeouts at 25x, 0 at 8x on
   the same transfer. Drop the time scale before debugging a timeout.
+- Flash-resident images MUST enable the L1 caches (`startup_flash.c`
+  `cache_init`). Without it code runs from flash at 2 wait states with
+  no I-cache and every SRAM access uncached -- 5-10x slower than the
+  same code out of ITCM, which is why the RAM benches never showed it.
+  It did not matter while the flash images only ran USB and a link
+  layer; it is fatal once the streaming RECEIVER must keep up with a
+  12 kHz converter. Measured with caches off: the receiving board
+  dropped 1522686 samples (64% of everything the ADC produced) and
+  decoded nothing; the transmitter underran its DAC 375 times. Two
+  consequences: a debugger reading over the AHB-AP does NOT see dirty
+  lines, so anything read over JTAG (the beacon) must be cleaned
+  explicitly (`beacon_flush`); and `vectors.c` must clean vector-table
+  writes for RAM images that inherit DC=1.
+- In `stm32h743_flash.ld`, `.d2_bss`/`.dtcm_bss` MUST be placed BEFORE
+  `.bss`. The linker assigns an input section to the first output
+  section that matches, and `.bss`'s `*(.bss*)` matches `.bss.g_raw`
+  too -- with `.bss` first the D2 lines matched nothing, the 160 kB
+  sample ring sat in AXI, and adding the receiver overflowed AXI by
+  100 kB while D2 stayed empty. `stm32h743_usb.ld` always had the right
+  order, which is why only the flash images were affected.
+- Any IRQ the firmware enables in the NVIC must have an entry in
+  `startup_flash.c`'s `g_vectors`. Designated initialisers leave every
+  other slot NULL, so an enabled interrupt with no entry vectors to
+  address 0 -- TIM6_DAC (IRQ 54) had no entry when the radio build
+  first enabled it.
+- `station_phy_t::build` may return a frame's LENGTH without rendering
+  a sample. The station never reads or writes that buffer -- it only
+  passes it through to `build`/`build_burst` and hands the returned
+  count to the caller. `usb_radio_main.c` relies on this: an EXTREME
+  frame is ~456000 samples (912 kB), impossible to buffer on the part,
+  so `build` opens a streaming generator and the main loop pulls from
+  it into a small DAC FIFO. Pre-fill that FIFO before starting the
+  carrier -- arming it empty underran once per transmission (166
+  underruns over 3 frames).
+- The capture FIFO between the converter ISR and `rxs_push` is sized by
+  the receiver's WORST BLOCKING BURST, not its average. Measured at
+  EXTREME on the part: 2283 ms in a single `rxs_push` (the end-of-frame
+  commit) against a 19.5 s frame -- ~12% average duty, comfortably real
+  time, but it arrives all at once. 16384 samples (1.37 s) dropped
+  33036 samples mid-frame and decoded nothing; 65536 (5.5 s) decodes
+  with `cap_overruns` 0. Check it with the beacon's `cap_overruns` and
+  `push_ms_max`, never by assuming.
+- Opening a receiver per mode is a CPU budget, not a free choice: each
+  runs its own detector over every sample and EXTREME is much the most
+  expensive. demoapp opens all three because a workstation can afford
+  it; on the part `OFDM_RX_MODES` (Makefile `RXMODES`) selects them and
+  the default is EXTREME only.
 - A RAM bench inherits the machine state of the firmware it displaces,
   and the M7 vector table lives in CACHED SRAM. `vectors_set`/
   `vectors_install` (`cport/target/vectors.c`) MUST clean by MVA

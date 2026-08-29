@@ -329,6 +329,24 @@ USBFLASH_SRC = target/startup_flash.c usb/usb_flash_main.c \
                $(TINYUSB)/src/portable/synopsys/dwc2/dcd_dwc2.c \
                $(TINYUSB)/src/portable/synopsys/dwc2/dwc2_common.c
 
+# The USB modem WITH a radio: the same station, but its PHY is the
+# board's own DAC and ADC instead of a stub. Adds the receiver
+# (rx_stream/rx_detect/rx_demod) to the USB image.
+# Which modes the receiver listens for: bit0 NORMAL, bit1 ROBUST,
+# bit2 EXTREME. Each open receiver detects over every sample, so this
+# is a CPU budget -- 7 does not fit real time on this part.
+RXMODES ?= 4
+
+USBRADIO_SRC = $(subst usb/usb_flash_main.c,usb/usb_radio_main.c,$(USBFLASH_SRC)) \
+               src/rx_stream.c src/rx_detect.c src/rx_demod.c
+
+radiofw: $(GEN) | $(BUILD)
+	$(FLASHCC) $(FLASHFLAGS) -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
+	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx -DMAX_LLRS=1024 \
+	    -DOFDM_RX_MODES=$(RXMODES) \
+	    $(USBRADIO_SRC) -lm -o $(BUILD)/usb_radio.elf
+	@$(QEMUSIZE) $(BUILD)/usb_radio.elf
+
 usbflash: $(GEN) | $(BUILD)
 	$(FLASHCC) $(FLASHFLAGS) -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
 	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx \
@@ -453,6 +471,14 @@ flash-usb-b: usbflash
 	@$(OCD2) -c init -c "ab_flash stmB build/usb_flash.elf" -c exit $(OCD_QUIET) \
 	  | grep -aE 'flashed and reset|Error'
 
+flash-radio-a: radiofw
+	@$(OCD2) -c init -c "ab_flash stmA build/usb_radio.elf" -c exit $(OCD_QUIET) \
+	  | grep -aE 'flashed and reset|Error'
+
+flash-radio-b: radiofw
+	@$(OCD2) -c init -c "ab_flash stmB build/usb_radio.elf" -c exit $(OCD_QUIET) \
+	  | grep -aE 'flashed and reset|Error'
+
 # --- the ESP32 probe firmware itself -----------------------------------
 # esp32 core 3.x needs arduino-cli; the legacy `arduino` IDE answers
 # "Unknown package". Point ARDUINO_CLI at it if it is not on PATH.
@@ -483,4 +509,4 @@ flash-probe: test-probe
 	 $(ARDUINO_CLI) compile --fqbn esp32:esp32:esp32 -u -p $(PROBE_PORT) \
 	   $(PROBE_DIR)/esp32_rbb | tail -3
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read radiofw flash-radio-a flash-radio-b

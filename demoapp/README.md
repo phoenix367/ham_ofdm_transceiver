@@ -147,14 +147,27 @@ Measured against a real board: a 1200-byte file deflated 2.86x to 419
 bytes on air, went out as 2 parts of 241 B, and the board's queue
 reported `bulk 2`.
 
-**The board's station has no radio.** `usb_flash_main.c` binds a *stub*
-PHY, so everything above the PHY is real --- queues, rate ladder, ARQ,
-reply timers, and the counters `stats` reports --- but nothing reaches
-the air, and with no peer the station simply retransmits and times out
-(`tx 5  rx 0  timeouts 4  retx 4` above). Driving two boards over the
-DAC-to-ADC wire from two of these consoles needs the USB firmware and
-the analog front end of `cport/bench/analog_link.c` in one image; that
-is a firmware change, not a console one.
+**Which firmware the board runs decides whether anything reaches the
+air.** `make -C ../cport flash-usb` binds a *stub* PHY: everything above
+the PHY is real --- queues, rate ladder, ARQ, reply timers, the counters
+`stats` reports --- but with no radio and no peer the station just
+retransmits and times out (`tx 5  rx 0  timeouts 4  retx 4`).
+
+`make -C ../cport flash-radio-a` / `flash-radio-b` flash the *radio*
+build (`usb/usb_radio_main.c`), where the same station transmits through
+DAC1_OUT1 (PA4) and receives through ADC1_INP3 (PA6) at 12 kHz. Wire
+PA4 of each board to PA6 of the other, with a common ground, and two of
+these consoles talk to each other over copper:
+
+```
+02:49:57 [A] >> queued 19 bytes (interactive)
+02:50:33 [B] << [bulk] HELLO OVER THE WIRE
+```
+
+Both boards then report `tx_frames=1 rx_decodes=1`, i.e. B decoded A's
+frame, replied, and A decoded the reply --- a complete ARQ exchange over
+the wire. 36 s end to end, which is what an EXTREME bootstrap frame
+(~19.5 s of air) plus decode latency costs.
 
 ## Real radio: `sdr_driver.py` (HackRF One and other SoapySDR devices)
 

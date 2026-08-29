@@ -16,9 +16,16 @@
 #include <stdint.h>
 
 extern uint32_t _sidata, _sdata, _edata, _sbss, _ebss, _estack;
+extern uint32_t _sd2bss, _ed2bss, _sdtcmbss, _edtcmbss;
 extern int main(void);
 void Reset_Handler(void);
 void Default_Handler(void);
+
+#define SCB_CCR     (*(volatile uint32_t *)0xE000ED14u)
+#define SCB_CCSIDR  (*(volatile uint32_t *)0xE000ED80u)
+#define SCB_CSSELR  (*(volatile uint32_t *)0xE000ED84u)
+#define SCB_ICIALLU (*(volatile uint32_t *)0xE000EF50u)
+#define SCB_DCISW   (*(volatile uint32_t *)0xE000EF60u)
 
 #define RCC_CR        (*(volatile uint32_t *)0x58024400u)
 #define RCC_CFGR      (*(volatile uint32_t *)0x58024410u)
@@ -41,6 +48,49 @@ void Default_Handler(void);
 #define RCC_CR_PLL1RDY (1u << 25)
 #define PWR_D3CR_VOSRDY (1u << 13)
 #define PWR_CSR1_ACTVOSRDY (1u << 13)
+
+/* Enable the L1 caches.
+ *
+ * Without this the image runs from flash at 2 wait states with no
+ * instruction cache and every SRAM access uncached, which is 5-10x
+ * slower than the same code out of ITCM. It did not matter while the
+ * flash images only ran a USB endpoint and a link layer; it matters
+ * enormously once the streaming RECEIVER has to keep up with a 12 kHz
+ * converter. Measured with the caches off: the receiving board dropped
+ * 1522686 captured samples (64% of everything the ADC produced) and
+ * decoded nothing, while the transmitting board underran its DAC 375
+ * times. The RAM benches never showed this because their .text lives in
+ * ITCM, which is zero-wait and needs no cache.
+ *
+ * The D-cache needs invalidating by set/way before it is enabled, or it
+ * comes up holding whatever the SRAM arrays happen to decode to. There
+ * is no DMA anywhere in these images (TinyUSB's dwc2 port runs in
+ * slave/FIFO mode), so the usual DMA coherency traps do not apply --
+ * but note that a debugger reading memory over the AHB-AP does NOT see
+ * dirty lines, which is why anything meant to be read over JTAG has to
+ * be cleaned explicitly. */
+static void cache_init(void)
+{
+    uint32_t ccsidr, sets, ways, s, w;
+
+    __asm__ volatile("dsb; isb");
+    SCB_ICIALLU = 0u;                       /* invalidate I-cache */
+    __asm__ volatile("dsb; isb");
+    SCB_CCR |= (1u << 17);                  /* IC */
+    __asm__ volatile("dsb; isb");
+
+    SCB_CSSELR = 0u;                        /* select L1 data cache */
+    __asm__ volatile("dsb");
+    ccsidr = SCB_CCSIDR;
+    sets = (ccsidr >> 13) & 0x7FFFu;
+    ways = (ccsidr >> 3) & 0x3FFu;
+    for (s = sets + 1u; s-- > 0u; )
+        for (w = ways + 1u; w-- > 0u; )
+            SCB_DCISW = ((s & 0x1FFu) << 5) | ((w & 3u) << 30);
+    __asm__ volatile("dsb");
+    SCB_CCR |= (1u << 16);                  /* DC */
+    __asm__ volatile("dsb; isb");
+}
 
 static void clock_init(void)
 {
@@ -95,10 +145,21 @@ void Reset_Handler(void)
     __asm__ volatile("dsb; isb");
 
     clock_init();
+    /* after the clock, before the copies -- the .data/.bss loops are the
+     * first thing that benefits */
+    cache_init();
 
     for (src = &_sidata, dst = &_sdata; dst < &_edata; )
         *dst++ = *src++;
     for (dst = &_sbss; dst < &_ebss; )
+        *dst++ = 0;
+    /* .bss is not the only zero-initialised region once buffers are
+     * placed in D2 and DTCM by name -- C requires those zeroed too, and
+     * nothing else does it. Empty in images that use neither: the loops
+     * simply do not run. */
+    for (dst = &_sd2bss; dst < &_ed2bss; )
+        *dst++ = 0;
+    for (dst = &_sdtcmbss; dst < &_edtcmbss; )
         *dst++ = 0;
 
     __asm__ volatile("dsb; isb");
@@ -122,6 +183,7 @@ void UsageFault_Handler(void) ALIAS;
 void SVC_Handler(void) ALIAS;       /* 11 */
 void PendSV_Handler(void) ALIAS;    /* 14 */
 void SysTick_Handler(void) ALIAS;   /* 15 -- an app that uses SysTick overrides it */
+void TIM6_DAC_Handler(void) ALIAS;  /* IRQ 54 -- the 12 kHz converter tick */
 void OTG_FS_Handler(void) ALIAS;    /* IRQ 101 */
 void OTG_HS_Handler(void) ALIAS;    /* IRQ 77  */
 
@@ -138,6 +200,10 @@ void (*const g_vectors[16 + 102])(void) = {
     [11] = SVC_Handler,
     [14] = PendSV_Handler,
     [15] = SysTick_Handler,
+    /* Designated initialisers leave every other slot NULL, so an
+     * interrupt with no entry here vectors to address 0. Anything this
+     * firmware enables in the NVIC must appear below. */
+    [16 + 54] = TIM6_DAC_Handler,
     [16 + 77] = OTG_HS_Handler,
     [16 + 101] = OTG_FS_Handler
 };

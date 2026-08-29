@@ -21,12 +21,34 @@ SECTIONS
     _sidata = LOADADDR(.data);
     .data : { . = ALIGN(4); _sdata = .; *(.data*) . = ALIGN(4); _edata = .; } > DTCM AT > FLASH
 
-    /* g_beacon lands here by its own section, at a fixed DTCM address so
-     * the host can still read it. It is zeroed as part of .bss. */
-    .bss (NOLOAD) : { . = ALIGN(4); _sbss = .; *(.results) *(.bss*) *(COMMON) . = ALIGN(4); _ebss = .; } > AXI
+    /* D2 and DTCM MUST be placed before .bss: the linker assigns input
+     * sections to the first output section that matches, and .bss's
+     * `*(.bss*)` matches `.bss.g_raw` too. With .bss first, the two
+     * lines below matched nothing, g_raw sat in AXI, and adding the
+     * receiver to an image overflowed AXI by 100 kB while D2 stayed
+     * completely empty. (stm32h743_usb.ld always had this order, which
+     * is why the RAM benches were unaffected.)
+     *
+     * The receiver's two big rings go here by name -- -fdata-sections
+     * gives every object its own .bss.<symbol>, so no source change is
+     * needed: the raw sample ring (160 kB) and the per-block summary
+     * ring (94 kB). Both are written before they are read on any path
+     * that matters, but they are zeroed anyway -- see below. */
+    .d2_bss (NOLOAD) : {
+        . = ALIGN(8); _sd2bss = .;
+        *(.bss.g_raw) *(.bss.g_blk) *(.d2_bss*)
+        . = ALIGN(8); _ed2bss = .;
+    } > D2
 
-    .d2_bss   (NOLOAD) : { *(.bss.g_raw) *(.d2_bss*)  . = ALIGN(8); } > D2
-    .dtcm_bss (NOLOAD) : { *(.dtcm_bss*) . = ALIGN(8); } > DTCM
+    .dtcm_bss (NOLOAD) : {
+        . = ALIGN(8); _sdtcmbss = .;
+        *(.dtcm_bss*)
+        . = ALIGN(8); _edtcmbss = .;
+    } > DTCM
+
+    /* .results first, so the beacon keeps its fixed address at the base
+     * of AXI (0x24000000) whatever else lands in .bss. */
+    .bss (NOLOAD) : { . = ALIGN(4); _sbss = .; *(.results) *(.bss*) *(COMMON) . = ALIGN(4); _ebss = .; } > AXI
 
     /DISCARD/ : { *(.ARM.exidx*) }
 }
