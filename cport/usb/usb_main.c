@@ -45,6 +45,11 @@ typedef struct {
     uint32_t suspended, resumed;
     uint32_t supply_waits;   /* loops spent waiting for VDD33USB */
     uint32_t used_regulator; /* 1 = VDD33USB came from VBUS */
+    uint32_t isr_count;      /* OTG interrupts actually serviced */
+    uint32_t fault, fault_icsr, fault_cfsr, fault_hfsr;
+    uint32_t stray_irq, stray_count;
+    /* the stall: sampled every loop, so the state AT the stall is visible */
+    uint32_t txq_len, dropped, write_avail, last_poll, mounted_now;
 } usb_beacon_t;
 
 enum {
@@ -69,6 +74,86 @@ void tusb_time_delay_ms_api(uint32_t ms)
     volatile uint32_t n = ms * 10000u;
     while (n--)
         ;
+}
+
+/* --- interrupt vector table, built in RAM ---------------------------
+ *
+ * The bring-up image polled tud_int_handler() to avoid needing one of
+ * these. That was the right call for proving enumeration and the wrong
+ * one for moving data: in slave mode the dwc2 driver refills the IN
+ * FIFO from the TX-FIFO-empty interrupt, which TinyUSB unmasks
+ * expecting to be re-entered from an ISR. Polling can service the first
+ * transfer and then never continue -- which is what "549 bytes and
+ * silence" looks like.
+ *
+ * So the image installs its own table and sets VTOR. That also fixes a
+ * second problem it had: with VTOR still pointing at the RESIDENT
+ * firmware, any fault vectored into another program's handler and
+ * vanished. Faults now land here and are recorded in the beacon. */
+
+#define SCB_VTOR (*(volatile uint32_t *)0xE000ED08u)
+#define VECT_N   166            /* 16 system + 150 external on an H743 */
+#define IRQ_OTG_FS 101
+#define IRQ_OTG_HS 77
+
+typedef void (*vect_t)(void);
+static vect_t g_vectors[VECT_N] __attribute__((aligned(1024)));
+
+#define ICSR     (*(volatile uint32_t *)0xE000ED04u)
+#define SYST_CSR (*(volatile uint32_t *)0xE000E010u)
+#define NVIC_ICER ((volatile uint32_t *)0xE000E180u)
+
+/* A genuine fault stops and reports. An UNEXPECTED interrupt does not:
+ * it is disabled and counted, and the image carries on.
+ *
+ * The distinction was earned within a minute of installing this table.
+ * The first interrupt-driven build died instantly with ICSR = 0x80F --
+ * VECTACTIVE 15, SysTick -- with CFSR and HFSR both zero, i.e. not a
+ * fault at all, just a timer nobody had switched off arriving at a
+ * catch-all that stopped the world. Treating every vector as fatal
+ * turns any stray source into a dead device. */
+static void fault_handler(void)
+{
+    uint32_t vect = ICSR & 0x1FFu;
+
+    if (vect < 16u) {                     /* a real system fault */
+        g_beacon.fault = 1;
+        g_beacon.fault_icsr = ICSR;
+        g_beacon.fault_cfsr = *(volatile uint32_t *)0xE000ED28u;
+        g_beacon.fault_hfsr = *(volatile uint32_t *)0xE000ED2Cu;
+        if (vect == 15u) {                /* SysTick: silence it and go on */
+            SYST_CSR = 0;
+            return;
+        }
+        for (;;)
+            ;
+    }
+    /* an external IRQ nobody asked for: mask it and continue */
+    {
+        uint32_t irq = vect - 16u;
+        g_beacon.stray_irq = irq;
+        g_beacon.stray_count++;
+        NVIC_ICER[irq >> 5] = 1u << (irq & 31u);
+    }
+}
+
+static void otg_isr(void)
+{
+    g_beacon.isr_count++;
+    tud_int_handler(OFDM_USB_RHPORT);
+}
+
+static void vectors_install(void)
+{
+    int i;
+    for (i = 0; i < VECT_N; i++)
+        g_vectors[i] = fault_handler;
+    g_vectors[0] = (vect_t)0x20020000u;      /* initial SP, unused here */
+    g_vectors[16 + (OFDM_USB_RHPORT == 0 ? IRQ_OTG_FS : IRQ_OTG_HS)] =
+        otg_isr;
+    __asm__ volatile("dsb");
+    SCB_VTOR = (uint32_t)(void *)g_vectors;
+    __asm__ volatile("dsb; isb");
 }
 
 /* --- device callbacks ---------------------------------------------- */
@@ -182,16 +267,17 @@ int main(void)
     g_st.diag_cb = usb_modem_diag;      /* the event stream goes to USB */
     g_st.diag_ctx = &g_modem;
 
+    vectors_install();
+    SYST_CSR = 0;            /* nothing here wants a tick; see the note */
     tusb_init();
-    ofdm_usb_bsp_irq_disable(OFDM_USB_RHPORT);
-    __asm__ volatile("cpsid i");
+    ofdm_usb_bsp_irq_enable(OFDM_USB_RHPORT);
+    __asm__ volatile("cpsie i");
     g_beacon.stage = ST_TUSB_INIT;
 
     for (;;) {
         int n;
         g_beacon.loops++;
-        tud_int_handler(OFDM_USB_RHPORT);
-        tud_task();
+        tud_task();          /* the ISR services the core now */
         if (g_beacon.stage < ST_LOOPING)
             g_beacon.stage = ST_LOOPING;
 
@@ -247,6 +333,11 @@ int main(void)
          * those bytes, and discarding part of a frame desynchronises the
          * host's parser. Measured as a device that stopped transmitting
          * at 547 bytes while its loop counter kept climbing. */
+        g_beacon.txq_len = (uint32_t)g_modem.txq_len;
+        g_beacon.dropped = g_modem.dropped;
+        g_beacon.write_avail = tud_vendor_write_available();
+        g_beacon.mounted_now = tud_mounted() ? 1u : 0u;
+
         for (;;) {
             int room = (int)tud_vendor_write_available();
             if (room <= 0)
@@ -254,6 +345,7 @@ int main(void)
             if (room > (int)sizeof(out))
                 room = (int)sizeof(out);
             n = usb_modem_poll(&g_modem, out, room);
+            g_beacon.last_poll = (uint32_t)n;
             if (n <= 0)
                 break;
             tud_vendor_write(out, (uint32_t)n);

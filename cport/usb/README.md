@@ -120,50 +120,64 @@ in place; `reset halt` does not work here because NRST is not wired to
 the probe. A flashed build should install its own table and report
 faults.
 
-## Status of the station binding: INCOMPLETE
+## Status of the station binding: INCOMPLETE, but correctly narrowed
 
-`usb_main.c` now runs a real `station_t` behind the endpoints via
+`usb_main.c` runs a real `station_t` behind the endpoints through
 `usb_modem.c`, with a stub PHY (no codec on this board, so the link
 layer's timers and rate ladder run for real while the samples go
-nowhere).
+nowhere). It **enumerates** and stays mounted; the data path does not
+work: it emits ~11-15 frames and then goes quiet, and never answers
+`CMD_INFO` at all.
 
-It **enumerates correctly** -- `stage` 6, `mounted` 1, the host driver
-opens it by serial -- but the data path **stalls**: the device answers,
-sends exactly 549 bytes in 16 frames, and then both directions stop
-while the main loop keeps running. Reproduced identically across four
-builds, so it is deterministic rather than a race.
+The image is now **interrupt-driven** with its own vector table (VTOR),
+which is better engineering regardless of this bug -- see below.
 
-Ruled out, each by measurement rather than by argument:
+Instrumenting the stall settled what it is NOT. At the moment it is
+stuck:
 
-- **the diagnostic firehose.** A station with no radio times out
-  constantly and every event was a frame. Gating the stream behind
-  `UP_CFG_DIAG_STREAM` (now off by default, and dropped above a
-  half-full queue) is right on its own merits -- a debug stream must
-  never crowd out command replies -- but the stall was unchanged.
-- **loop starvation.** With interrupts masked, `tud_int_handler()` runs
-  only as often as the loop does, and calling `station_poll_tx()` every
-  iteration cut the loop from 653 M to 6.6 M. Rate-limiting the station
-  restored it to 14.5 M; the stall was unchanged.
-- **cache versus DMA.** The buffers are in AXI-SRAM with the D-cache on,
-  which would be a real bug if the dwc2 core were mastering them. It is
-  not: `CFG_TUD_DWC2_DMA_ENABLE` defaults to 0 and slave mode to 1, so
-  the CPU copies every byte.
-- **the clock.** `s_cycles` reads 21.0 G, i.e. 52.6 s at 400 MHz, so
-  the station's timers are being driven correctly.
+    txq_len      0     the staging queue is EMPTY
+    dropped      0     nothing was discarded
+    write_avail  150   the endpoint has room
+    last_poll    0     there is nothing to send
+    mounted_now  1     still enumerated
 
-Two genuine bugs were found and fixed on the way, neither of which was
-the cause: the drain loop called `usb_modem_poll()` (which REMOVES
-bytes) before checking `tud_vendor_write_available()`, discarding data
-and desynchronising the host's parser when the endpoint was briefly
-full; and `station_on_tx_end()` was never called, so the station
-believed it was permanently on the air.
+So the device is not blocked by flow control, a full FIFO, or a lost
+frame. It simply stops PRODUCING. The earlier reading -- that 549 bytes
+was suspiciously close to `CFG_TUD_VENDOR_TX_BUFSIZE` (512) -- was a
+coincidence, and chasing it cost time. The search belongs in
+`usb_modem.c`'s command path: `rx_bytes` shows the five bytes of
+`CMD_INFO` arriving, and no `RSP_INFO` ever comes back.
 
-549 bytes is suspiciously close to `CFG_TUD_VENDOR_TX_BUFSIZE` (512),
-which points at the endpoint buffer filling and never draining. The next
-diagnostic is to put `txq_len`, `dropped` and
-`tud_vendor_write_available()` into the beacon and watch them at the
-moment it stops -- reading them from guessed struct offsets produced
-garbage and should not be repeated.
+Hypotheses tested and DISPROVEN, each by measurement:
 
-Until that is resolved, the **stub** bring-up image (commit 74a3936) is
-the one that demonstrably exchanges data over USB end to end.
+- **the diagnostic firehose** -- gated behind `UP_CFG_DIAG_STREAM` (off
+  by default now, and dropped above a half-full queue, which is right on
+  its own merits). Stall unchanged.
+- **loop starvation under polling** -- `station_poll_tx()` every
+  iteration cut the loop from 653 M to 6.6 M; rate-limiting restored it.
+  Stall unchanged.
+- **cache versus dwc2 DMA** -- `CFG_TUD_DWC2_DMA_ENABLE` defaults to 0
+  and slave mode to 1, so the CPU copies every byte and the D-cache is
+  irrelevant.
+- **polling instead of interrupts** -- a real hypothesis, since in slave
+  mode the driver refills the IN FIFO from the TX-FIFO-empty interrupt.
+  Now genuinely interrupt-driven, `isr_count` 12.4 M, no faults. Stall
+  unchanged.
+- **the clock** -- `s_cycles` reads 52.6 s of real time at 400 MHz.
+
+Three real bugs were found and fixed along the way, none of them the
+cause:
+
+- the drain loop called `usb_modem_poll()`, which REMOVES bytes, before
+  checking `tud_vendor_write_available()` -- a briefly full endpoint
+  discarded data mid-frame and desynchronised the host's parser;
+- `station_on_tx_end()` was never called, so the station believed it was
+  permanently transmitting;
+- installing a vector table immediately caught `ICSR = 0x80F`, an
+  unhandled **SysTick** left running, with `CFSR` and `HFSR` both zero.
+  Treating every vector as fatal turns any stray source into a dead
+  device, so a genuine fault now stops and reports while an unexpected
+  interrupt is masked, counted and survived.
+
+The **stub** image (commit 74a3936) remains the one that demonstrably
+exchanges data over USB end to end.
