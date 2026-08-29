@@ -44,12 +44,29 @@ $(BUILD)/test_broadcast: tests/test_broadcast.c $(SRC) $(GEN) | $(BUILD)
 	    src/rx_demod.c src/rx_detect.c src/ldpc.c src/tx.c src/packets.c \
 	    src/bits.c src/conv.c src/fft.c src/dsp.c src/link.c src/station.c -lm
 
+# USB host-link protocol. Deliberately NOT in $(SRC): the device-side
+# USB layer is optional, and keeping it out means the RAM figures from
+# `make armmeas` stay comparable with every earlier measurement. Its own
+# cost is ~5 kB (UM_TXQ plus one parser).
+$(BUILD)/test_usb: tests/test_usb.c src/usb_proto.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tests/test_usb.c src/usb_proto.c
+
+USB_EMU_SRC = bench/usb_modem_emu.c src/usb_proto.c src/usb_modem.c \
+              src/arena.c src/station.c src/link.c src/packets.c \
+              src/bits.c src/conv.c src/ldpc.c src/tx.c src/fft.c \
+              src/dsp.c src/rx_demod.c src/rx_detect.c
+
+$(BUILD)/usb_modem_emu: $(USB_EMU_SRC) $(GEN) | $(BUILD)
+	$(CC) $(CFLAGS) -Isrc -o $@ $(USB_EMU_SRC) -lm
+
+usbemu: $(BUILD)/usb_modem_emu
+
 $(BUILD)/test_rx: tests/test_rx.c $(SRC) $(GEN) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tests/test_rx.c src/arena.c src/rx_demod.c src/rx_detect.c src/rx_stream.c src/ldpc.c \
           src/link.c src/station.c \
 	    src/tx.c src/packets.c src/bits.c src/conv.c src/fft.c src/dsp.c
 
-test: $(BUILD)/test_primitives $(BUILD)/test_bits $(BUILD)/test_tx $(BUILD)/test_rx $(BUILD)/test_stream $(BUILD)/test_link $(BUILD)/test_broadcast
+test: $(BUILD)/test_primitives $(BUILD)/test_bits $(BUILD)/test_tx $(BUILD)/test_rx $(BUILD)/test_stream $(BUILD)/test_link $(BUILD)/test_broadcast $(BUILD)/test_usb
 	./$(BUILD)/test_primitives
 	./$(BUILD)/test_bits
 	./$(BUILD)/test_tx
@@ -57,6 +74,7 @@ test: $(BUILD)/test_primitives $(BUILD)/test_bits $(BUILD)/test_tx $(BUILD)/test
 	./$(BUILD)/test_stream
 	./$(BUILD)/test_link
 	./$(BUILD)/test_broadcast
+	./$(BUILD)/test_usb
 
 clean:
 	rm -rf $(BUILD)
@@ -64,7 +82,7 @@ clean:
 distclean: clean
 	rm -f $(GEN)
 
-.PHONY: all test clean distclean
+.PHONY: all test clean distclean usbemu
 
 # --- measurement harness (plan section 6) -------------------------------
 $(BUILD)/replay: bench/replay.c $(SRC) $(GEN) | $(BUILD)
