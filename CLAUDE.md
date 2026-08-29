@@ -251,6 +251,31 @@ Cross-module invariants that are easy to break:
   Signature: every timeout on one station, zero on the other, each
   followed at once by the reply. Measured 22 timeouts at 25x, 0 at 8x on
   the same transfer. Drop the time scale before debugging a timeout.
+- A RAM bench inherits the machine state of the firmware it displaces,
+  and the M7 vector table lives in CACHED SRAM. `vectors_set`/
+  `vectors_install` (`cport/target/vectors.c`) MUST clean by MVA
+  (`vect_flush`): `DSB` orders accesses, it does not clean, and an
+  exception vector fetch reads MEMORY, not the D-cache, so a new entry
+  sits in a dirty line while the hardware still fetches the old one.
+  Measured on the two-board stand (`make -C cport link-run`): the
+  receiver took its first TIM6 interrupt into the STRAY handler, which
+  masked IRQ 54 -- ISER1 0, ISPR1 pending forever, isr_count 0, run
+  loop spinning. Reading the table over JTAG showed the CORRECT
+  handler, because the line had been evicted by then; that is what
+  makes this look impossible. The transmitter role never saw it --
+  `build_frame()` runs between install and first interrupt and evicts
+  the line in time, so the SAME binary on the SAME board failed only in
+  one role. Same root cause is why `vectors_irq_enable` clears ICPR
+  before ISER: ISER3 bit 5 (OTG_FS) is still set at image entry, so a
+  stale pending interrupt would be taken first and get its source
+  masked. `SCB_CCR` read 0x00070200 (DC set) on the stalled board.
+- Comparing the two boards' TIM6 clocks CANNOT measure their
+  sample-rate offset and will confidently report 0 ppm: each board
+  measures TIM6 against its own DWT and both come off the SAME PLL, so
+  the ratio is exact on each board and identical between them however
+  far apart the crystals are. Measure it on the wire instead, from the
+  spacing of consecutively decoded frames. With 2 frames in the
+  54000-sample window that is a BOUND (+-56 ppm), not a figure.
 - `link.py` (controller/ladder/LC word) and `station.py` (full station: QoS
   queues, ARQ, simplex channel access) are the link layer;
   `experiments/simplex_session.py` is their system test. Invariants: seq

@@ -844,6 +844,139 @@ that is TinyUSB's clear-stall path rather than this project's, so the
 contract is stated instead --- any client for this device must drain,
 not reset.
 
+\subsection{Two Boards on a Wire}
+\label{sec:cport_twoboard}
+
+Everything to this point validated the chain against something the
+project itself controls: golden vectors, a simulated channel, a virtual
+audio daemon, and an SDR whose transmit and receive halves share one
+oscillator. One impairment was never exercised by any of them --- two
+\emph{independent} clocks. A single-board loopback cannot supply it
+either: playing to \texttt{DAC1\_OUT1} and recording \texttt{ADC1} on
+the same board runs both converters off one TIM6, so the sample-rate
+offset is exactly zero by construction, and the receiver's tolerance to
+it is untested no matter how much copper the signal crosses.
+
+The stand in Figure~\ref{fig:twoboardlink} removes that last shared
+assumption. Board A's DAC drives board B's ADC through one signal wire
+and one ground wire; each board clocks its converter from its own
+crystal and its own PLL, and the two never exchange a timing signal ---
+not even to start. One ESP32 debugs both boards at once: JTAG
+daisy-chains, so \texttt{TDI}/\texttt{TDO} thread through board A into
+board B and back to the probe, which costs exactly one wire beyond a
+second board's worth of the existing harness. The three push-pull
+control lines are duplicated onto a driver pin per board rather than
+spliced; because a line and its copy sit in the same GPIO bank, the
+firmware switches both in one \texttt{w1ts}/\texttt{w1tc} store, so
+there is no skew between the boards at all. That is a wiring
+convenience rather than a fix: at the probe's measured 42\,236 edges/s
+a TCK half-period is 25\,\textmu s, against nanoseconds of everything
+else.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{images/two_board_link.png}
+    \caption{The two-board stand. The audio channel is one signal wire
+             and one ground wire between converters that share no clock;
+             the debug chain is a single probe threaded through both
+             boards' TAPs. \texttt{nSRST} is deliberately not
+             duplicated --- it is open-drain and wired-OR by nature, and
+             duplicating it would not buy per-board reset anyway, since
+             \texttt{remote\_bitbang} drives both resets from one pair of
+             commands.}
+    \label{fig:twoboardlink}
+\end{figure}
+
+One image serves both roles, selected over JTAG before the CPU is
+released, because a station is half duplex and its transmitter shares
+the receiver's arena --- no board ever does both. The transmitter builds
+one NORMAL QPSK frame and replays it; the receiver records 54\,000
+samples and only then runs the streaming receiver over the recording, so
+the analog path can be characterised independently of whether the
+decoder liked it. The host releases the transmitter \emph{first}, which
+is what removes the need for a trigger: the whole capture window falls
+inside a transmission already in progress.
+
+\begin{table}[H]
+    \centering
+    \caption{Two boards, one wire, independent clocks. Measured on the
+             stand; the payload check is \texttt{memcmp} against the
+             transmitted packet, so ``bit-exact'' is exact.}
+    \label{tab:twoboard}
+    \small
+    \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Quantity} & \textbf{Measured} & \textbf{Note} \\
+    \midrule
+    Complete frames in window & 2 & 54\,000 samples at 12\,kHz \\
+    Decoded bit-exact         & \textbf{2 of 2} & \texttt{memcmp} vs.\ the
+                                                  transmitted packet \\
+    ADC swing                 & 2.472\,V pk-pk & about 1.643\,V, the
+                                                 DAC's mid-rail \\
+    Residual CFO              & $+0.01$\,Hz & after preamble correction \\
+    ADC conversion            & 19.2\,\textmu s & 64.5-cycle sample,
+                                                  \texttt{per\_ck}/8 \\
+    Receiver ISR              & 19.5\,\textmu s & of an 83.3\,\textmu s
+                                                  period, i.e.\ 23\,\% \\
+    Transmitter ISR           & 0.11\,\textmu s & one DAC store \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\paragraph{What it corrected: a vector table in cached SRAM.} The
+receiver role hung on its first run --- stage ``running'', its TIM6
+interrupt count stuck at zero, the run loop spinning until the
+three-minute timeout. The state read off the part was contradictory:
+TIM6 counting with its update flag set, the interrupt \emph{pending}
+(\texttt{ISPR1}~$=$~\texttt{0x400000}) but \emph{not enabled}
+(\texttt{ISER1}~$=$~0), \texttt{PRIMASK} clear --- and the vector table
+in memory holding the correct handler. The status block explained the
+disable: the first interrupt had been taken by the \emph{stray} handler,
+whose job is to mask an unexpected source rather than let it wedge the
+device, so it had cleared the enable for IRQ~54.
+
+The vector table lives in ordinary cached SRAM, and
+\texttt{vectors\_set()} wrote the entry and executed \texttt{DSB} ---
+which orders accesses but does not clean. On a Cortex-M7 an exception
+vector fetch reads \emph{memory}, not the D-cache, so the new entry sat
+in a dirty line while the hardware still fetched the old one. Reading
+the table over JTAG showed the correct handler only because the line had
+been evicted by then, which is precisely what made the failure look
+impossible. \texttt{SCB\_CCR} read \texttt{0x00070200} on the stalled
+board, \texttt{DC} set --- inherited from the USB firmware the RAM image
+had displaced. The transmitter role never hit it because
+\texttt{build\_frame()} runs between installing the handler and the
+first interrupt and evicts the line in time: the same binary on the same
+board, differing only in eviction timing, which is why the bug presented
+as role-dependent. Both entry points now clean by MVA. This had been
+latent under every RAM bench in the project.
+
+Two smaller hazards came from the same root --- a RAM image inherits the
+machine state of the firmware it replaced. \texttt{ISER3} bit~5
+(\texttt{OTG\_FS}) is still set when the image starts, so an inherited
+enable can deliver a stale interrupt as the first one and get its source
+masked; \texttt{vectors\_irq\_enable()} therefore clears the pending bit
+before setting the enable, and the bench masks interrupts for the whole
+of bring-up.
+
+\paragraph{What was not measured.} The obvious way to report the
+sample-rate offset --- compare the two boards' measured TIM6 clocks ---
+is structurally incapable of showing it, and would have produced a
+confident \emph{0.0\,ppm}. Each board measures TIM6 against its own DWT
+cycle counter, and both are derived from the \emph{same} PLL, so that
+ratio is exact on each board and identical between them however far
+apart the crystals are. The offset is instead read off the wire, from
+the spacing of consecutively decoded frames against the number of
+samples transmitted between them. With only two complete frames in the
+capture window the span is 17\,920 samples, and a start position good to
+one sample makes that a \emph{bound} rather than a figure: the two
+clocks agree to within $\pm$56\,ppm. That is consistent with the
+$+0.01$\,Hz residual CFO, and it is enough to say the link decodes
+across independent clocks --- but it is not a measurement of their
+offset. A tighter number needs a much longer capture, which needs the
+receiver to decode as it goes rather than into a buffer; that is the
+next step for this stand, not a result of it.
+
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}
 

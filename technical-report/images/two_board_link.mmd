@@ -1,0 +1,38 @@
+flowchart TB
+    subgraph AUD["the audio channel &mdash; what is under test"]
+        direction LR
+        AD["<b>Board A &mdash; stmA &mdash; transmitter</b><br/>DAC1_OUT1 on <b>PA4</b><br/>12-bit, output buffer on, 3/4 scale<br/>TIM6 at 12 kHz off <b>its own</b> crystal and PLL"]
+        BD["<b>Board B &mdash; stmB &mdash; receiver</b><br/>ADC1_INP3 on <b>PA6</b><br/>16-bit, 64.5-cycle sample, 19.2 us/conv<br/>TIM6 at 12 kHz off <b>its own</b> crystal and PLL"]
+        AD ==>|"signal wire<br/>measured 2.47 V pk-pk about 1.64 V"| BD
+        AD -->|"ground wire &mdash; required"| BD
+    end
+
+    subgraph JT["the debug chain &mdash; one probe drives both boards"]
+        direction LR
+        P1["<b>ESP32 probe</b><br/>GPIO 21 = TDI"]
+        AJ["Board A TAPs<br/>TDI PA15 &rarr; TDO PB3"]
+        BJ["Board B TAPs<br/>TDI PA15 &rarr; TDO PB3"]
+        P2["<b>ESP32 probe</b><br/>GPIO 22 = TDO"]
+        P1 --> AJ
+        AJ -->|"the one wire that makes it a chain<br/>A PB3 to B PA15"| BJ
+        BJ --> P2
+    end
+
+    subgraph SH["the remaining JTAG lines"]
+        direction LR
+        N1["<b>TCK</b> 18 + 26<br/><b>TMS</b> 19 + 27<br/><b>nTRST</b> 23 + 13<br/>one driver pin per board"]
+        N2["both copies live in one<br/>GPIO bank, so a line and its<br/>copy switch in the SAME store<br/>&mdash; no skew between boards"]
+        N3["<b>nSRST</b> 25 is shared<br/>open-drain, wired-OR by nature<br/>so it resets BOTH boards at once<br/>per-board reset is SYSRESETREQ"]
+        N1 ~~~ N2
+        N2 ~~~ N3
+    end
+
+    AUD ~~~ JT
+    JT ~~~ SH
+
+    classDef sig fill:#e8f4ff,stroke:#3b7dd8,stroke-width:1.5px
+    classDef jt fill:#f5f5f5,stroke:#999
+    classDef note fill:#fffbe6,stroke:#d9b310
+    class AD,BD sig
+    class P1,P2,AJ,BJ jt
+    class N1,N2,N3 note
