@@ -213,6 +213,61 @@ analogfw: $(GEN) | $(BUILD)
 	    -o $(BUILD)/analog_loop.elf
 	@$(QEMUSIZE) -A $(BUILD)/analog_loop.elf | grep -E '^\.(text|bss|d2_bss|dtcm_bss|results)'
 
+# Two boards linked by audio: board A DAC1_OUT1 (PA4) -> wire -> board B
+# ADC1 ch3 (PA6), plus a ground wire. One image, role chosen over JTAG.
+LINK_SRC = target/start.c target/vectors.c bench/analog_link.c \
+           src/arena.c src/tx.c src/packets.c src/bits.c src/conv.c \
+           src/ldpc.c src/fft.c src/dsp.c src/rx_demod.c \
+           src/rx_detect.c src/rx_stream.c
+
+linkfw: $(GEN) | $(BUILD)
+	$(QEMUCC) -std=c99 -O2 -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 \
+	    -mfloat-abi=hard -ffunction-sections -fdata-sections \
+	    -Isrc -Itarget -DMAX_LLRS=1024 -nostartfiles -specs=nano.specs \
+	    -T target/stm32h743_usb.ld -Wl,--gc-sections $(LINK_SRC) \
+	    -o $(BUILD)/analog_link.elf
+	@$(QEMUSIZE) -A $(BUILD)/analog_link.elf | grep -E '^\.(text|bss|d2_bss|dtcm_bss|results)'
+
+# Run the two-board link. TX is released FIRST so the whole of RX's
+# capture window sits inside the transmission -- the two boards share no
+# clock, not even to start. Reset first for the same reason run-% does:
+# a RAM image inherits the resident firmware's clock setup, and stale
+# peripheral state from a previous run wedges it.
+LINK_TX ?= stmA
+LINK_RX ?= stmB
+LINK_ELF = $(BUILD)/analog_link.elf
+
+link-run: linkfw
+	@echo "resetting $(LINK_TX) and $(LINK_RX)..."; \
+	 $(OCD2) -c init \
+	   -c "targets $(LINK_TX).cpu0" -c halt -c "mww 0xE000ED0C 0x05FA0004" \
+	   -c "targets $(LINK_RX).cpu0" -c halt -c "mww 0xE000ED0C 0x05FA0004" \
+	   -c exit >/dev/null 2>&1; \
+	 sleep 3; \
+	 echo "loading the image on both boards (~40 s each over bitbang JTAG)..."; \
+	 $(OCD2) -c init \
+	   -c "targets $(LINK_TX).cpu0" -c halt -c "load_image $(LINK_ELF)" \
+	     -c "mww 0x20000004 1" -c "reg sp 0x20020000" -c "reg pc 0x00000000" \
+	   -c "targets $(LINK_RX).cpu0" -c halt -c "load_image $(LINK_ELF)" \
+	     -c "mww 0x20000004 2" -c "reg sp 0x20020000" -c "reg pc 0x00000000" \
+	   -c "echo {releasing TX, then RX}" \
+	   -c "targets $(LINK_TX).cpu0" -c resume \
+	   -c "targets $(LINK_RX).cpu0" -c resume \
+	   -c "wait_halt 180000" \
+	   -c "echo {=== RX beacon ===}" -c "mdw 0x20000000 44" \
+	   -c "targets $(LINK_TX).cpu0" -c halt \
+	   -c "echo {=== TX beacon ===}" -c "mdw 0x20000000 44" \
+	   -c exit 2>&1 | python3 bench/analog_link_report.py
+
+# Read both beacons without disturbing a run (or after one stalls).
+link-read:
+	@$(OCD2) -c init \
+	   -c "targets $(LINK_RX).cpu0" -c halt \
+	   -c "echo {=== RX beacon ===}" -c "mdw 0x20000000 44" \
+	   -c "targets $(LINK_TX).cpu0" -c halt \
+	   -c "echo {=== TX beacon ===}" -c "mdw 0x20000000 44" \
+	   -c exit 2>&1 | python3 bench/analog_link_report.py
+
 # --- sanitizers -----------------------------------------------------
 # Every suite under AddressSanitizer + UndefinedBehaviorSanitizer, and
 # the host-link parser under 40 MB of random input. The suites passing
@@ -428,4 +483,4 @@ flash-probe: test-probe
 	 $(ARDUINO_CLI) compile --fqbn esp32:esp32:esp32 -u -p $(PROBE_PORT) \
 	   $(PROBE_DIR)/esp32_rbb | tail -3
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read
