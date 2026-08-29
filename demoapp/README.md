@@ -14,6 +14,8 @@ adaptation, simplex access from `cport/station.c`).
 | `app.c` → `build/ofdm_console` | the console station app |
 | `chanctl.py` | channel configuration CLI (third device) |
 | `smoke_test.sh` | automated end-to-end test at 25× time scale |
+| `board_console.py` | the same console against a **real board**, chosen by USB serial |
+| `test_board_console.py` | host test that the board console's file envelope matches `app.c` byte for byte |
 
 The driver exports three Unix-socket "devices" (default `/tmp/ofdmchan/`):
 `s1.sock` and `s2.sock` are full-duplex raw int16 audio streams (one per
@@ -87,6 +89,72 @@ Expect radio pacing: the first exchange bootstraps at EXTREME
 drives the ladder up and frames shrink to ~1 s. `--time-scale N` runs the
 whole world N× faster; the apps clock the protocol from received samples,
 so behaviour is identical at any scale.
+
+## Talking to a specific board: `board_console.py`
+
+`app.c` is handed a device carrying 12 kHz audio and runs the whole
+stack itself. A board does not work that way: its firmware already runs
+that stack and speaks a **message-level** protocol over USB (submit /
+message / status). There is no way to hand it audio --- `UP_EVT_AUDIO`
+is a receive-side debug tap and there is no inbound audio command at
+all. So `board_console.py` is not `app.c` with a different device; it is
+a terminal onto a station that lives on the other end of a USB cable.
+
+Boards are addressed by the serial string the firmware builds from the
+STM32's 96-bit unique ID, so two boards on one host are never confused
+with each other:
+
+```bash
+./board_console.py --list
+#   bus 001 dev 068  serial 320047000851333438363436
+#   bus 001 dev 069  serial 240041000551333438363436
+
+./board_console.py --serial 320047000851333438363436 --name A
+```
+
+`--serial` may be omitted when exactly one board is attached. The
+commands are `app.c`'s: `send`, `sendfile`, `bulk`, `status`, `stats`,
+`quit`.
+
+What it shares with `app.c`, byte for byte, is the application envelope
+--- `magic "FILE:" basename NUL part n_parts data`, magic `0x02` for a
+whole-file DEFLATE stream --- so a file sent from a board console is
+received by an `app.c` station and vice versa. Nothing at run time would
+report a mismatch (it would just look like a peer sending garbage), so
+`test_board_console.py` asserts the offsets directly against the ones
+`app.c` uses. It needs no hardware:
+
+```bash
+python3 test_board_console.py
+```
+
+Two board limits it has to respect, because the firmware is built with
+`cport`'s MCU-modest defaults rather than `demoapp`'s:
+
+- `ST_MSG_MAX` is **256** on the board against `demoapp`'s 4096, so a
+  part carries ~240 bytes rather than 3000. Part size is not on the
+  wire --- each part is self-delimiting --- so the two ends need not
+  agree, and a board happily receives 3000-byte parts from an `app.c`
+  peer. The limit is **not discoverable**: `up_info_t` does not carry
+  it, so it is a constant here with `--msg-max` to override.
+- `ST_POOL_SLOTS` is 12 and each queue holds `ST_MAX_MSGS` = 8, so a
+  file cannot be dumped into the queue the way `app.c` dumps it. Parts
+  are paced against the `q_bulk` depth the board reports twice a
+  second, which is self-correcting: a submit lost for any reason simply
+  shows up as room again on the next status.
+
+Measured against a real board: a 1200-byte file deflated 2.86x to 419
+bytes on air, went out as 2 parts of 241 B, and the board's queue
+reported `bulk 2`.
+
+**The board's station has no radio.** `usb_flash_main.c` binds a *stub*
+PHY, so everything above the PHY is real --- queues, rate ladder, ARQ,
+reply timers, and the counters `stats` reports --- but nothing reaches
+the air, and with no peer the station simply retransmits and times out
+(`tx 5  rx 0  timeouts 4  retx 4` above). Driving two boards over the
+DAC-to-ADC wire from two of these consoles needs the USB firmware and
+the analog front end of `cport/bench/analog_link.c` in one image; that
+is a firmware change, not a console one.
 
 ## Real radio: `sdr_driver.py` (HackRF One and other SoapySDR devices)
 
