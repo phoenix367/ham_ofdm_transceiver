@@ -1,0 +1,25 @@
+sequenceDiagram
+    participant H as Host
+    participant TU as TinyUSB (software state)
+    participant HW as dwc2 EP_IN (hardware)
+    Note over TU,HW: device has been pushing status: EP_IN is ARMED with 37 B, BUSY = 1
+    rect rgb(255,236,236)
+    Note over H,HW: reopen with clear_halt(EP_IN) — what wedged every time
+    H->>TU: CLEAR_FEATURE(ENDPOINT_HALT, 0x81)
+    TU->>TU: usbd_edpt_clear_stall — BUSY := 0 unconditionally (usbd.c:1698)
+    TU->>HW: dcd_edpt_clear_stall — clear STALL, SD0PID only (dcd_dwc2.c:715)<br/>the hardware transfer is still armed
+    H->>TU: CMD_INFO
+    TU->>HW: write_flush sees "not busy" → re-arms ON TOP of the live transfer
+    HW-->>H: the original 37 B — the only packet that ever escapes
+    Note over TU,HW: completion no longer matches what TinyUSB started — BUSY never clears.<br/>RSP_INFO + 9 status frames = 362 B stuck in the FIFO.<br/>TX-FIFO-empty is level-triggered: isr_count → 90 M
+    end
+    rect rgb(236,255,236)
+    Note over H,HW: reopen with a drain — what works
+    H->>HW: IN tokens — read until quiet
+    HW-->>H: the armed 37 B, then whatever follows … until a 150 ms timeout (discarded)
+    Note over TU: each completion matches its transfer — BUSY clears normally
+    H->>TU: CMD_INFO
+    TU->>HW: write_flush → arm
+    HW-->>H: RSP_INFO
+    Note over H: measured: opens #1, #2, #3 and a SIGTERM-mid-read reopen all succeed;<br/>isr_count 293, fault 0, dropped 0
+    end

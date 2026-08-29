@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant FW as STM32H743 firmware
+    participant HW as USB core (USB2_OTG_FS)
+    participant H as Host (Linux)
+    Note over FW: image loaded into RAM over JTAG — flash never written
+    FW->>FW: USB33DEN, then wait for USB33RDY — bounded and visible (beacon stage 2)
+    Note over FW: this board supplies VDD33USB externally: enabling the internal<br/>regulator (USBREGEN) held USB33RDY low forever. PWR_CR3 read<br/>0x03000042, then 0x05000042 the instant USBREGEN was cleared
+    FW->>FW: HSI48 on, CRS auto-trim against host SOF, USBSEL = HSI48
+    FW->>HW: PA11/PA12 → AF10, clock the core, VBUS sensing OFF
+    FW->>HW: tusb_init — PHY up, soft-disconnect released
+    Note over HW,H: needs a USB-C→A cable: most dev boards omit the CC pull-downs,<br/>so a C→C host never detects an attach and never sources VBUS —<br/>every register reads correct and nothing appears on the bus
+    H->>HW: bus reset, GET_DESCRIPTOR(device)
+    HW-->>H: VID:PID 1209:0001, bDeviceClass 0xFF — no OS driver binds
+    H->>HW: SET_ADDRESS, GET_DESCRIPTOR(configuration)
+    HW-->>H: 1 interface: class 0xFF, subclass 0x4F, protocol 1 — EP 0x01 OUT, 0x81 IN
+    H->>HW: GET_DESCRIPTOR(string 3)
+    HW-->>H: iSerial = 240041000551333438363436 — the part's 96-bit unique ID
+    H->>HW: SET_CONFIGURATION 1
+    Note over FW: tud_mount_cb → beacon stage 6 (mounted)
+    Note over H: udev: /dev/ofdm-modem-240041000551333438363436 → bus/usb/001/035<br/>named by the unit, not by enumeration order

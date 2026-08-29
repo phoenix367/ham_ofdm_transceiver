@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant App as Host driver (ofdm_modem.py)
+    participant Dev as Modem (usb_modem.c + station_t)
+    Note over App: open by VID:PID, or --serial to pick one of several
+    App->>Dev: claim interface 0 — clear_halt on EP_OUT only
+    App->>Dev: DRAIN EP_IN — read until quiet (150 ms), discard
+    Dev-->>App: backlog of status frames pushed to nobody (measured 111–1924 B)
+    App->>Dev: CMD_INFO
+    Dev-->>App: RSP_INFO — proto 1, fw 1.4, 3 modes, 12 kHz, caps, UID
+    App->>Dev: CMD_PING token
+    Dev-->>App: RSP_PONG token (echoed)
+    App->>Dev: CMD_SUBMIT qos=2 "HELLO OVER USB"
+    Note over Dev: station_submit → bulk queue → station_poll_tx<br/>stub PHY: air time accounted, rate ladder runs, samples go nowhere
+    loop every 0.5 s while mounted — unprompted
+        Dev-->>App: EVT_STATUS rung, SNR, tx/rx, timeouts, queue depths
+    end
+    App->>Dev: CMD_CONFIG diag_stream = 1 (opt-in — default OFF)
+    Dev-->>App: EVT_DIAG … shed first under backpressure — a lost diagnostic<br/>costs nothing, a lost reply costs the session
+    Note over App,Dev: frame = A5 5A | type | len16 | payload. No checksum: USB already CRCs<br/>and retries every packet. Parser resyncs stayed 0 throughout
+    Note over App: close — the device keeps pushing status, so EP_IN re-arms
