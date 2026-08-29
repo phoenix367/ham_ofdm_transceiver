@@ -76,8 +76,15 @@ typedef struct {
 #define LAG_TOTAL (LAG_CAP_NORMAL + LAG_CAP_ROBUST + LAG_CAP_EXTREME)
 
 typedef struct {
-    int64_t re, im;
+    int64_t re, im;      /* lag N   = FFT_BINS   -- the fine estimate */
+    int64_t re2, im2;    /* lag N/2 = FFT_BINS/2 -- resolves its wrap */
 } lag_sum_t;
+#define LAG_N2 (FFT_BINS / 2)
+
+static int64_t div_round_signed(int64_t a, int64_t b)
+{
+    return a >= 0 ? (a + b / 2) / b : -((-a + b / 2) / b);
+}
 
 struct rxs_state {
     int inst;
@@ -352,15 +359,36 @@ static void block_summary(rxs_t *r, int64_t blk_idx)
             re[t] = sre[hist + t];
             im[t] = sim[hist + t];
         }
-        {   /* raw lag-N correlation, same term order as lag_words_src() */
+        {   /* Raw correlations at BOTH lags, same term order as
+             * lag_words_src(). Two lags for the reason rx_detect.c gives
+             * and CLAUDE.md insists on: the lag-N phase wraps at
+             * +-fs/2N = +-46.9 Hz, exactly one coarse bin, and the
+             * coarse mask-shift search is a near-tie between adjacent
+             * bins -- so a one-bin miss makes lag-N wrap and land
+             * 93.75 Hz out, which kills the frame. Lag N/2 is
+             * unambiguous over +-fs/N and picks the right cycle.
+             *
+             * The streaming receiver never had the second lag: its
+             * commit used lag-N alone, and the frame-at-once path's
+             * unwrap was never carried across. Found on the analog test
+             * stand, then reproduced digitally: a NORMAL frame whose
+             * tone field starts exactly on a block boundary (lead 0 or
+             * 512) failed at -94.07 Hz in every modulation, while lead
+             * 700 decoded -- on every receiver back to before the
+             * acquisition changes. */
             lag_sum_t *ls = &g_lag[r->lag_base
                                    + (int)(blk_idx & r->lag_mask)];
-            ls->re = 0;
-            ls->im = 0;
+            ls->re = 0;  ls->im = 0;
+            ls->re2 = 0; ls->im2 = 0;
             for (t = (hist ? 0 : LAG_N); t < B; t++) {
                 int a = hist + t - LAG_N, b = hist + t;
                 ls->re += (int64_t)sre[a] * sre[b] + (int64_t)sim[a] * sim[b];
                 ls->im += (int64_t)sre[a] * sim[b] - (int64_t)sim[a] * sre[b];
+            }
+            for (t = (hist ? 0 : LAG_N2); t < B; t++) {
+                int a = hist + t - LAG_N2, b = hist + t;
+                ls->re2 += (int64_t)sre[a] * sre[b] + (int64_t)sim[a] * sim[b];
+                ls->im2 += (int64_t)sre[a] * sim[b] - (int64_t)sim[a] * sre[b];
             }
         }
     }
@@ -479,20 +507,27 @@ static void tone_commit(rxs_t *r)
          * removed here as an angle subtraction (blk_sum_t). Before this,
          * the re-read anchored at cs_abs and single-handedly set the raw
          * ring's size. */
-        int64_t rr = 0, ri = 0, ang, mag;
+        int64_t rr = 0, ri = 0, rr2 = 0, ri2 = 0, ang, mag;
         int nb = seg_n / r->B, b;
         for (b = 0; b < nb; b++) {
             const lag_sum_t *ls =
                 &g_lag[r->lag_base
                        + (int)((r->best_off_blk + b) & r->lag_mask)];
-            rr += ls->re;
-            ri += ls->im;
+            rr += ls->re;   ri += ls->im;
+            rr2 += ls->re2; ri2 += ls->im2;
         }
         cordic_atan2(ri, rr, &ang, &mag);
         ang = (int64_t)(int32_t)(uint32_t)(ang - r->cw * LAG_N);
         {
-            int64_t fine = ang >= 0 ? (ang + LAG_N / 2) / LAG_N
-                                    : -((-ang + LAG_N / 2) / LAG_N);
+            int64_t fine = div_round_signed(ang, LAG_N);
+            int64_t coarse, ambig = ((int64_t)1 << PHASE_BITS) / FFT_BINS, k;
+            /* the lag-N/2 estimate, same coarse-word subtraction, and
+             * the unwrap exactly as rx_residual_word_src() does it */
+            cordic_atan2(ri2, rr2, &ang, &mag);
+            ang = (int64_t)(int32_t)(uint32_t)(ang - r->cw * LAG_N2);
+            coarse = div_round_signed(ang, LAG_N2);
+            k = div_round_signed(coarse - fine, ambig);
+            fine += k * ambig;
 #ifdef LAG_AB
             {   /* the old path, for comparison only */
                 zc_ring_ctx_t z; zc_src_t src; int64_t ref;

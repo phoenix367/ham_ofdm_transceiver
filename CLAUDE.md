@@ -226,6 +226,19 @@ Cross-module invariants that are easy to break:
   it too. Measure the result with `make armmeas`, never by hand --
   these figures depend on which entry points an image references, and
   the previously documented pair came from a main nobody kept.
+- The C STREAMING receiver's tone commit (`rx_stream.c` `tone_commit`)
+  carries the same two-lag residual as the frame-at-once detector:
+  lag-N for the fine estimate, lag-N/2 to pick its cycle, unwrapped
+  exactly as `rx_residual_word_src`. Both lags are accumulated per
+  block in `lag_sum_t` (its own ring, two tone windows deep) and summed
+  at commit with the coarse word subtracted as an angle. It did NOT have
+  the second lag until the analog loopback stand found the gap: a frame
+  whose tone field starts exactly on a detection block (lead 0 or 512)
+  missed the coarse bin by one, the lag-N residual wrapped, and every
+  modulation failed at -94.07 Hz -- on a loop with zero actual CFO.
+  Keep both lags; `test_stream` holds the two block-aligned leads as
+  self-consistency cases, and the EXTREME sweep gained 6.9 % decodes
+  from it. The Python fixed `_detect_newman` has the same construction.
 - Mixing float and fixed receivers: the fixed chain's detector returns
   positions in ANALYTIC index space, offset by the 31-sample Hilbert
   group delay. It cancels inside `FixedReceiver.receive()` but any

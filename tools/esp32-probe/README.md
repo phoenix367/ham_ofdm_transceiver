@@ -116,6 +116,18 @@ the wires are missing. If you do NOT get this far -- if it cannot
 connect to localhost:3335 -- the problem is the bridge or the probe, not
 the wiring.
 
+## If the ESP32 reboots, so does the target
+
+GPIO25 is wired to the STM32's NRST as an open-drain reset line, and
+during the ESP32's own boot that pin is briefly low. So anything that
+resets the ESP32 -- a USB re-enumeration, a brownout when a wire goes
+in next to it -- **resets the STM32 too**, and a RAM-resident image is
+gone. It presented as: the remote_bitbang socket dropping mid-session,
+the CH340 coming back as a new USB device, `/dev/ttyUSB0` becoming
+`/dev/ttyUSB1`, and the target's beacon reading somebody else's data.
+Restart the bridge on the new node, then reload the image. (Or leave
+NRST unwired if the target must survive the probe.)
+
 ## Nothing works?
 
 `Error connecting DP: cannot read IDR` is the normal first failure. In

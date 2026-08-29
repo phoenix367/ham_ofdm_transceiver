@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "../src/packets.h"
+#include "../src/rom_modes.h"
 #include "../src/tx.h"
 #include "../src/rx_stream.h"
 #include "test_vectors.h"
@@ -170,6 +171,55 @@ int main(void)
               blocks == TX_BURST_N);
         check("stream burst: payload bits bit-exact", exact);
         printf("  burst: %d/%d blocks, %d samples\n", blocks, TX_BURST_N, n);
+    }
+
+    /* A frame whose tone field starts EXACTLY on a detection-block
+     * boundary. No golden vector: the payload is known, so this is a
+     * self-consistency check -- and it is the case the corpus never had.
+     * Leads of 0 and 512 (multiples of NORMAL's 256-sample block) made
+     * the coarse mask-shift search miss by one bin, the lag-N residual
+     * wrapped, and every modulation failed at -94.07 Hz; lead 700 was
+     * fine. The frame-at-once detector resolves this with a second,
+     * lag-N/2 correlation; the streaming commit never had it until the
+     * analog loopback stand found the gap. */
+    {
+        static int16_t sig[24000];
+        uint8_t pay[27], pkt[280];
+        rxs_event_t ev;
+        int pkt_n, total = 0, got, pos, i, leads[2] = { 512, 0 }, li;
+        for (i = 0; i < 27; i++)
+            pay[i] = (uint8_t)(0x41 + (i % 26));
+        pkt_n = data_encode(7, pay, 27, pkt);
+        for (li = 0; li < 2; li++) {
+            txs_t *t;
+            rxs_t *r;
+            int lead = leads[li], n;
+            char name[80];
+            memset(sig, 0, sizeof(sig));
+            t = txs_open(MODE_NORMAL, pkt, pkt_n, 1, PKT_TYP_DATA, MOD_QPSK,
+                         CC_R12, 0, 0, &total);
+            pos = lead;
+            while (t && (got = txs_pull(t, sig + pos, 24000 - pos)) > 0)
+                pos += got;
+            n = pos + 1536;
+            r = rxs_open(MODE_NORMAL, 0);
+            got = 0;
+            for (pos = 0; pos < n && !got; pos += 512) {
+                int c = n - pos < 512 ? n - pos : 512;
+                got = rxs_push(r, sig + pos, c, &ev);
+            }
+            if (!got)
+                got = rxs_flush(r, &ev);
+            snprintf(name, sizeof(name),
+                     "stream NORMAL QPSK, tone field block-aligned (lead %d)",
+                     lead);
+            check(name, got && ev.type == 1 && ev.pkt_bits_n == pkt_n
+                        && memcmp(ev.bits, pkt, (size_t)pkt_n) == 0
+                        && ev.start_abs == lead + PREAMBLE_LEN_NORMAL + 30);
+            if (got)
+                printf("  lead %d: start %d cfo %+.2f Hz\n", lead, ev.start_abs,
+                       (double)ev.cfo_word * 12000.0 / 4294967296.0);
+        }
     }
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

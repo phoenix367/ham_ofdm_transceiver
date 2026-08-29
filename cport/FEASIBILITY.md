@@ -569,6 +569,60 @@ rule that waits for the above-threshold region to end or the argmax to
 stay stable for a full window span. All 58 golden tests and all bench
 scenarios pass with the fix.
 
+## Analog loopback: a frame through DAC -> wire -> ADC, on one board
+
+First step towards two boards joined by an audio channel. A station is
+half duplex and the transmitter shares the receiver's arena, so the
+stand (`bench/analog_loop.c`, `make analogfw`) does not do both at once:
+it generates a NORMAL QPSK 1/2 frame into a buffer, a 12 kHz timer plays
+it to DAC1_OUT1 (PA4) while recording ADC1 channel 3 (PA6) sample for
+sample, then the streaming receiver runs over the recording.
+`bench/analog_loop_dump.py` pulls both buffers over JTAG and fits the
+path. No DMA -- the timer ISR writes one DAC sample, starts one ADC
+conversion (19.2 us, measured), stores it -- so there are no trigger
+tables to get from a reference manual this project does not have.
+
+Measured, PA4 shorted to PA6 with a jumper:
+
+| | |
+|---|---|
+| TIM6 input clock | 199,999,720 Hz (ratio to DWT 0.500) |
+| sample rate | 11,999.743 Hz, and ~12 kHz absolute to ~10 % by wall clock |
+| ADC bring-up | LDO ready, calibrated, enabled; conversion 19.2 us |
+| ISR worst case | 25.6 us of an 83 us period |
+| **path gain** | **0.9992 (-0.01 dB)**, delay 0 samples, correlation 1.0000 |
+| **loop SNR** | **61.9 dB** -- 12-bit DAC quantisation, as predicted |
+| **decode** | **frame decoded, payload bit-exact, CFO 0.00 Hz** |
+
+Unwired for comparison: correlation 0.47 at zero delay, -32 dB -- not
+noise but crosstalk, the floating PA6 hearing 2.4 % of its neighbour
+PA4, which showed the DAC producing the frame before any wire existed.
+
+### The bug it found was not analog
+
+With the path at 62 dB the first wired run still failed the header CRC,
+locked 65 samples late at -94.07 Hz on a loop with ZERO actual carrier
+offset (DAC and ADC share one clock). Reproduced on the host with the
+clean digital waveform: a NORMAL frame whose tone field starts EXACTLY
+on a 256-sample detection block (lead 0 or 512) failed in every
+modulation; lead 700 decoded. Same on every receiver back to before the
+acquisition changes, so not a regression -- a latent gap.
+
+-94.07 Hz is the signature CLAUDE.md gives for a one-bin coarse miss
+(46.875 Hz) whose lag-N residual wraps at its +-46.9 Hz boundary. The
+frame-at-once detector resolves it with a second, lag-N/2 correlation.
+**The streaming commit never had the second lag**: `tone_commit` used
+lag-N alone. It now accumulates both lags per block and unwraps exactly
+as `rx_residual_word_src` does.
+
+Cost: 16 more bytes per block summary and one more CORDIC per commit.
+Return: the block-aligned cases decode, the analog recording decodes,
+and the EXTREME sweep on the same eight points went from 291/480 to
+**324/480 decoded -- +6.9 %**, almost exactly the "~8 % of all
+acquisitions" the one-bin miss was documented to cost the fixed detector.
+The streaming receiver had been paying that all along. `test_stream` now
+carries both block-aligned leads as self-consistency cases.
+
 ## Pending for exactness
 
 On-target cycle counts (DWT->CYCCNT) to replace the MAC-scaling
