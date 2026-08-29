@@ -38,6 +38,30 @@
 #define PIN_SRST   25   /* to STM32 NRST, open-drain */
 #define PIN_LED     2   /* devkit LED, driven by B/b */
 
+/* Second copies of the three PUSH-PULL control lines, so a two-board
+ * daisy-chain gets one driver per board instead of a Y-splice off one
+ * pin. Set DUAL_PROBE to 0 for a single-board probe: the masks below
+ * collapse to the original single bits and these pins are left alone.
+ *
+ * Only the push-pull lines are duplicated. nSRST is open-drain and
+ * wired-OR by nature -- tying both boards' NRST to the one pin IS the
+ * standard arrangement there, and duplicating it would not buy per-board
+ * reset anyway, since the remote_bitbang protocol drives both resets
+ * from one pair of commands ('r'..'u').
+ *
+ * TDI/TDO are not duplicated either: they are what carries the chain
+ * (board1 TDO -> board2 TDI), and the protocol samples exactly one TDO.
+ *
+ * Same constraints as the primaries -- all < 32, none strapping, none
+ * flash -- which is what lets one store drive a line and its copy
+ * SIMULTANEOUSLY, with no skew between them at all. */
+#ifndef DUAL_PROBE          /* -DDUAL_PROBE=0 for a single-board probe */
+#define DUAL_PROBE  1
+#endif
+#define PIN_TCK_B  26
+#define PIN_TMS_B  27
+#define PIN_TRST_B 13
+
 #define BAUD 921600
 
 /* Direct register writes rather than digitalWrite(): one store instead
@@ -47,21 +71,38 @@
 #include <soc/gpio_reg.h>
 #include <soc/soc.h>
 
-static inline void pin_hi(int p) { REG_WRITE(GPIO_OUT_W1TS_REG, 1u << p); }
-static inline void pin_lo(int p) { REG_WRITE(GPIO_OUT_W1TC_REG, 1u << p); }
-static inline void pin_set(int p, int v) { if (v) pin_hi(p); else pin_lo(p); }
+/* Lines are addressed as MASKS, not pin numbers, so a duplicated line
+ * and its copy are switched by the SAME store -- one w1ts/w1tc write
+ * carries both bits. Reads still take a pin number: TDO comes from the
+ * end of the chain, and a duplicated TMS is read back on its primary. */
+#define MASK_TDI   (1u << PIN_TDI)
+#define MASK_SRST  (1u << PIN_SRST)
+#define MASK_LED   (1u << PIN_LED)
+#if DUAL_PROBE
+#define MASK_TCK   ((1u << PIN_TCK)  | (1u << PIN_TCK_B))
+#define MASK_TMS   ((1u << PIN_TMS)  | (1u << PIN_TMS_B))
+#define MASK_TRST  ((1u << PIN_TRST) | (1u << PIN_TRST_B))
+#else
+#define MASK_TCK   (1u << PIN_TCK)
+#define MASK_TMS   (1u << PIN_TMS)
+#define MASK_TRST  (1u << PIN_TRST)
+#endif
+
+static inline void pin_hi(uint32_t m) { REG_WRITE(GPIO_OUT_W1TS_REG, m); }
+static inline void pin_lo(uint32_t m) { REG_WRITE(GPIO_OUT_W1TC_REG, m); }
+static inline void pin_set(uint32_t m, int v) { if (v) pin_hi(m); else pin_lo(m); }
 static inline int  pin_get(int p) { return (REG_READ(GPIO_IN_REG) >> p) & 1u; }
 
 /* SWDIO is bidirectional: drive it only while OpenOCD says to. Toggling
  * the enable register is a single store, unlike pinMode(). */
 static inline void swdio_drive(void)
 {
-    REG_WRITE(GPIO_ENABLE_W1TS_REG, 1u << PIN_TMS);
+    REG_WRITE(GPIO_ENABLE_W1TS_REG, MASK_TMS);
 }
 
 static inline void swdio_float(void)
 {
-    REG_WRITE(GPIO_ENABLE_W1TC_REG, 1u << PIN_TMS);
+    REG_WRITE(GPIO_ENABLE_W1TC_REG, MASK_TMS);
 }
 
 /* Replies are buffered and flushed only when the input runs dry: OpenOCD
@@ -104,12 +145,17 @@ void setup(void)
      * would silently break JTAG -- pin_set() would write the output
      * register of a pin that drives nothing. */
     pinMode(PIN_TMS, OUTPUT);
+#if DUAL_PROBE
+    pinMode(PIN_TCK_B, OUTPUT);
+    pinMode(PIN_TMS_B, OUTPUT);
+    pinMode(PIN_TRST_B, OUTPUT);
+#endif
 
-    pin_hi(PIN_TRST);   /* both resets are active LOW -- idle released */
-    pin_hi(PIN_SRST);
-    pin_hi(PIN_TMS);
-    pin_lo(PIN_TCK);
-    pin_lo(PIN_LED);
+    pin_hi(MASK_TRST);   /* both resets are active LOW -- idle released */
+    pin_hi(MASK_SRST);
+    pin_hi(MASK_TMS);
+    pin_lo(MASK_TCK);
+    pin_lo(MASK_LED);
 
     Serial.setRxBufferSize(4096);
     Serial.begin(BAUD);
@@ -132,9 +178,9 @@ void loop(void)
         case '0': case '1': case '2': case '3':
         case '4': case '5': case '6': case '7': {
             int v = c - '0';
-            pin_set(PIN_TDI, v & 1);
-            pin_set(PIN_TMS, (v >> 1) & 1);
-            pin_set(PIN_TCK, (v >> 2) & 1);
+            pin_set(MASK_TDI, v & 1);
+            pin_set(MASK_TMS, (v >> 1) & 1);
+            pin_set(MASK_TCK, (v >> 2) & 1);
             break;
         }
         case 'R':
@@ -144,8 +190,8 @@ void loop(void)
         /* ---- SWD. 'd'..'g' encode (SWCLK, SWDIO) as bit1, bit0 ---- */
         case 'd': case 'e': case 'f': case 'g': {
             int v = c - 'd';
-            pin_set(PIN_TMS, v & 1);
-            pin_set(PIN_TCK, (v >> 1) & 1);
+            pin_set(MASK_TMS, v & 1);
+            pin_set(MASK_TCK, (v >> 1) & 1);
             break;
         }
         case 'O':
@@ -159,14 +205,14 @@ void loop(void)
             break;
 
         /* ---- resets, both active low on the target ---- */
-        case 'r': pin_hi(PIN_TRST); pin_hi(PIN_SRST); break;
-        case 's': pin_hi(PIN_TRST); pin_lo(PIN_SRST); break;
-        case 't': pin_lo(PIN_TRST); pin_hi(PIN_SRST); break;
-        case 'u': pin_lo(PIN_TRST); pin_lo(PIN_SRST); break;
+        case 'r': pin_hi(MASK_TRST); pin_hi(MASK_SRST); break;
+        case 's': pin_hi(MASK_TRST); pin_lo(MASK_SRST); break;
+        case 't': pin_lo(MASK_TRST); pin_hi(MASK_SRST); break;
+        case 'u': pin_lo(MASK_TRST); pin_lo(MASK_SRST); break;
 
         /* ---- misc ---- */
-        case 'B': pin_hi(PIN_LED); break;
-        case 'b': pin_lo(PIN_LED); break;
+        case 'B': pin_hi(MASK_LED); break;
+        case 'b': pin_lo(MASK_LED); break;
         case 'Z': flush_reply(); delay(1); break;
         case 'z': delayMicroseconds(1); break;
         case 'Q': flush_reply(); break;

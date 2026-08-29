@@ -389,4 +389,34 @@ flash-usb-b: usbflash
 	@$(OCD2) -c init -c "ab_flash stmB build/usb_flash.elf" -c exit $(OCD_QUIET) \
 	  | grep -aE 'Verified OK|Error'
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b
+# --- the ESP32 probe firmware itself -----------------------------------
+# esp32 core 3.x needs arduino-cli; the legacy `arduino` IDE answers
+# "Unknown package". Point ARDUINO_CLI at it if it is not on PATH.
+ARDUINO_CLI ?= arduino-cli
+PROBE_DIR    = ../tools/esp32-probe
+PROBE_PORT  ?= $(shell ls /dev/ttyUSB* 2>/dev/null | head -1)
+
+# Host test of the probe's GPIO layer: models the w1ts/w1tc registers and
+# asserts the exact bits for every protocol character, in BOTH build
+# arms. A missed call site would drive one board and not the other, which
+# on a daisy-chain just looks like a dead scan chain -- so assert it here
+# rather than discover it on the bench. No hardware needed.
+test-probe:
+	@for d in 1 0; do \
+	   g++ -DDUAL_PROBE=$$d -I$(PROBE_DIR)/stub -I$(PROBE_DIR) -Wall -Wextra \
+	       -o /tmp/test_pinmask$$d $(PROBE_DIR)/test_pinmask.cpp || exit 1; \
+	   /tmp/test_pinmask$$d || exit 1; \
+	 done
+
+probe-fw:
+	@$(ARDUINO_CLI) compile --fqbn esp32:esp32:esp32 $(PROBE_DIR)/esp32_rbb \
+	  | tail -2
+
+# Flashing the probe needs the serial port the bridge also wants.
+flash-probe: test-probe
+	@$(MAKE) --no-print-directory bridge-stop >/dev/null; \
+	 echo "flashing probe on $(PROBE_PORT)"; \
+	 $(ARDUINO_CLI) compile --fqbn esp32:esp32:esp32 -u -p $(PROBE_PORT) \
+	   $(PROBE_DIR)/esp32_rbb | tail -3
+
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe

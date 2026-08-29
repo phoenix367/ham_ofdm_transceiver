@@ -49,6 +49,10 @@ supply, not from the ESP32.
 | 25 | nSRST | NRST | optional, both |
 | GND | GND | GND | **required** |
 
+For a second board on the same probe, the three push-pull control lines
+have a duplicate pin each -- 26 (TCK), 27 (TMS), 13 (nTRST) -- see
+[Two boards on one probe](#two-boards-on-one-probe).
+
 ### Two boards on one probe
 
 JTAG daisy-chains, so one ESP32 can debug both boards of the audio-link
@@ -57,8 +61,29 @@ both boards and only TDI/TDO chain, so beyond a second board's worth of
 the table above it costs **one** new wire:
 
     ESP32 21 (TDI) --> board1 PA15
-                       board1 PB3  --> board2 PA15    <-- the new wire
+                       board1 PB3  --> board2 PA15    <-- the chain wire
                                        board2 PB3 --> ESP32 22 (TDO)
+
+    ESP32 18 (TCK)   --> board1 PA14     ESP32 26 --> board2 PA14
+    ESP32 19 (TMS)   --> board1 PA13     ESP32 27 --> board2 PA13
+    ESP32 23 (nTRST) --> board1 PB4      ESP32 13 --> board2 PB4
+    ESP32 25 (nSRST) --> board1 NRST  +  board2 NRST      (shared)
+
+The three push-pull control lines are **duplicated**: each board gets its
+own driver pin instead of a Y-splice. The firmware addresses lines by
+mask and every duplicate sits in GPIO bank 0, so a line and its copy are
+switched by the *same* `w1ts`/`w1tc` store -- zero skew between the two
+boards' TCK. This is not fixing a timing problem (at ~20 kHz of TCK a
+half-period is 25 us, against nanoseconds of everything else); it is one
+driver per board and no splices on the breadboard. Build the probe with
+`-DDUAL_PROBE=0` to get the single-board behaviour back, which
+`test_pinmask.cpp` asserts is byte-for-byte the old one -- those pins are
+then never driven at all.
+
+`nSRST` is deliberately *not* duplicated. It is open-drain and wired-OR
+by nature, so multi-drop is the normal arrangement there, and duplicating
+it would not buy per-board reset anyway: `remote_bitbang` drives both
+resets from one pair of commands (`r`..`u`).
 
 Both boards must be powered and wired before `init`: OpenOCD examines
 every TAP in the chain, so one missing board fails all of it. Keep using
@@ -84,9 +109,8 @@ address by `host/ofdm_modem.py --serial`.
 Two consequences of the shared lines, both wanted here:
 
 - **nSRST resets both boards at once** -- a common start of time for the
-  audio link. To reset one alone, use SYSRESETREQ on that target instead.
-- **TCK fans out to two loads.** Fine at this speed: `remote_bitbang` was
-  measured at 42236 edges/s, about 20 kHz of TCK.
+  audio link. To reset one alone, use SYSRESETREQ on that target:
+  `targets stmA.cpu0; mww 0xE000ED0C 0x05FA0004`.
 
 While OpenOCD talks to one board the other's two TAPs sit in BYPASS,
 adding 2 bits to each DR scan. DAP DR scans are 35 bits, so ~6%. IR scans
@@ -127,9 +151,14 @@ are required:
 
 ## Running
 
-    # 1. flash the probe firmware
-    arduino --upload --board esp32:esp32:esp32 --port /dev/ttyUSB0 \
-            esp32_rbb/esp32_rbb.ino
+    # 1. flash the probe firmware. The legacy `arduino` IDE cannot do it
+    #    -- esp32 core 3.x needs arduino-cli (or IDE 2.x); the old one
+    #    answers "Error: esp32: Unknown package".
+    arduino-cli compile --fqbn esp32:esp32:esp32 esp32_rbb
+    arduino-cli upload  --fqbn esp32:esp32:esp32 -p /dev/ttyUSB0 esp32_rbb
+
+    # host test of the GPIO layer, no hardware needed (both build arms)
+    make -C ../../cport test-probe
 
     # 2. bridge the serial port to a socket
     ./rbb_bridge.py --port /dev/ttyUSB0 --baud 921600 --listen 3335 &
