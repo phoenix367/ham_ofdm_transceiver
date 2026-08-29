@@ -26,6 +26,25 @@
 #ifndef ST_DELIVERED_MAX
 #define ST_DELIVERED_MAX 16
 #endif
+/* Slots in the shared message store. Every message the station holds --
+ * queued, in flight, or delivered and not yet drained -- occupies one.
+ *
+ * Before this, each of the 42 positions that COULD hold a message owned
+ * ST_MSG_MAX bytes outright: 3x8 queue slots, 16 delivered entries, and
+ * the two current messages. That sized RAM by the number of ADDRESSABLE
+ * positions rather than by how many messages can exist at once, and at
+ * ST_MSG_MAX=4096 it was 172 kB inside a station_t that is otherwise
+ * about 25 kB. The positions are still all there; they now hold a slot
+ * index instead of a copy.
+ *
+ * Slots are fixed size and never move, so a message stays contiguous
+ * and `data + idx*frag_size` fragment arithmetic still works. A full
+ * store fails station_submit, which is the same back-pressure a full
+ * queue has always applied. Measured peak across the C suites and the
+ * demoapp file transfers is reported in `pool_hwm`. */
+#ifndef ST_POOL_SLOTS
+#define ST_POOL_SLOTS 12
+#endif
 #define ST_LLR_MAX 1024
 
 #define FLAG_LAST_FRAGMENT 1
@@ -132,7 +151,7 @@ typedef struct {
 } station_stats_t;
 
 typedef struct {
-    uint8_t data[ST_MSG_MAX];
+    int slot;  /* index into station_t.pool, -1 = holds nothing */
     int len, off, qos, active;
 } st_msg_t;
 
@@ -145,7 +164,13 @@ typedef struct {
     link_ctl_t ctl;
     station_phy_t phy;
 
-    uint8_t qdata[3][ST_MAX_MSGS][ST_MSG_MAX];
+    /* the shared message store and its free list (see ST_POOL_SLOTS) */
+    uint8_t pool[ST_POOL_SLOTS][ST_MSG_MAX];
+    int pool_next[ST_POOL_SLOTS];
+    int pool_head;             /* free-list head, -1 = exhausted */
+    int pool_used, pool_hwm;   /* live slots, and the peak ever live */
+
+    int qslot[3][ST_MAX_MSGS]; /* -1 where the queue position is empty */
     int qlen[3][ST_MAX_MSGS];
     int qhead[3], qcount[3];
 
@@ -209,7 +234,7 @@ typedef struct {
 
     uint8_t assembly[2][ST_ASM_MAX];
     int assembly_len[2];
-    uint8_t delivered[ST_DELIVERED_MAX][ST_MSG_MAX];
+    int delivered_slot[ST_DELIVERED_MAX];
     int delivered_len[ST_DELIVERED_MAX];
     int delivered_n;
 
@@ -237,6 +262,33 @@ typedef struct {
 
 void station_init(station_t *st, const station_phy_t *phy, uint64_t seed);
 int station_submit(station_t *st, const uint8_t *data, int len, int qos);
+
+/* --- delivered messages -----------------------------------------------
+ * Completed inbound messages accumulate in a bounded log; the caller
+ * reads entries [0, delivered_n) and then releases them. Payloads live
+ * in the shared store, so the log MUST be reset through this call --
+ * zeroing delivered_n by hand strands the slots. */
+const uint8_t *station_delivered(const station_t *st, int i);
+void station_delivered_reset(station_t *st);
+
+/* Drop the bulk message in flight together with its burst state, and
+ * return its storage. A transfer can be abandoned from outside: an
+ * operator cancel, or setting up a fresh one over the top. */
+void station_abort_bulk(station_t *st);
+
+/* Sizing diagnostics for ST_POOL_SLOTS, process-wide across every
+ * station: the peak slots ever live, and the number of allocations
+ * refused because the store was full (must be 0). */
+int station_pool_peak(void);
+int station_pool_refused(void);
+/* slots released twice -- must be 0; see pool_free() for why it matters */
+int station_pool_double_free(void);
+
+/* Slots still free. A caller about to submit several messages at once
+ * should check this the way it checks queue depth -- the store is a
+ * capacity like any other, and refusing up front beats a partial
+ * submission half way through a file. */
+int station_pool_free(const station_t *st);
 int station_has_traffic(const station_t *st);
 /* returns sample count to transmit now, or 0 */
 int station_poll_tx(station_t *st, double t, int channel_busy,

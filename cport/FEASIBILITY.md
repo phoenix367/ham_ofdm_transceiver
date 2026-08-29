@@ -259,10 +259,10 @@ Data-capable total (all but ITCM): **1019904 B**. Measured `.bss`:
 
 | Configuration | `.bss` | Fits? |
 |---|---|---|
-| cport defaults, no EXT frames | 706256 | yes, 306 KB spare |
-| cport defaults + EXT frames | 942800 | yes, 75 KB spare |
-| demoapp settings, no EXT frames | 892396 | yes, 125 KB spare |
-| demoapp settings + EXT frames | 1128940 | **no**, over by 109 KB |
+| cport defaults, no EXT frames | 698804 | yes, 313 KB spare |
+| cport defaults + EXT frames | 935348 | yes, 82 KB spare |
+| demoapp settings, no EXT frames | 769748 | yes, 244 KB spare |
+| demoapp settings + EXT frames | 1006292 | yes, 13 KB spare |
 
 "cport defaults" throughout means the `#ifndef` values in the headers,
 with no `-D` on the command line -- what `make armmeas` builds. The ones
@@ -279,14 +279,35 @@ measured costs are additive:
 | `BURST_STREAM_MAX` 8 -> 16 | +16672 |
 | `ST_ASM_MAX` 4096 -> 8192 | +8192 |
 
-`ST_MSG_MAX` dominates because it is multiplied 42 times inside
-`station_t`: `qdata[3][8][ST_MSG_MAX]`, `delivered[16][ST_MSG_MAX]`, and
-the two current messages. 42 x 3840 = 161280 exactly. So the knob that
-decides whether the largest configuration fits is not a PHY parameter --
-it is how big a message the link layer queues, times how many it keeps
-in flight and remembers for duplicate suppression. Size it to the
-application, or pool the queues instead of giving all 42 slots the worst
-case.
+`ST_MSG_MAX` used to dominate because it was multiplied 42 times inside
+`station_t`: `qdata[3][8][ST_MSG_MAX]`, `delivered[16][ST_MSG_MAX]` and
+the two current messages -- 42 x 3840 = 161280 B for one 256 -> 4096
+change. That sized RAM by the number of positions that COULD hold a
+message rather than by how many can exist at once.
+
+**Since pooled** (`ST_POOL_SLOTS`, station.h): the 42 positions now hold
+a slot index, and the payloads share one store. Measured peak across
+everything: **3** slots in the C suites, **6** on a 14162-byte file
+transfer (sender side), **1** on the receiving side. The default is 12.
+
+| Configuration | before | after | saved |
+|---|---|---|---|
+| cport defaults, no EXT | 706252 | 698804 | 7 KB |
+| cport defaults + EXT | 942800 | 935348 | 7 KB |
+| demoapp settings, no EXT | 892396 | 769748 | 120 KB |
+| demoapp settings + EXT | 1128940 | 1006292 | **120 KB** |
+
+The last row is the one that did not fit an H743VI and now does, with
+13612 B to spare -- tight enough that it should be read as "possible",
+not "comfortable".
+
+Two properties worth keeping: a full store refuses `station_submit`
+exactly as a full queue always did (and `station_pool_free` lets a
+caller check before submitting a file in parts, so a transfer is refused
+whole rather than half), and `pool_free` walks the free list to catch a
+slot released twice -- which would hand one payload to two owners and
+present as a corrupted message rather than a crash. `test_link` asserts
+both counters are zero.
 
 **Code in RAM: yes.** The image is 62009 B against ITCM's 65536 -- 94.6 %
 full, 3527 B spare. Only ~32 KB of that is instructions; the other

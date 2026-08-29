@@ -75,9 +75,122 @@ static double rng_uniform(station_t *st, double lo, double hi)
     return lo + (hi - lo) * ((double)(st->rng >> 11) / 9007199254740992.0);
 }
 
+/* --- shared message store (see ST_POOL_SLOTS in station.h) ------------
+ * A free list over fixed-size slots: O(1), no fragmentation, and slots
+ * never move, so a held message stays contiguous for the fragment
+ * arithmetic that reads it. */
+
+static void pool_init(station_t *st)
+{
+    int i;
+    for (i = 0; i < ST_POOL_SLOTS; i++)
+        st->pool_next[i] = i + 1 < ST_POOL_SLOTS ? i + 1 : -1;
+    st->pool_head = 0;
+    st->pool_used = 0;
+    st->pool_hwm = 0;
+    for (i = 0; i < 3 * ST_MAX_MSGS; i++)
+        st->qslot[i / ST_MAX_MSGS][i % ST_MAX_MSGS] = -1;
+    for (i = 0; i < ST_DELIVERED_MAX; i++)
+        st->delivered_slot[i] = -1;
+    st->cur_prio.slot = -1;
+    st->cur_bulk.slot = -1;
+}
+
+/* Peak slots live in ANY station this process has run, and the number of
+ * allocations refused. ST_POOL_SLOTS has to cover the first; the second
+ * must stay 0 or messages were silently dropped. Diagnostic only -- two
+ * ints, and the only reason the default is a measurement rather than a
+ * guess. */
+static int g_pool_peak, g_pool_fail, g_pool_dbl;
+
+int station_pool_peak(void) { return g_pool_peak; }
+int station_pool_refused(void) { return g_pool_fail; }
+int station_pool_double_free(void) { return g_pool_dbl; }
+
+int station_pool_free(const station_t *st)
+{
+    return ST_POOL_SLOTS - st->pool_used;
+}
+
+static int pool_alloc(station_t *st)
+{
+    int s = st->pool_head;
+    if (s < 0) {
+        g_pool_fail++;
+        return -1;
+    }
+    st->pool_head = st->pool_next[s];
+    if (++st->pool_used > st->pool_hwm)
+        st->pool_hwm = st->pool_used;
+    if (st->pool_used > g_pool_peak)
+        g_pool_peak = st->pool_used;
+    return s;
+}
+
+static void pool_free(station_t *st, int s)
+{
+    int k;
+    if (s < 0)
+        return;
+    /* A slot freed twice ends up on the free list twice, and the next
+     * two allocations then hand the SAME payload to two owners -- which
+     * would present as a corrupted message, not as a crash. The list is
+     * ST_POOL_SLOTS long; walking it is far cheaper than that bug. Every
+     * release also sets its handle to -1, so this should never fire. */
+    for (k = st->pool_head; k >= 0; k = st->pool_next[k])
+        if (k == s) {
+            g_pool_dbl++;
+            return;
+        }
+    st->pool_next[s] = st->pool_head;
+    st->pool_head = s;
+    st->pool_used--;
+}
+
+/* payload of a held message */
+static uint8_t *msg_data(station_t *st, const st_msg_t *m)
+{
+    return st->pool[m->slot];
+}
+
+/* finish with a message and give its slot back */
+static void msg_release(station_t *st, st_msg_t *m)
+{
+    pool_free(st, m->slot);
+    m->slot = -1;
+    m->active = 0;
+    m->len = 0;
+    m->off = 0;
+}
+
+const uint8_t *station_delivered(const station_t *st, int i)
+{
+    if (i < 0 || i >= st->delivered_n || st->delivered_slot[i] < 0)
+        return 0;
+    return st->pool[st->delivered_slot[i]];
+}
+
+void station_delivered_reset(station_t *st)
+{
+    int i;
+    for (i = 0; i < st->delivered_n; i++) {
+        pool_free(st, st->delivered_slot[i]);
+        st->delivered_slot[i] = -1;
+        st->delivered_len[i] = 0;
+    }
+    st->delivered_n = 0;
+}
+
+void station_abort_bulk(station_t *st)
+{
+    st->btx.active = 0;
+    msg_release(st, &st->cur_bulk);
+}
+
 void station_init(station_t *st, const station_phy_t *phy, uint64_t seed)
 {
     memset(st, 0, sizeof(*st));
+    pool_init(st);
     ctl_init(&st->ctl);
     st->phy = *phy;
     st->last_rx_seq = -1;
@@ -169,12 +282,16 @@ double station_freq_trim_total(const station_t *st)
 
 int station_submit(station_t *st, const uint8_t *data, int len, int qos)
 {
-    int slot;
+    int pos, slot;
     if (len > ST_MSG_MAX || st->qcount[qos] >= ST_MAX_MSGS)
         return -1;
-    slot = (st->qhead[qos] + st->qcount[qos]) % ST_MAX_MSGS;
-    memcpy(st->qdata[qos][slot], data, (size_t)len);
-    st->qlen[qos][slot] = len;
+    slot = pool_alloc(st);
+    if (slot < 0)
+        return -1; /* store full: the same back-pressure as a full queue */
+    pos = (st->qhead[qos] + st->qcount[qos]) % ST_MAX_MSGS;
+    memcpy(st->pool[slot], data, (size_t)len);
+    st->qslot[qos][pos] = slot;
+    st->qlen[qos][pos] = len;
     st->qcount[qos]++;
     return 0;
 }
@@ -314,14 +431,18 @@ static int burst_try_engage(station_t *st, int rung_idx)
     return 1;
 }
 
+/* Hand the head of a queue to `dst`. Ownership of the slot MOVES, so
+ * this no longer copies the payload at all. */
 static void pop_msg(station_t *st, int qos, st_msg_t *dst)
 {
-    int slot = st->qhead[qos];
-    memcpy(dst->data, st->qdata[qos][slot], (size_t)st->qlen[qos][slot]);
-    dst->len = st->qlen[qos][slot];
+    int pos = st->qhead[qos];
+    pool_free(st, dst->slot);  /* dst is inactive here; releases a leak */
+    dst->slot = st->qslot[qos][pos];
+    dst->len = st->qlen[qos][pos];
     dst->off = 0;
     dst->qos = qos;
     dst->active = 1;
+    st->qslot[qos][pos] = -1;
     st->qhead[qos] = (st->qhead[qos] + 1) % ST_MAX_MSGS;
     st->qcount[qos]--;
 }
@@ -436,7 +557,7 @@ static int burst_send_stream(station_t *st, int rung_idx, int16_t *out,
         payload[1] = (uint8_t)((k == count - 1 || k == 0 ? 0x80 : 0)
                                | st->btx.n);
         payload[2] = (uint8_t)fs;
-        memcpy(payload + BURST_SUBHDR, st->cur_bulk.data + idx * fs,
+        memcpy(payload + BURST_SUBHDR, msg_data(st, &st->cur_bulk) + idx * fs,
                (size_t)fs);
         n = data_encode(lc_pack(&lc), payload, BURST_SUBHDR + fs,
                         blocks + (size_t)k * pkt_n);
@@ -508,7 +629,8 @@ static st_frag_t *take_fragment(station_t *st, int rung_idx)
     if (chunk_len > cap)
         chunk_len = cap;
     st->seq = (st->seq + 1) & 3;
-    memcpy(st->pending.chunk, src->data + src->off, (size_t)chunk_len);
+    memcpy(st->pending.chunk, msg_data(st, src) + src->off,
+           (size_t)chunk_len);
     st->pending.chunk_len = chunk_len;
     st->pending.last = src->off + chunk_len >= src->len;
     st->pending.qos = src->qos;
@@ -655,7 +777,7 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
             payload[1] = (uint8_t)((ack_req ? 0x80 : 0) | st->btx.n);
             payload[2] = (uint8_t)st->btx.frag_size;
             memcpy(payload + BURST_SUBHDR,
-                   st->cur_bulk.data + idx * st->btx.frag_size,
+                   msg_data(st, &st->cur_bulk) + idx * st->btx.frag_size,
                    (size_t)flen);
             lc.seq = st->btx.id;
             lc.ack = st->last_rx_seq >= 0 ? st->last_rx_seq : 0;
@@ -956,7 +1078,7 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
             if (burst_all_acked(st)) {
                 diag(st, ST_EV_BURST_DONE, 0, st->btx.id, 0, 0, t);
                 st->btx.active = 0;
-                st->cur_bulk.active = 0;
+                msg_release(st, &st->cur_bulk);
                 ctl_on_ack(&st->ctl);
                 if (st->last_tx_rung >= 0)
                     ctl_note_outcome(&st->ctl, st->last_tx_rung, 1);
@@ -1028,10 +1150,14 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
                     st->brx.done = 1;
                     if (st->delivered_n < ST_DELIVERED_MAX
                         && mlen <= ST_MSG_MAX) {
-                        memcpy(st->delivered[st->delivered_n],
-                               st->assembly[0], (size_t)mlen);
-                        st->delivered_len[st->delivered_n] = mlen;
-                        st->delivered_n++;
+                        int ds = pool_alloc(st);
+                        if (ds >= 0) {
+                            memcpy(st->pool[ds], st->assembly[0],
+                                   (size_t)mlen);
+                            st->delivered_slot[st->delivered_n] = ds;
+                            st->delivered_len[st->delivered_n] = mlen;
+                            st->delivered_n++;
+                        }
                     }
                     return 1;
                 }
@@ -1045,7 +1171,7 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
         st_msg_t *src = st->pending.stream ? &st->cur_prio : &st->cur_bulk;
         src->off += st->pending.chunk_len;
         if (st->pending.last)
-            src->active = 0;
+            msg_release(st, src);
         st->pending.active = 0;
         ctl_on_ack(&st->ctl);
         if (st->last_tx_rung >= 0)
@@ -1066,10 +1192,14 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
             if (lc.flags & FLAG_LAST_FRAGMENT) {
                 if (st->delivered_n < ST_DELIVERED_MAX
                     && alen <= ST_MSG_MAX) {
-                    memcpy(st->delivered[st->delivered_n],
-                           st->assembly[stream], (size_t)alen);
-                    st->delivered_len[st->delivered_n] = alen;
-                    st->delivered_n++;
+                    int ds = pool_alloc(st);
+                    if (ds >= 0) {
+                        memcpy(st->pool[ds], st->assembly[stream],
+                               (size_t)alen);
+                        st->delivered_slot[st->delivered_n] = ds;
+                        st->delivered_len[st->delivered_n] = alen;
+                        st->delivered_n++;
+                    }
                 }
                 st->assembly_len[stream] = 0;
                 done++;

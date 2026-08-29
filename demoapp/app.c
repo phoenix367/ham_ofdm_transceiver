@@ -410,6 +410,9 @@ static void show_status(void)
            "delivered %d msgs\n",
            g_st.qcount[0], g_st.qcount[1], g_st.qcount[2],
            g_st.pending.active, g_st.delivered_n);
+    printf("  message store: %d/%d slots live, peak %d, refused %d\n",
+           g_st.pool_used, ST_POOL_SLOTS, station_pool_peak(),
+           station_pool_refused());
     {
         link_diag_t ld;
         ctl_diag(&g_st.ctl, now_t(), &ld);
@@ -575,7 +578,7 @@ static void handle_delivered(int before)
 {
     int i;
     for (i = before; i < g_st.delivered_n; i++) {
-        const uint8_t *m = g_st.delivered[i];
+        const uint8_t *m = station_delivered(&g_st, i);
         int len = g_st.delivered_len[i];
         if (len > 1 + (int)strlen(FILE_TAG)
             && (m[0] == FILE_MAGIC || m[0] == FILE_MAGIC_Z)
@@ -589,10 +592,12 @@ static void handle_delivered(int before)
         }
         fflush(stdout);
     }
-    /* the delivered log is a bounded ring; once handled, recycle it so a
-     * long-lived console session never stops recording new messages */
-    if (g_st.delivered_n >= ST_DELIVERED_MAX)
-        g_st.delivered_n = 0;
+    /* Everything up to delivered_n has now been handled, so release it
+     * immediately. Waiting for the log to fill first (which is what this
+     * did) held every delivered payload in the message store until the
+     * 16th message arrived -- harmless when each entry was its own
+     * static array, wasteful now that they share slots. */
+    station_delivered_reset(&g_st);
 }
 
 /* Queue a broadcast: one preamble+header per group of BC frames, framing
@@ -996,6 +1001,10 @@ static void cmd_sendfile(const char *path)
     }
 
     q_free = ST_MAX_MSGS - g_st.qcount[QOS_BULK];
+    /* the message store is a capacity too: check it here so a file is
+     * refused whole rather than half submitted (see ST_POOL_SLOTS) */
+    if (station_pool_free(&g_st) < q_free)
+        q_free = station_pool_free(&g_st);
     if (n_parts > 255 || n_parts > q_free) {
         printf("%s [%s] sendfile: %s is %ld bytes (%d on air) = %d parts, "
                "but only %d queue slots free (max %d bytes now)\n", tstamp(),

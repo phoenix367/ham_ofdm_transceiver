@@ -407,11 +407,11 @@ static void test_session(void)
 
     ok = B.delivered_n == 2 && A.delivered_n == 1
          && B.delivered_len[0] == (int)sizeof(msg_cq) - 1
-         && memcmp(B.delivered[0], msg_cq, sizeof(msg_cq) - 1) == 0
+         && memcmp(station_delivered(&B, 0), msg_cq, sizeof(msg_cq) - 1) == 0
          && B.delivered_len[1] == 96
-         && memcmp(B.delivered[1], msg_bulk, 96) == 0
+         && memcmp(station_delivered(&B, 1), msg_bulk, 96) == 0
          && A.delivered_len[0] == (int)sizeof(msg_reply) - 1
-         && memcmp(A.delivered[0], msg_reply, sizeof(msg_reply) - 1) == 0;
+         && memcmp(station_delivered(&A, 0), msg_reply, sizeof(msg_reply) - 1) == 0;
     check("two-station session: all messages bit-exact", ok);
     check("rate ladder climbed off the EXTREME bootstrap",
           A.stats.last_rung > 0 && B.stats.last_rung > 0);
@@ -468,7 +468,7 @@ static void test_session(void)
         }
         ok = B.delivered_n == deliv0 + 1
              && B.delivered_len[deliv0] == 250
-             && memcmp(B.delivered[deliv0], big, 250) == 0;
+             && memcmp(station_delivered(&B, deliv0), big, 250) == 0;
         check("burst transfer: 250 bytes bit-exact", ok);
         {
             int used = A.stats.tx_frames + B.stats.tx_frames - tx0;
@@ -568,7 +568,7 @@ static void stream_case(const char *name, int peer_streams, int *frames_out,
     frames = pump(&A, &B, &t, 3000.0, 0);
 
     ok = B.delivered_n >= 1 && B.delivered_len[0] == 250
-         && memcmp(B.delivered[0], big, 250) == 0;
+         && memcmp(station_delivered(&B, 0), big, 250) == 0;
     check(name, ok);
     printf("  %s: %d frames on air, frag %d B, stream_ok=%d\n", name, frames,
            A.btx.frag_size, A.btx.stream_ok);
@@ -752,8 +752,7 @@ static int engage_transfer(station_t *C, double *t, const uint8_t *msg,
 {
     static int16_t air[2000];
     int k;
-    C->btx.active = 0;
-    C->cur_bulk.active = 0;
+    station_abort_bulk(C); /* drop any transfer still in flight */
     station_submit(C, msg, len, QOS_BULK);
     for (k = 0; k < 40 && !C->btx.active; k++) {
         if (station_poll_tx(C, *t, 0, air, 2000) > 0)
@@ -851,6 +850,11 @@ int main(void)
     test_rto();
     test_burst_window();
     test_peer_stream_memory();
+    check("message store: no allocation refused, no slot double-freed",
+          station_pool_refused() == 0 && station_pool_double_free() == 0);
+    printf("  message store peak %d of %d slots\n",
+           station_pool_peak(), ST_POOL_SLOTS);
+
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

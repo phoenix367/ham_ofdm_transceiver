@@ -177,6 +177,20 @@ Cross-module invariants that are easy to break:
   unambiguous over +-fs/N and picks the right lag-N cycle. Do not remove
   it, and do not "fix" this in `_detect_zc` — the ZC stage was always
   answering correctly for the frequency it was given.
+- Station message storage is POOLED (`ST_POOL_SLOTS`, `cport/`): the
+  3x8 queue positions, the 16 delivered-log entries and the two
+  current messages hold a slot index, and payloads share one store.
+  Sizing by addressable positions instead cost 42x`ST_MSG_MAX`
+  (161 kB at the demo app's 4096). Consequences to respect: never
+  zero `delivered_n` by hand -- that strands slots, use
+  `station_delivered_reset`; free a slot exactly once and set its
+  handle to -1 (`msg_release` does both, and `pool_free` walks the
+  free list to catch the rest); a caller submitting a message in
+  several parts must check `station_pool_free` up front, since a full
+  store refuses `station_submit` the way a full queue always has. The
+  Python twin (`station.py`) does NOT mirror this -- it is an
+  allocation change with no behavioural effect, and the C suites
+  assert the counters stay zero.
 - One scratch arena serves the whole C modem (`cport/src/arena.h`).
   Two separate facts make it safe and BOTH must hold: the receiver's
   detect/demod/decode scratch is call-scoped (nothing survives the
