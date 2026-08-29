@@ -90,10 +90,31 @@ are required:
     # 3. attach
     openocd -f stm32h7-rbb.cfg
 
-Expect slow-but-workable throughput: remote_bitbang is one character per
-edge, so at 921600 baud the ceiling is around 90 k edges/s. Bulk flash
-writes stream through a RAM-resident loader and batch well; the reads
-are what cost.
+### Measured
+
+Bench-tested with the probe flashed and NO target wired:
+
+    2000 pipelined reads in 47 ms -> 42236 edges/s
+
+That is 92 % of the theoretical ceiling (a read is one character out and
+one back = 20 bits at 921600 baud -> 46080/s), so the serial link, not
+the ESP32, is the limit -- which is why the firmware does no bit-banging
+delays and `adapter speed` is absent from the config (OpenOCD reports
+"This adapter doesn't support configurable speed" for remote_bitbang).
+
+### What a correct un-wired run looks like
+
+Before connecting anything to the STM32, `openocd -f stm32h7-rbb.cfg`
+should reach the target and fail only there:
+
+    Info : remote_bitbang driver initialized
+    Error: JTAG scan chain interrogation failed: all ones
+
+"All ones" is TDO floating on its pull-up, i.e. everything from OpenOCD
+through the bridge, the serial link and the GPIOs is working and only
+the wires are missing. If you do NOT get this far -- if it cannot
+connect to localhost:3335 -- the problem is the bridge or the probe, not
+the wiring.
 
 ## Nothing works?
 
