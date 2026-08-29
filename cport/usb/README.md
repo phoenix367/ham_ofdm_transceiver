@@ -216,3 +216,41 @@ mid-frame); `station_on_tx_end()` never being called; and an unhandled
 SysTick that a catch-all fault handler treated as fatal (`ICSR` 0x80F,
 `CFSR`/`HFSR` zero) -- genuine faults now stop and report, unexpected
 interrupts are masked, counted and survived.
+
+## Flashed: the modem survives a reset
+
+`usb_main.c` runs from RAM over JTAG; `usb_flash_main.c` is the same
+device flashed to 0x08000000, so the board is a USB OFDM modem on
+power-up with no debugger involved.
+
+```bash
+make -C cport usbflash TINYUSB=/tmp/tinyusb CMSIS_H7=/tmp/cmsis_h7 CMSIS5=/tmp/cmsis5
+openocd -f tools/esp32-probe/stm32h7-rbb.cfg -c init -c halt \
+  -c "program cport/build/usb_flash.elf verify" -c exit
+```
+
+`target/startup_flash.c` brings up the 400 MHz clock, FPU and vector
+table from cold (the RAM images inherited all three from whatever was
+resident). Two changes from the RAM build:
+
+- **the station clock is SysTick, not DWT.** DWT's cycle counter is not
+  clocked without a debugger attached, so a standalone image that reads
+  it stalls the bus -- proven with the heartbeat, which froze on that
+  exact `ldr`.
+- **interrupts vector through the FLASH table.** `OTG_FS_Handler` and
+  `SysTick_Handler` in `usb_flash_main.c` are the strong definitions the
+  startup left weak; no RAM vector table.
+
+Verified: reset with nothing loaded, then `1209:0001` on the bus,
+beacon `stage 5` (mounted) with SysTick `ms` climbing, and the host
+driver opens it by serial and exchanges a message -- all with the
+debugger idle.
+
+**Reverting the board.** Flashing erased the resident firmware (54 KB,
+sector 0), backed up first to
+`~/Downloads/stm32h743_flash_sector0_backup.bin`:
+
+```bash
+openocd -f tools/esp32-probe/stm32h7-rbb.cfg -c init -c halt \
+  -c "flash write_image erase ~/Downloads/stm32h743_flash_sector0_backup.bin 0x08000000 bin" -c exit
+```

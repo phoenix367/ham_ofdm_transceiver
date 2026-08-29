@@ -102,15 +102,25 @@ void HardFault_Handler(void) ALIAS;
 void MemManage_Handler(void) ALIAS;
 void BusFault_Handler(void) ALIAS;
 void UsageFault_Handler(void) ALIAS;
+void SVC_Handler(void) ALIAS;       /* 11 */
+void PendSV_Handler(void) ALIAS;    /* 14 */
+void SysTick_Handler(void) ALIAS;   /* 15 -- an app that uses SysTick overrides it */
 void OTG_FS_Handler(void) ALIAS;    /* IRQ 101 */
 void OTG_HS_Handler(void) ALIAS;    /* IRQ 77  */
 
+/* A NULL vector is not the default handler -- an interrupt through it
+ * jumps to 0 and faults. Every position an app might enable must name a
+ * handler, so SysTick (15) and the OTG lines are filled here even though
+ * this file leaves them weak; the app provides the strong definition. */
 __attribute__((section(".isr_vector"), used))
 void (*const g_vectors[16 + 102])(void) = {
     (void (*)(void))&_estack,
     Reset_Handler,
     NMI_Handler, HardFault_Handler, MemManage_Handler,
     BusFault_Handler, UsageFault_Handler,
+    [11] = SVC_Handler,
+    [14] = PendSV_Handler,
+    [15] = SysTick_Handler,
     [16 + 77] = OTG_HS_Handler,
     [16 + 101] = OTG_FS_Handler
 };

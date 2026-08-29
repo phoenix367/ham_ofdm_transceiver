@@ -261,4 +261,23 @@ heartbeat: | $(BUILD)
 	    -o $(BUILD)/heartbeat_flash.elf
 	@$(QEMUSIZE) $(BUILD)/heartbeat_flash.elf
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat
+# Flash-resident USB modem: enumerates on power-up, station behind it,
+# SysTick clock (DWT is debugger-gated). Fetched trees, like usbfw.
+USBFLASH_SRC = target/startup_flash.c usb/usb_flash_main.c \
+               usb/usb_descriptors.c usb/bsp_stm32h7.c src/usb_proto.c \
+               src/usb_modem.c src/arena.c src/station.c src/link.c \
+               src/packets.c src/bits.c src/conv.c src/ldpc.c src/tx.c \
+               src/fft.c src/dsp.c \
+               $(TINYUSB)/src/tusb.c $(TINYUSB)/src/common/tusb_fifo.c \
+               $(TINYUSB)/src/device/usbd.c \
+               $(TINYUSB)/src/class/vendor/vendor_device.c \
+               $(TINYUSB)/src/portable/synopsys/dwc2/dcd_dwc2.c \
+               $(TINYUSB)/src/portable/synopsys/dwc2/dwc2_common.c
+
+usbflash: $(GEN) | $(BUILD)
+	$(FLASHCC) $(FLASHFLAGS) -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
+	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx \
+	    $(USBFLASH_SRC) -lm -o $(BUILD)/usb_flash.elf
+	@$(QEMUSIZE) $(BUILD)/usb_flash.elf
+
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash
