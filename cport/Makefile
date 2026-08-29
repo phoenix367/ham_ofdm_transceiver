@@ -386,13 +386,17 @@ ids:
 beacons:
 	@$(OCD2) -c init -c ab_beacons -c exit $(OCD_QUIET) | grep -aE 'stmA|stmB'
 
+# ab_flash uses verify_image, whose success is silent -- it throws on a
+# mismatch, so reaching "flashed and reset" IS the verification. Do not
+# grep for "Verified OK": that is `program`'s wording, it never appears
+# here, and an empty grep fails the target on a successful flash.
 flash-usb-a: usbflash
 	@$(OCD2) -c init -c "ab_flash stmA build/usb_flash.elf" -c exit $(OCD_QUIET) \
-	  | grep -aE 'Verified OK|Error'
+	  | grep -aE 'flashed and reset|Error'
 
 flash-usb-b: usbflash
 	@$(OCD2) -c init -c "ab_flash stmB build/usb_flash.elf" -c exit $(OCD_QUIET) \
-	  | grep -aE 'Verified OK|Error'
+	  | grep -aE 'flashed and reset|Error'
 
 # --- the ESP32 probe firmware itself -----------------------------------
 # esp32 core 3.x needs arduino-cli; the legacy `arduino` IDE answers
