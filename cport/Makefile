@@ -306,7 +306,12 @@ BACKUP   ?= $(HOME)/Downloads/stm32h743_flash_sector0_backup.bin
 OCD_QUIET = 2>&1 | grep -avE 'Translation from khz|reset-init|startup.tcl'
 
 bridge:
-	@if pgrep -f rbb_bridge.py >/dev/null; then echo "bridge already up"; else \
+	@# Do NOT test this with ps/pgrep for the script name: this recipe
+	@# expands $(BRIDGE) into its own command line, so any such pattern
+	@# matches the recipe's own shell and it reports "already up" forever
+	@# without ever starting anything. Ask the question we actually mean
+	@# -- is something listening where OpenOCD will connect?
+	@if ss -ltn 2>/dev/null | grep -q ':3335 '; then echo "bridge already up"; else \
 	  port=$$(ls /dev/ttyUSB* 2>/dev/null | head -1); \
 	  [ -n "$$port" ] || { echo "no /dev/ttyUSB* -- is the probe plugged in?"; exit 1; }; \
 	  echo "bridge on $$port"; \
