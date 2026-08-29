@@ -341,13 +341,35 @@ Two tight spots worth knowing before committing to a board:
   trim the ring (see `rx_stream.h` -- 288 KB is a detector timeout, not a
   frame length) or put it in AXI and give D2 to the peripherals.
 
-One caveat about sourcing: this datasheet's memory map (Table 7) covers
-the STM32H742xI/G only and defers the H743 map to RM0433. The H743 base
-addresses above -- in particular SRAM1/2/3 being CONTIGUOUS across
-0x3000 0000-0x3004 8000, which is what makes a single 288 KB `g_raw`
-placeable there -- come from RM0433, not from DS12110. They are
-consistent with the H742 bases in Table 7. Confirm against RM0433 before
-writing a linker script.
+### Confirmed on silicon
+
+DS12110's memory map (Table 7) covers the STM32H742xI/G only and defers
+the H743 to RM0433, so the table above started as datasheet + reference
+manual. It has since been READ OFF A LIVE PART over JTAG
+(`tools/esp32-probe`), which is what the linker script actually needs:
+
+| probe | result |
+|---|---|
+| `DBGMCU_IDC` @0x5C001000 | `0x20036450` -- DEV_ID 0x450, REV_ID 0x2003 (rev V) |
+| flash size @0x1FF1E880 | `0x0800` = **2048 KB** (so H743/H753, not the 128 KB H750) |
+| DTCM 0x2000 0000 | reads to 0x2001 FFFC -- **128 KB** |
+| AXI-SRAM 0x2400 0000 | reads to 0x2407 FFFC; **0x2408 0000 faults** -- **512 KB**, so H743 and not the 384 KB H742 |
+| D2 0x3000 0000 | reads at +0, +128K, +256K and +288K-4 -- SRAM1/2/3 are **one contiguous 288 KB block** |
+| D3 0x3800 0000 | reads to 0x3800 FFFC -- **64 KB** |
+| backup 0x3880 0000 | present |
+
+Total data-capable: 128 + 512 + 288 + 64 + 4 = **996 KB**, matching the
+1019904 B the placement above assumes, exactly.
+
+The D2 contiguity mattered most: it is what lets a single 294912-byte
+`g_raw` be placed there, and it was the one figure with no datasheet
+backing. It is now measured.
+
+One trap for anyone repeating this: **D2 and D3 SRAM are clock-gated and
+default to OFF.** The part under test had `RCC_AHB2ENR = 0`, so every
+read of 0x3000 0000 fails until SRAM1/2/3EN (bits 29-31) are set --
+which reads as "the memory is not there" rather than "the clock is off".
+Enable, probe, restore.
 
 ## Verdicts
 
@@ -381,5 +403,13 @@ scenarios pass with the fix.
 
 ## Pending for exactness
 
-On-target cycle counts (QEMU/board with DWT->CYCCNT) to replace the
-MAC-scaling assumptions; host perf counters were unavailable here.
+On-target cycle counts (DWT->CYCCNT) to replace the MAC-scaling
+assumptions; host perf counters were unavailable here, and QEMU is
+functional but not cycle-accurate.
+
+**Now unblocked**: `tools/esp32-probe` brings up JTAG against the real
+part through an ESP32 bit-banger and the packaged OpenOCD. The core
+halts, and OpenOCD reports 8 hardware breakpoints and 4 watchpoints --
+enough to instrument the acquisition burst directly. The link runs at
+42236 edges/s, which is slow for bulk flashing but irrelevant for
+reading a cycle counter.
