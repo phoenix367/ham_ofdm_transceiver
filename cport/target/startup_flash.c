@@ -28,6 +28,8 @@ void Default_Handler(void);
 #define RCC_PLLCKSELR (*(volatile uint32_t *)0x58024428u)
 #define RCC_PLLCFGR   (*(volatile uint32_t *)0x5802442Cu)
 #define RCC_PLL1DIVR  (*(volatile uint32_t *)0x58024430u)
+#define PWR_CR3       (*(volatile uint32_t *)0x5802480Cu)
+#define PWR_CSR1      (*(volatile uint32_t *)0x58024804u)
 #define PWR_D3CR      (*(volatile uint32_t *)0x58024818u)
 #define FLASH_ACR     (*(volatile uint32_t *)0x52002000u)
 #define SCB_VTOR      (*(volatile uint32_t *)0xE000ED08u)
@@ -38,10 +40,25 @@ void Default_Handler(void);
 #define RCC_CR_PLL1ON  (1u << 24)
 #define RCC_CR_PLL1RDY (1u << 25)
 #define PWR_D3CR_VOSRDY (1u << 13)
+#define PWR_CSR1_ACTVOSRDY (1u << 13)
 
 static void clock_init(void)
 {
-    /* VOS1 for 400 MHz, then wait for the regulator. */
+    /* Commit the power-supply config, THEN scale the voltage. A soft
+     * reset let this be skipped: the resident firmware had committed the
+     * supply, so ACTVOSRDY was already set and the first version -- which
+     * jumped straight to setting VOS -- passed. On a real COLD boot the
+     * supply is uncommitted (ACTVOSRDY = 0), VOSRDY can never assert, and
+     * the wait hangs. Measured on the part: PWR_CSR1 0x4000, stuck on
+     * that exact ldr.
+     *
+     * LDO supply here: set LDOEN, clear SDEN and BYPASS -- turning the
+     * cold default 0x46 into 0x42, the value the resident firmware used.
+     * The supply bits are write-once from reset. Wait for the supply to
+     * reach its scale (ACTVOSRDY) BEFORE selecting VOS1 for 400 MHz. */
+    PWR_CR3 = (PWR_CR3 & ~0x05u) | 0x02u;
+    while (!(PWR_CSR1 & PWR_CSR1_ACTVOSRDY))
+        ;
     PWR_D3CR = (PWR_D3CR & ~(3u << 14)) | (3u << 14);
     while (!(PWR_D3CR & PWR_D3CR_VOSRDY))
         ;
