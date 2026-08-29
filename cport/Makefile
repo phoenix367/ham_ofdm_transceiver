@@ -171,4 +171,29 @@ zcab: $(GEN) | $(BUILD)
 	@echo
 	@./$(BUILD)/zcab_anchored $(TRIALS)
 
-.PHONY: bench armsize qemu armmeas zcab
+# USB device firmware (TinyUSB). Third-party trees are fetched, not
+# vendored -- see usb/README.md.
+TINYUSB   ?= /tmp/tinyusb
+CMSIS_H7  ?= /tmp/cmsis_h7
+CMSIS5    ?= /tmp/cmsis5
+USB_RHPORT ?= 0
+
+USBFW_SRC = target/start.c usb/usb_main.c usb/usb_descriptors.c \
+            usb/bsp_stm32h7.c src/usb_proto.c \
+            $(TINYUSB)/src/tusb.c $(TINYUSB)/src/common/tusb_fifo.c \
+            $(TINYUSB)/src/device/usbd.c \
+            $(TINYUSB)/src/class/vendor/vendor_device.c \
+            $(TINYUSB)/src/portable/synopsys/dwc2/dcd_dwc2.c \
+            $(TINYUSB)/src/portable/synopsys/dwc2/dwc2_common.c
+
+usbfw: | $(BUILD)
+	$(QEMUCC) -std=c99 -O2 -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 \
+	    -mfloat-abi=hard -ffunction-sections -fdata-sections \
+	    -Isrc -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
+	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx \
+	    -DOFDM_USB_RHPORT=$(USB_RHPORT) \
+	    -nostartfiles -specs=nano.specs -T target/stm32h743_usb.ld \
+	    -Wl,--gc-sections $(USBFW_SRC) -o $(BUILD)/usb_bringup.elf
+	@$(QEMUSIZE) $(BUILD)/usb_bringup.elf
+
+.PHONY: bench armsize qemu armmeas zcab usbfw
