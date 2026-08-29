@@ -237,8 +237,76 @@ block); a smaller block trades RAM for 8x the memmove traffic.
 So an H743-class part, unless a deployment drops EXT frames AND the
 ring shrinks with a lower bootstrap mode.
 
-What has NOT changed: flash is comfortable at 50 KB against 1 MB, and
+What has NOT changed: flash is comfortable at 62 KB against 1 MB, and
 the CPU projections stand.
+
+## Target fit: STM32H743VI -- and it can run entirely out of RAM
+
+Checked against DS12110 Rev 11 (LQFP100, `I` = 2 MB flash). The RAM is
+1060 KB but it is SEVEN separate blocks, which is what decides the
+answer -- the totals were never the hard part:
+
+| Block | Size | Base | Notes |
+|---|---|---|---|
+| ITCM | 64 KB | 0x0000 0000 | 0 wait state, 64-bit fetch (DS §3.3.2) |
+| DTCM | 128 KB | 0x2000 0000 | 0 wait state, 2x 64 KB on 2x32-bit ports |
+| AXI-SRAM | 512 KB | 0x2400 0000 | D1; the only block > 288 KB |
+| SRAM1+2+3 | 288 KB | 0x3000 0000 | D2, contiguous |
+| SRAM4 | 64 KB | 0x3800 0000 | D3 |
+| Backup | 4 KB | 0x3880 0000 | retained in Standby/VBAT |
+
+Data-capable total (all but ITCM): **1019904 B**. Measured `.bss`:
+
+| Configuration | `.bss` | Fits? |
+|---|---|---|
+| cport defaults, no EXT frames | 706256 | yes, 306 KB spare |
+| cport defaults + EXT frames | 942800 | yes, 75 KB spare |
+| demoapp settings, no EXT frames | 892396 | yes, 125 KB spare |
+| demoapp settings + EXT frames | 1128940 | **no**, over by 109 KB |
+
+(demoapp settings = `ST_MSG_MAX=4096 ST_ASM_MAX=8192
+BURST_STREAM_MAX=16`, which take `g_st` from 28 KB to 193 KB. That is an
+application queue budget, not a PHY cost.)
+
+**Code in RAM: yes.** The image is 62009 B against ITCM's 65536 -- 94.6 %
+full, 3527 B spare. Only ~32 KB of that is instructions; the other
+~29 KB is const tables (NCO_COS, the LDPC graph, preamble ROM blocks),
+which can stay in flash and leave ITCM half empty. ITCM/DTCM are
+volatile, so the boot path is flash -> MDMA copy -> jump (DS §3.3.2
+names MDMA for exactly this; §3.4 also allows BOOT_ADDx to point
+directly at any RAM address).
+
+A placement that works, demoapp settings without EXT frames:
+
+| Block | Used | Holds |
+|---|---|---|
+| ITCM | 62009 / 65536 | all code |
+| DTCM | 130996 / 131072 | `g_blk`, FEC and LDPC scratch |
+| AXI-SRAM | 466488 / 524288 | `ofdm_arena_store`, `g_st`, LLRs |
+| D2 | 294912 / 294912 | `g_raw` |
+| SRAM4 | 0 / 65536 | free -- stack, heap, codec DMA |
+
+Two tight spots worth knowing before committing to a board:
+
+- **`ofdm_arena_store` is 131584 B: 128 KB plus 512.** It therefore fits
+  neither DTCM nor a single 128 KB D2 bank, and the hottest scratch in
+  the receiver is pushed out of zero-wait-state memory into AXI. The 512
+  is `CP_LEN` -- demod sizes the arena at 4*(CP_LEN + 64*FFT_BINS)*4.
+  Streaming eval_hyp's derotation per tile would cut demod to 65792 and
+  land the arena on 131072 exactly (decode binds), which is DTCM to the
+  byte.
+- **`g_raw` is 294912 B, which is all 288 KB of D2 with nothing left.**
+  D2 is where the codec's DMA descriptors would naturally live. Either
+  trim the ring (see `rx_stream.h` -- 288 KB is a detector timeout, not a
+  frame length) or put it in AXI and give D2 to the peripherals.
+
+One caveat about sourcing: this datasheet's memory map (Table 7) covers
+the STM32H742xI/G only and defers the H743 map to RM0433. The H743 base
+addresses above -- in particular SRAM1/2/3 being CONTIGUOUS across
+0x3000 0000-0x3004 8000, which is what makes a single 288 KB `g_raw`
+placeable there -- come from RM0433, not from DS12110. They are
+consistent with the H742 bases in Table 7. Confirm against RM0433 before
+writing a linker script.
 
 ## Verdicts
 
@@ -247,9 +315,11 @@ the CPU projections stand.
   workable but tight; the planned FFT overlap-save correlation (~10×)
   brings it to ~5 % if EXTREME-on-M4 is wanted.
 - **G3 (≤ 60 % load, RAM within target)**: load **PASS**; RAM
-  **QUALIFIED** — see "Target fit" above. The measured three-mode image
-  is 699 KB without EXT frames and 929 KB with, so it needs a ~1 MB
-  part (STM32H743 class) rather than the H723xG named as the target.
+  **PASS on STM32H743VI**, fail on the H723xG originally named. The
+  measured three-mode image is 690 KB without EXT frames and 921 KB
+  with, against 996 KB of data-capable RAM on the H743VI -- which also
+  takes the whole 62 KB image into its 64 KB ITCM, so the firmware can
+  run entirely out of RAM. See "Target fit: STM32H743VI".
   Single-mode figures are NOT a way out: rung 0 is EXTREME, so a build
   without it cannot bootstrap or recover a link at all. The path back to
   an H723 is right-sizing the per-instance block summaries (~116 KB) and
