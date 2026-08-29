@@ -55,48 +55,64 @@ DIVP1=/2, i.e. **HSE x 16**).
 | `ldpc_encode` 128 bits | 7598 | 59 /bit | 0.019 ms |
 | **`ldpc_decode_int` 128 bits, 60 iters** | 21885598 | — | **54.7 ms** |
 
-### The result that matters: memory, not arithmetic
+### Where the ZC window lives does NOT matter
 
-The same complex-MAC correlation loop, run twice over identical data,
-differing only in where the operands live:
+A correlation shaped like the real ZC scan (512-tap kernel, 4096
+offsets, 8.4 M complex MACs), run over byte-identical data in each of
+the three SRAMs the window could occupy:
 
-| operands in | cycles / 2048 iters | per complex MAC | MMAC/s @400 |
-|---|---|---|---|
-| DTCM (zero wait state) | 26640 | **3.25** | **123** |
-| AXI-SRAM (D-cache on) | 106508 | **13.01** | **31** |
-
-**A factor of 4, from placement alone.** The Cortex-M7's D-cache is
-16 kB; the four operand arrays are 64 kB and are streamed, so the AXI
-case misses on essentially every line. The compiler is not the problem
--- the loop does emit `smull`/`smlal`, and `hilbert_analytic` emits
-`smlalbb`, the optimal 16x16 MAC. (Also checked and found NOT to matter:
-putting `.rodata` in ITCM, where data reads could contend with
-instruction fetch. Measured difference 1.00x.)
-
-Re-scaling the projection with measured throughput (x480/400):
-
-| Load | MMAC/s | old assumption (400 MMAC/s) | operands in DTCM (148) | operands in AXI (37) |
+| window in | D-cache on | D-cache off | MPU off | best cyc/MAC |
 |---|---|---|---|---|
-| Continuous (Hilbert + tone detect + tracked demod) | ≤ 2.5 | <1 % | 1.7 % | 6.8 % |
-| EXTREME first symbol, gated / full grid | 2.4 / 13 | <1 / 3 % | 1.6 / 8.8 % | 6.5 / **35 %** |
-| EXTREME ZC acquisition (amortized over 5.8 s) | ~40 | 10 % | 27 % | **108 %** |
-| NORMAL/ROBUST ZC acquisition | ≤ 4 | 1 % | 2.7 % | 11 % |
+| DTCM | 3.27 | 3.27 | -- | **3.27** |
+| AXI-SRAM | 7.52 | 7.52 | **3.27** | **3.27** |
+| D2 SRAM1-3 | 3.27 | 8.52 | 3.27 | **3.27** |
 
-**EXTREME acquisition does not fit if its operands stream from AXI**, and
-it cannot avoid doing so: the ZC scan reads `g_raw`, which is 288 kB and
-therefore cannot live in the 128 kB DTCM. The gap between the two
-columns is the real design question this port now faces, and it is a
-memory-hierarchy question, not a MIPS one.
+**All three are identical -- 3.27 cycles per complex MAC, 147 MMAC/s at
+480 MHz.** The scan advances one sample per offset and re-reads 512, so
+reuse is ~99.8 % and the 16 kB D-cache absorbs it from any backing SRAM.
+DTCM buys nothing here; the D2 row shows the cache doing the work
+(2.6x when it is turned off).
+
+**The AXI column is a trap, not a property of the part.** The firmware
+resident on the test board leaves an MPU region over AXI-SRAM
+(0x24000000, 512 kB) with TEX=0 C=1 B=0 **S=1** -- Normal, write-through,
+*shareable*. The Cortex-M7 has no cache coherency unit, so a shareable
+Normal region is effectively uncached, which is exactly what "the
+D-cache wins 1.00x on AXI" measured. Disable that MPU and AXI matches
+the others. STM32H7 projects mark AXI-SRAM shareable/non-cacheable
+routinely, to sidestep DMA coherency -- so **an MPU misconfiguration
+costs 2.3x on the acquisition hot path**, and is worth checking before
+blaming the algorithm.
+
+Re-scaling the projection with measured throughput (147 MMAC/s @480):
+
+| Load | MMAC/s | old assumption (400 MMAC/s) | MEASURED |
+|---|---|---|---|
+| Continuous (Hilbert + tone detect + tracked demod) | ≤ 2.5 | <1 % | **1.7 %** |
+| EXTREME first symbol, gated / full grid | 2.4 / 13 | <1 / 3 % | **1.6 / 8.8 %** |
+| EXTREME ZC acquisition (amortized over 5.8 s) | ~40 | 10 % | **27 %** |
+| NORMAL/ROBUST ZC acquisition | ≤ 4 | 1 % | **2.7 %** |
+
+So the assumption was ~2.7x optimistic, and the load still fits: EXTREME
+acquisition costs about a quarter of a 480 MHz M7, not a tenth.
+
+**A proposal this killed.** An arena split -- detect's 125956-byte region
+into DTCM, demod/decode left in AXI -- was designed and costed at
++126 kB before being measured. It buys nothing: the correlation runs at
+DTCM speed from any SRAM once the MPU is right. It is not implemented,
+and should not be.
+
+Also checked and found NOT to matter: `.rodata` in ITCM, where data
+reads could contend with instruction fetch (1.00x).
 
 Caveats, so this is not over-read:
-- **D2 SRAM is not measured.** The AXI column is AXI-SRAM; `g_raw` is
-  placed in D2, which sits further out on the AHB matrix and is likely
-  worse, not better.
-- The higher-level stages (full acquisition, tracked demod) are not yet
-  measured on target -- they need the streaming receiver's ~699 kB of
-  `.bss` spread across four regions, which the RAM-resident bench does
-  not yet do. The host-relative ratios above are analytic MAC counts,
-  not measurements.
+- These are primitive-level counts. The higher-level stages (full
+  acquisition, tracked demod) are not yet measured on target -- they
+  need the streaming receiver's ~699 kB of `.bss` spread across four
+  regions, which the RAM-resident bench does not do. The MMAC/s figures
+  they are scaled against remain analytic.
+- A pattern with NO reuse (streaming a buffer once) is a different
+  regime and is genuinely bandwidth-bound; nothing here measures it.
 - Cortex-M4 numbers remain projections; nothing was run on an M4.
 
 ## Memory

@@ -17,6 +17,7 @@ MEMORY
     ITCM  (rx)  : ORIGIN = 0x00000000, LENGTH = 64K
     DTCM  (rw)  : ORIGIN = 0x20000000, LENGTH = 128K
     AXI   (rw)  : ORIGIN = 0x24000000, LENGTH = 512K
+    D2    (rw)  : ORIGIN = 0x30000000, LENGTH = 288K
 }
 
 /* Fixed, so the host can dump results without parsing the ELF. */
@@ -69,6 +70,12 @@ SECTIONS
         . = ALIGN(8);
         _bss_end = .;
     } > AXI
+
+    /* D2 SRAM1+2+3. Clock-gated: the bench turns it on before use. */
+    .d2_bss (NOLOAD) : {
+        *(.d2_bss*)
+        . = ALIGN(8);
+    } > D2
 
     /DISCARD/ : { *(.ARM.exidx*) *(.comment) }
 }

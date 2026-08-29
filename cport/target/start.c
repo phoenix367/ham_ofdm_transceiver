@@ -46,7 +46,14 @@ void _start(void)
     SCB_ICIALLU = 0;
     dcache_invalidate_all();
     __asm__ volatile("dsb; isb");
+#ifdef NO_DCACHE
+    /* D-cache left OFF on purpose: with it on, a hit hides which memory
+     * the data came from. Disabling it measures each memory's raw read
+     * latency, which is what decides where the ZC window should live. */
+    SCB_CCR |= CCR_IC;
+#else
     SCB_CCR |= CCR_IC | CCR_DC;
+#endif
     __asm__ volatile("dsb; isb");
 
     main();
