@@ -12,6 +12,23 @@ support this: `build/armbench.elf` (`make` in bench), `build/usb_bringup.elf`
 with `target/stm32h743_usb.ld` and reporting through a **beacon struct at
 0x20000000** (DTCM) read back with `mdw`.
 
+## Shortcuts
+
+`cport/` has make targets for the common operations, all assuming the
+bridge is up:
+
+```bash
+make bridge            # start the JTAG bridge (autodetects the tty)
+make reset             # SYSRESETREQ -- reboots whatever is flashed
+make flash-usb         # build + flash the USB modem (survives reset)
+make flash-heartbeat   # build + flash the cold-boot proof
+make run-armbench      # reset, load a RAM image, run, dump the beacon
+make backup-flash / restore-flash
+make bridge-stop
+```
+
+The steps below are what those wrap, for when you need to vary them.
+
 ## 1. Bridge up
 
 ```bash

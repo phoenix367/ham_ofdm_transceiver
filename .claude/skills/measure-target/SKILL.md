@@ -21,7 +21,8 @@ figure anyone can check**. Output is `size` plus the `.bss` objects over
 
 ## Cycles: `bench/armbench.c`
 
-Built with the RAM linker script, run via `target-jtag`, results in the
+Built with the RAM linker script, run via `make run-<name>` (or the
+`target-jtag` steps by hand), results in the
 beacon at 0x20000000 as (name, min cycles over reps, units). Add a case
 with the `MEASURE(reps, units, "label", body)` macro. Minimum over
 repetitions is the honest estimator: interrupts only ever add cycles.

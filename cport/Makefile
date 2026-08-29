@@ -280,4 +280,85 @@ usbflash: $(GEN) | $(BUILD)
 	    $(USBFLASH_SRC) -lm -o $(BUILD)/usb_flash.elf
 	@$(QEMUSIZE) $(BUILD)/usb_flash.elf
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash
+# --- programming and running on the board over the ESP32 JTAG probe ---
+#
+# These assume the bridge is up (`make bridge`). The board's flash holds
+# the firmware; RAM images are loaded and run without touching flash.
+# Every value the images need at reset is in target/startup_flash.c.
+#
+#   make bridge            start the JTAG bridge (autodetects the tty)
+#   make flash-usb         build + flash the USB modem (survives reset)
+#   make flash-heartbeat   build + flash the cold-boot proof
+#   make run-armbench      reset, load a RAM image, run it, dump the beacon
+#   make reset             SYSRESETREQ (re-boots whatever is flashed)
+#   make backup-flash      save sector 0 before overwriting it
+#   make restore-flash     write the backup back
+#   make bridge-stop
+
+OCD_CFG  ?= ../tools/esp32-probe/stm32h7-rbb.cfg
+OCD       = openocd -f $(OCD_CFG)
+BRIDGE    = ../tools/esp32-probe/rbb_bridge.py
+BACKUP   ?= $(HOME)/Downloads/stm32h743_flash_sector0_backup.bin
+
+# The reset-init event tries to set an adapter speed the bitbang probe
+# has none of; that error is harmless and is filtered so a real failure
+# still shows.
+OCD_QUIET = 2>&1 | grep -avE 'Translation from khz|reset-init|startup.tcl'
+
+bridge:
+	@if pgrep -f rbb_bridge.py >/dev/null; then echo "bridge already up"; else \
+	  port=$$(ls /dev/ttyUSB* 2>/dev/null | head -1); \
+	  [ -n "$$port" ] || { echo "no /dev/ttyUSB* -- is the probe plugged in?"; exit 1; }; \
+	  echo "bridge on $$port"; \
+	  $(BRIDGE) --port $$port --baud 921600 --listen 3335 >/tmp/ofdm_bridge.log 2>&1 & \
+	  for i in $$(seq 1 15); do grep -q waiting /tmp/ofdm_bridge.log && break; sleep 1; done; \
+	  tail -1 /tmp/ofdm_bridge.log; \
+	fi
+
+bridge-stop:
+	@pkill -f rbb_bridge.py && echo "bridge stopped" || echo "no bridge running"
+
+reset:
+	@$(OCD) -c init -c halt -c "mww 0xE000ED0C 0x05FA0004" -c exit $(OCD_QUIET) | tail -1; \
+	  echo "reset issued (SYSRESETREQ)"
+
+# program a flash image and verify. $1 = elf
+define do_flash
+	@echo "flashing $(1) ..."; \
+	  $(OCD) -c init -c halt -c "program $(1) verify" -c exit $(OCD_QUIET) \
+	    | grep -aE 'Verified OK|Error' || { echo "FLASH FAILED"; exit 1; }
+endef
+
+flash-heartbeat: heartbeat
+	$(call do_flash,$(BUILD)/heartbeat_flash.elf)
+
+flash-usb: usbflash
+	$(call do_flash,$(BUILD)/usb_flash.elf)
+	@echo "reset the board (make reset, or replug USB) to boot it"
+
+# load a RAM image, run to its bkpt, dump the beacon. make run-armbench etc.
+# clean reset first: RAM images inherit the resident clock and a stale
+# peripheral/MPU state from the previous run wedges them.
+run-%:
+	@elf=$$(ls $(BUILD)/$*.elf $(BUILD)/$**.elf 2>/dev/null | head -1); \
+	  [ -n "$$elf" ] || { echo "no $(BUILD)/$*.elf -- build it first"; exit 1; }; \
+	  echo "reset + load $$elf"; \
+	  $(OCD) -c init -c halt -c "mww 0xE000ED0C 0x05FA0004" -c exit $(OCD_QUIET) >/dev/null; \
+	  sleep 3; \
+	  $(OCD) -c init -c halt -c "load_image $$elf" -c "reg sp 0x20020000" \
+	    -c "reg pc 0x00000000" -c resume -c "wait_halt 120000" \
+	    -c "mdw 0x20000000 8" -c exit $(OCD_QUIET) \
+	    | grep -aE 'downloaded|halted due|^0x2000'
+
+backup-flash:
+	@echo "saving sector 0 to $(BACKUP) (~3.5 min over the bitbang probe)"; \
+	  $(OCD) -c init -c "dump_image $(BACKUP) 0x08000000 0x20000" -c exit $(OCD_QUIET) \
+	    | grep -aE 'dumped|Error'
+
+restore-flash:
+	@[ -f $(BACKUP) ] || { echo "no backup at $(BACKUP)"; exit 1; }; \
+	  echo "restoring $(BACKUP) to 0x08000000"; \
+	  $(OCD) -c init -c halt -c "flash write_image erase $(BACKUP) 0x08000000 bin" \
+	    -c exit $(OCD_QUIET) | grep -aE 'wrote|Error'
+
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash

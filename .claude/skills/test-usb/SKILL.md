@@ -29,7 +29,8 @@ Not vendored -- `cport/usb/README.md` has the three `git clone` lines.
 
 ## 3. On the board
 
-Load `build/usb_bringup.elf` via `target-jtag`, plug a **USB-C-to-A**
+RAM bring-up (`make run-usb_bringup` after `make usbfw`), or flash it so
+it survives reset (`make flash-usb && make reset`). Plug a **USB-C-to-A**
 cable from the board's own connector, then:
 
 ```bash
