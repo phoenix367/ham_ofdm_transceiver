@@ -295,9 +295,28 @@ Cross-module invariants that are easy to break:
   `push_ms_max`, never by assuming.
 - Opening a receiver per mode is a CPU budget, not a free choice: each
   runs its own detector over every sample and EXTREME is much the most
-  expensive. demoapp opens all three because a workstation can afford
-  it; on the part `OFDM_RX_MODES` (Makefile `RXMODES`) selects them and
-  the default is EXTREME only.
+  expensive. demoapp can afford all three; the part cannot, so
+  `usb_radio_main.c` opens all three and MUTES the ones it does not
+  need (`rxs_set_active`). A muted instance still consumes every sample
+  -- it must, the raw ring is shared and indexed by each instance's own
+  abs_n, so an instance that stopped counting would write the others'
+  history at the wrong offsets -- and skips only the per-block
+  detection, which is where the cost is. Unmuting rearms the search
+  rather than resuming a state machine that was mid-frame when it went
+  quiet.
+- Which modes are active follows the NEGOTIATED rung (`follow_rung`),
+  and two extras are kept alongside `ladder_mode(ctl.my_req)` for
+  reasons that are not optional. EXTREME always: it is rung 0 (the
+  bootstrap), it is where the ladder decays to after RX_STALE_S of
+  silence, and it is what a peer that cannot hear us falls back to.
+  And the mode we LAST DECODED on: my_req is a request, not an
+  observation, so between raising it and the peer acting on it the peer
+  is still transmitting at the old mode -- dropping that mode
+  immediately would make us deaf for exactly the exchange that would
+  have confirmed the change, and the link would oscillate. Measured on
+  the wire: both boards idle on EXTREME alone (one detector), and after
+  the ladder climbed to my_req 9/7 they listen on NORMAL+EXTREME, with
+  cap_overruns 0 throughout.
 - A RAM bench inherits the machine state of the firmware it displaces,
   and the M7 vector table lives in CACHED SRAM. `vectors_set`/
   `vectors_install` (`cport/target/vectors.c`) MUST clean by MVA

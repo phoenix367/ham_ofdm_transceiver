@@ -73,6 +73,7 @@ typedef struct {
     uint32_t adc_ready, rxs_ready;
     int32_t  last_rung, last_snr_q8;
     uint32_t loops, rx_samples, push_ms_max;
+    uint32_t rx_active_mask, my_req, follow_changes;
 } beacon_t;
 volatile beacon_t g_beacon __attribute__((section(".results"), used));
 enum { ST_ENTER = 1, ST_SUPPLY, ST_ANALOG, ST_RXS, ST_TUSB, ST_LOOP,
@@ -369,11 +370,68 @@ static int channel_busy(double now)
  * EXTREME one is much the most expensive (its detection window is 64x
  * a NORMAL symbol). demoapp opens all three because a workstation can
  * afford to; this part measurably cannot -- see the header of
- * rx_modes_open(). Bit 0 NORMAL, bit 1 ROBUST, bit 2 EXTREME. */
+ * follow_rung(). Bit 0 NORMAL, bit 1 ROBUST, bit 2 EXTREME.
+ *
+ * All of them are OPENED; which are ACTIVE follows the negotiated rung
+ * (see follow_rung). A muted instance still consumes every sample --
+ * it has to, the raw ring is shared and indexed by abs_n -- but skips
+ * the per-block detection, which is where the cost is. */
 #ifndef OFDM_RX_MODES
 #define OFDM_RX_MODES 0x7
 #endif
+/* Seconds of silence after which the mode we last heard the peer on
+ * stops being evidence of anything. Above the ladder's own staleness
+ * decay, so the request has already fallen back to EXTREME by then. */
+#define RX_MODE_STALE_S 120.0
 static rxs_t *g_rxs[3];
+
+/* Listen where the peer is actually going to transmit.
+ *
+ * The peer transmits at the rung WE asked it for -- ctl.my_req, the
+ * inbound half of the link control word -- so that is the mode to
+ * listen for. Two more are kept active alongside it, and both matter:
+ *
+ *   EXTREME, always. It is rung 0, so it is the bootstrap; it is where
+ *   the ladder decays to after RX_STALE_S of silence; and it is what a
+ *   peer that cannot hear us falls back to. Muting it would make the
+ *   link undiscoverable and unrecoverable exactly when recovery is
+ *   needed.
+ *
+ *   The mode we LAST decoded on. my_req is a request, not an
+ *   observation: the peer only moves once it has received it, so
+ *   between our raising the request and the peer acting on it, the peer
+ *   is still transmitting at the old mode. Dropping that mode the
+ *   instant we ask for a different one makes us deaf for exactly the
+ *   exchange that would have confirmed the change -- we would time out,
+ *   the request would decay, and the link would oscillate. Keeping it
+ *   until the peer actually moves (or until it goes stale) costs one
+ *   muted-to-active detector during the handover and nothing after.
+ *
+ * In the settled bootstrap state -- my_req 0, last decode EXTREME --
+ * this is a single active detector, which is what makes the whole thing
+ * fit real time on this part. */
+static int g_last_rx_mode = -1;
+static double g_last_rx_t = -1e9;
+
+static void follow_rung(double now)
+{
+    int want = 1 << (int)MODE_EXTREME;
+    int i, req = g_st.ctl.my_req;
+
+    if (req < 0)
+        req = 0;
+    want |= 1 << (int)ladder_mode(req);
+    if (g_last_rx_mode >= 0 && now - g_last_rx_t < RX_MODE_STALE_S)
+        want |= 1 << g_last_rx_mode;
+
+    if ((uint32_t)want != g_beacon.rx_active_mask)
+        g_beacon.follow_changes++;
+    g_beacon.rx_active_mask = (uint32_t)want;
+    g_beacon.my_req = (uint32_t)req;
+    for (i = 0; i < 3; i++)
+        if (g_rxs[i])
+            rxs_set_active(g_rxs[i], (want >> i) & 1);
+}
 
 int main(void)
 {
@@ -509,6 +567,8 @@ int main(void)
                         continue;
                     g_beacon.rx_decodes++;
                     g_beacon.last_snr_q8 = (int32_t)(ev.snr_db * 256.0);
+                    g_last_rx_mode = i;      /* the index IS the mode */
+                    g_last_rx_t = t;
                     station_on_decoded(&g_st, ev.bits, ev.pkt_bits_n,
                                        ev.snr_db,
                                        (double)ev.cfo_word * 12000.0
@@ -526,6 +586,7 @@ int main(void)
             slow = g_ms;
             if (g_ms <= 500u)
                 g_cap_r = g_cap_w;       /* discard the settling transient */
+            follow_rung(t);
             if (!g_tx_on && !g_txs) {
                 int air = station_poll_tx(&g_st, t, channel_busy(t),
                                           (int16_t *)air_dummy,

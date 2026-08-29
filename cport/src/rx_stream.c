@@ -100,6 +100,7 @@ struct rxs_state {
 
     /* state machine */
     enum { S_SEARCH, S_ZC_WAIT, S_HEADER, S_DATA } st;
+    int active;               /* 0 = consume samples, skip the work */
     int crossed, decline;
     int64_t best_metric;
     int64_t best_off_blk, min_blk;
@@ -314,6 +315,7 @@ rxs_t *rxs_open(link_mode_t mode, int calibrate)
     r->zc_win = r->demod.symbol_len + 2 * ZC_ANCHOR_MARGIN_BLK * r->B;
 #endif
     r->st = S_SEARCH;
+    r->active = 1;
     r->best_metric = -1;
     r->last_eval_blk = -1;
     r->ring_hwm = 0;
@@ -874,20 +876,36 @@ static int advance(rxs_t *r, rxs_event_t *ev)
     }
 }
 
+void rxs_set_active(rxs_t *r, int active)
+{
+    if (!r || r->active == !!active)
+        return;
+    r->active = !!active;
+    if (r->active)
+        rearm(r, r->abs_n);   /* start looking from now, not from then */
+}
+
+int rxs_active(const rxs_t *r) { return r ? r->active : 0; }
+
 int rxs_push(rxs_t *r, const int16_t *chunk, int n, rxs_event_t *ev)
 {
     int got = 0, m;
     arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
     for (m = 0; m < n; m++) {
+        /* the ring write and the abs_n advance happen even when muted:
+         * the ring is shared and indexed by abs_n, so an instance that
+         * stopped counting would corrupt the others' history */
         g_raw[(int)(r->abs_n % RXS_RAW_RING_LEN)] = chunk[m];
         r->abs_n++;
+        if (!r->active)
+            continue;
         if ((r->abs_n % r->B) == 0) {
             block_summary(r, r->abs_n / r->B - 1);
             if (!got)
                 got = advance(r, ev);
         }
     }
-    if (!got)
+    if (r->active && !got)
         got = advance(r, ev);
     return got;
 }
@@ -896,6 +914,8 @@ int rxs_flush(rxs_t *r, rxs_event_t *ev)
 {
     static const int16_t zeros[512];
     int left = r->demod.symbol_len, got = 0;
+    if (!r->active)
+        return 0;
     arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
     while (left > 0 && !got) {
         int n = left > 512 ? 512 : left;

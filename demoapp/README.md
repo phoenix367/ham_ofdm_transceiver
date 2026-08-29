@@ -169,6 +169,15 @@ frame, replied, and A decoded the reply --- a complete ARQ exchange over
 the wire. 36 s end to end, which is what an EXTREME bootstrap frame
 (~19.5 s of air) plus decode latency costs.
 
+The rate ladder then does its job: a second message over the same wire
+took **15 s instead of 35 s**, and both boards' receivers followed the
+negotiated rung up from EXTREME alone to NORMAL+EXTREME (`my_req` 9 and
+7, SNR +15.0 and +9.7 dB) with no dropped samples. Which modes a board
+listens for is a CPU budget on this part --- three concurrent detectors
+do not fit real time --- so the firmware mutes the ones the negotiated
+rung says it does not need, while always keeping EXTREME for bootstrap
+and fallback.
+
 ## Real radio: `sdr_driver.py` (HackRF One and other SoapySDR devices)
 
 The apps talk to a *driver* over a socket, so the channel behind it can be

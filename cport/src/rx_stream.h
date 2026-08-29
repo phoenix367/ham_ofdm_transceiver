@@ -78,6 +78,24 @@ int64_t rxs_ring_miss(const rxs_t *r);
 
 rxs_t *rxs_open(link_mode_t mode, int calibrate);
 
+/* Mute a receiver without closing it.
+ *
+ * Every open instance shares ONE raw sample ring and indexes it by its
+ * OWN abs_n, so instances must all be fed the same samples or they
+ * write each other's history at the wrong offsets -- feeding a subset
+ * is not an option. A muted instance therefore still consumes every
+ * sample (ring write, abs_n advance) and skips only the per-block
+ * detection, which is where essentially all of the cost is.
+ *
+ * Unmuting REARMS the search rather than resuming: a state machine that
+ * was mid-frame when it went quiet would otherwise carry on decoding a
+ * frame whose middle it never examined.
+ *
+ * Instances start active, so a caller that never calls this behaves
+ * exactly as before. */
+void rxs_set_active(rxs_t *r, int active);
+int  rxs_active(const rxs_t *r);
+
 /* feed samples in arbitrary chunks; returns 1 when ev was filled */
 int rxs_push(rxs_t *r, const int16_t *chunk, int n, rxs_event_t *ev);
 
