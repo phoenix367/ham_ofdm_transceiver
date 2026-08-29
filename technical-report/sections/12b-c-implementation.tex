@@ -299,17 +299,18 @@ instance only ever scans its own mode's window: 15/30/120 blocks.
     \toprule
     \textbf{Component} & \textbf{RAM} & \textbf{Sized by} \\
     \midrule
-    Shared raw \texttt{int16} ring & 288\,KB & EXTREME re-anchor
-                                               lookback (124\,478) \\
-    Scratch arena (3 phases unioned) & 129\,KB & EXTREME ZC geometry \\
+    Shared raw \texttt{int16} ring & 160\,KB & EXTREME re-anchor
+                                               lookback (67\,134) \\
+    Scratch arena (RX 3 phases $+$ TX) & 128.5\,KB & EXTREME ZC
+                                                     geometry \\
     Tone summaries, 3 instances & 94\,KB & each instance's own mode \\
     LLR buffers (\texttt{int32}) & 24\,KB & 192\,KB with EXT frames \\
-    Streaming transmitter & 10\,KB & one IFFT tile \\
-    Everything else & 154\,KB & --- \\
+    Message store (pooled) & 3\,KB & 12 slots, peak 6 measured \\
+    Everything else & 152\,KB & --- \\
     \midrule
-    \textbf{Total, three modes} & \textbf{699\,KB} & 929\,KB with EXT
+    \textbf{Total, three modes} & \textbf{561\,KB} & 793\,KB with EXT
                                                      frames \\
-    Transmit-only image & 28\,KB & \\
+    Transmit-only image & 27\,KB & \\
     \bottomrule
     \end{tabular}
 \end{table}
@@ -319,10 +320,11 @@ station at $\approx$453\,KB and concluded it fitted the STM32H723xG
 ($\approx$496\,KB usable data RAM) with margin. The linked image does
 not: 699\,KB without extended frames, 929\,KB with. The estimate had
 costed per-mode summaries while the code gave every instance the
-EXTREME count, and assumed a build without EXT frames. Both are now
-addressed, and the remaining floor --- 288\,KB ring $+$ 129\,KB arena
-$+$ 94\,KB summaries $=$ 511\,KB --- still exceeds the part. The
-conclusion is an H743-class device, not the H723xG.
+EXTREME count, and assumed a build without EXT frames. Both were
+addressed; three further reductions followed, described below and in
+Section~\ref{sec:cport_ontarget}, bringing the figure to 561\,KB. The
+conclusion is unchanged in kind --- an H743-class device, not the
+H723xG --- but the margin is now comfortable rather than absent.
 
 Nor is a single-mode build the way out, though the arithmetic is
 tempting. Rung~0 of the ladder is EXTREME, and rung~0 is where both
@@ -332,13 +334,251 @@ without EXTREME cannot acquire a link at all, nor recover one after a
 fade --- which is exactly when 64$\times$ tiling earns its cost.
 Per-mode sizing is a capability decision, not a memory knob.
 
+Three later reductions are worth separating because each has a
+different character. \textbf{The transmitter joined the arena}
+(26\,992\,B): a station is half duplex, so the streaming generator's
+state --- the one transmit buffer live across calls --- can never
+overlap a receive phase in time, and the arena did not have to grow to
+hold it. The assumption is checked rather than trusted: receive entry
+points stamp an owner tag and \texttt{txs\_pull} refuses to continue a
+generator whose state a receive phase overwrote. \textbf{Message
+storage was pooled} (161\,280\,B at the demonstrator's settings):
+\texttt{station\_t} had given each of the 42 positions that
+\emph{could} hold a message its own \texttt{ST\_MSG\_MAX} bytes ---
+24 queue slots, 16 delivered-log entries, two current messages --- which
+sizes RAM by the number of addressable positions rather than by how many
+messages can exist at once. The positions now hold a slot index into one
+store of 12; measured peak occupancy is 6, on a 14\,KB file transfer.
+\textbf{And the raw ring nearly halved} (128\,KB), for reasons that are
+a signal-processing story rather than a bookkeeping one, told in
+Section~\ref{sec:cport_ontarget}.
+
 What the exercise changed is less the total than its \emph{shape}.
 Nothing in Table~\ref{tab:cport_ram} now scales with frame length,
 capture length, or search-window length; every remaining entry is sized
-by a property of the waveform. The arena is also visibly balanced --- its
-three phases sit within 6\,kB of each other --- which is the signal that
-the union has no slack left: it costs the maximum, so no single phase
-can be shrunk profitably alone.
+by a property of the waveform. The arena is visibly balanced --- its
+receive phases sit within 6\,kB of each other --- which is the signal
+that the union has no slack left: it costs the maximum, so no single
+phase can be shrunk profitably alone.
+
+\subsection{On-Target Measurement, and What It Corrected}
+\label{sec:cport_ontarget}
+
+Every processor figure quoted so far in this report was a
+\emph{projection}: analytic multiply--accumulate counts scaled against
+an assumed sustained throughput of ``SMLAD-class, $2\times$ overhead
+margin: Cortex-M7 at 480\,MHz $\approx$ 400\,MMAC/s''. That assumption
+was the weakest line in the document, and it was wrong by a factor of
+2.7.
+
+\paragraph{Getting onto the silicon.}
+The measurements below were taken on an STM32H743 over JTAG, with an
+ESP32 development board as the debug probe: it bit-bangs OpenOCD's
+\texttt{remote\_bitbang} protocol, one ASCII character per pin edge,
+bridged from a serial port to a socket. This is slow --- 42\,236 edges
+per second, so a 52\,KB image takes 84 seconds to download --- but the
+probe is the part of the loop that does not need to be fast, and
+OpenOCD keeps its own target support. The benchmark runs entirely from
+RAM: OpenOCD loads it, points the core at the entry symbol, and reads a
+result structure back out of DTCM afterwards. The target's flash is
+never written.
+
+Reading the part first settled the memory map, which the datasheet
+(DS12110 Table~7) gives only for the H742 and defers otherwise:
+\texttt{DBGMCU\_IDC} $=$ \texttt{0x20036450} (revision~V), 2048\,KB of
+flash, 512\,KB of AXI-SRAM with \texttt{0x24080000} faulting, and ---
+the figure that mattered --- SRAM1/2/3 confirmed \emph{contiguous}
+across 288\,KB, which is what permits a single \texttt{g\_raw} to live
+there. A trap worth recording: D2 and D3 SRAM are clock-gated and reset
+to \emph{off}, so every read of \texttt{0x30000000} fails in a way that
+reads as absent memory rather than a disabled clock.
+
+\paragraph{Primitive costs.}
+Table~\ref{tab:cport_cycles} gives the measured cycle counts. The
+derived MAC throughput is 147\,MMAC/s at 480\,MHz, against the assumed
+400 --- so every load projection built on that figure scales up by
+$2.7\times$. They still fit: the continuous front end moves from under
+1\,\% of a 480\,MHz core to 1.7\,\%, and EXTREME acquisition from a
+projected 10\,\% to a measured 27\,\%.
+
+\begin{table}[htbp]
+    \centering
+    \caption{DWT cycle counts, STM32H743, code in ITCM.}
+    \label{tab:cport_cycles}
+    \small
+    \begin{tabular}{@{}lrr@{}}
+    \toprule
+    \textbf{Primitive} & \textbf{Cycles} & \textbf{Per unit} \\
+    \midrule
+    \texttt{fft\_bfp}, 128-point & 91\,376 & 714 / bin \\
+    \texttt{hilbert\_analytic} & 3\,970\,631 / 4096 & 969 / sample \\
+    \texttt{nco\_derotate} & 159\,763 / 4096 & 39 / sample \\
+    \texttt{cordic\_atan2} & 365 & --- \\
+    Viterbi, 255 bits rate 1/3 & 2\,465\,972 & 9\,670 / bit \\
+    LDPC min-sum, 128 bits, 60 iters & 21\,885\,598 & --- \\
+    Complex MAC (correlation inner loop) & --- & 3.27 / MAC \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\paragraph{A memory-attribute trap that looked like an algorithm
+problem.}
+The same correlation, over byte-identical data, measured 3.27 cycles
+per MAC from DTCM and D2 SRAM but 7.52 from AXI-SRAM --- and disabling
+the data cache changed the AXI figure not at all. The cause was not the
+part: the firmware already resident on the board left an MPU region over
+AXI-SRAM with \texttt{TEX=0 C=1 B=0 S=1}, that is, \emph{shareable}.
+A Cortex-M7 has no cache-coherency unit, so a shareable Normal region is
+effectively uncached. With that MPU disabled all three memories measure
+identically. STM32H7 projects mark AXI-SRAM shareable routinely to
+sidestep DMA coherency, so this is a live hazard: a misconfigured MPU
+costs $2.3\times$ on the acquisition path while presenting as slow code.
+
+The same experiment killed a proposal. Splitting the scratch arena so
+that the detection phase lived in DTCM had been designed and costed at
+$+126$\,KB before it was measured; the measurement showed it would buy
+exactly nothing, because the sliding correlation re-reads 512 samples
+per offset and advances by one, so its reuse is $\approx$99.8\,\% and
+the 16\,kB data cache absorbs it from any backing SRAM. It was not
+implemented.
+
+\subsubsection{The ZC scan, and where its cost actually went}
+\label{sec:zcscan}
+
+Acquisition dominates the receiver's processor budget, and within
+acquisition the Zadoff--Chu correlation dominates everything else. It is
+worth setting out exactly what the scan does, because the eventual
+$4\times$ saving came from \emph{where} it looked rather than from how
+it computed.
+
+A frame begins with a tone comb of $3T{\cdot}N$ samples ($T$ tone tiles,
+$N=128$ bins; 61\,440 samples at EXTREME), followed by one ZC symbol of
+$\mathrm{CP}+z_L{\cdot}N$ samples. Detection runs in two stages. The
+tone stage folds each incoming 512-sample block into a $\approx$540-byte
+summary --- a band energy and, for each candidate frequency shift, the
+dot product of the block's spectrum against two masks --- and tracks the
+arg-max of that metric. It never re-reads a raw sample. The ZC stage
+then correlates the received signal against the known root sequence at
+every candidate time offset, taking the peak as the frame boundary.
+
+The critical detail is \emph{when} the tone stage can commit. Partial
+overlap crosses the detection threshold roughly a full window before the
+true peak, so a decline-from-best rule fires too early; the detector
+instead takes the arg-max over the whole above-threshold region and
+commits when that region ends. The region ends about one window after
+the peak, and the peak is itself one window after the tone field starts.
+So at the moment the detector announces a candidate start $c$, the write
+head is already \emph{two tone fields} beyond it.
+
+That is a latency, not a cost --- but two consumers turned it into both.
+Both anchored at $c$:
+
+\begin{itemize}
+    \item the lag-$N$ residual carrier estimate, which correlated the
+          tone segment $[c,\,c+2TN)$ --- 40\,960 samples at EXTREME, all
+          of them re-read;
+    \item the ZC scan, which searched forward from $c$ across the entire
+          tone field, $\approx$62\,500 candidate offsets, to find a
+          symbol that lives at the field's \emph{end}.
+\end{itemize}
+
+Both were unnecessary, and each yielded to a different observation.
+
+For the carrier estimate: derotating a signal by a constant per-sample
+phase $\theta$ multiplies every lag-$L$ product by the same constant
+$e^{-j\theta L}$, because $x'[k]\,\overline{x'[k-L]} =
+x[k]\,\overline{x[k-L]}\,e^{-j\theta L}$. The correlation's
+\emph{angle} therefore simply shifts by $\theta L$. So the correlation
+can be accumulated on \emph{raw} samples, incrementally, one block at a
+time as the tone stage already walks past them, and the coarse frequency
+word removed at commit as a single angle subtraction. Nothing is
+re-read. Checked against the original path on a real EXTREME preamble
+across $\pm 120$\,Hz of coarse word, the worst disagreement was 0.0018\,Hz
+against a 93.75\,Hz coarse bin.
+
+For the scan: the candidate $c$ is accurate to a fraction of a block.
+Measured offsets between $c$ and the true frame start were $+37$,
+$-219$ and $-220$ samples for the three modes --- against a search that
+swept 62\,500 offsets. Anchoring the window at the tone field's
+\emph{end} $\pm 8$ blocks reduces that to $\approx$4\,100.
+
+\paragraph{What this bought, and what it did not.}
+Table~\ref{tab:cport_stages} gives the whole-frame measurement, taken by
+piping the streaming transmitter directly into the streaming receiver on
+the target so that no buffer ever holds a frame.
+
+\begin{table}[htbp]
+    \centering
+    \caption{One EXTREME frame (43.5\,s of audio) on an STM32H743,
+             before and after the two re-anchorings. Decoded CRC-clean
+             in both cases.}
+    \label{tab:cport_stages}
+    \small
+    \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    \textbf{Phase} & \textbf{Before} & \textbf{After} & \textbf{\% of a
+    480\,MHz core} \\
+    \midrule
+    Tone search & 94.6\,Mcyc & 103.6\,Mcyc & 3.7 \\
+    \textbf{Acquisition} & \textbf{4\,050.4} & \textbf{1\,018.0} &
+        \textbf{41.8} \\
+    Demodulation & 809.0 & 856.8 & 5.5 \\
+    \midrule
+    \textbf{Whole frame} & \textbf{4\,954.0} & \textbf{1\,978.5} &
+        \textbf{9.5} \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Two consequences, and one clarification that matters.
+
+The processor cost of a frame fell from 23.7\,\% of a 480\,MHz core to
+9.5\,\%, and acquisition specifically by $4\times$. The tone stage pays
+10\,\% more --- 9\,Mcycles, for the per-block correlation it now
+maintains --- to save 3\,032. More importantly the burst now runs in
+\emph{real time}: before, acquisition needed 8.44\,s of processor inside
+a 5.08\,s window and fell behind, catching up afterwards out of the ring;
+now it needs 2.12\,s and keeps up with $2.4\times$ headroom.
+
+The ring shrank with it, and for two reasons at once. Its depth is set by
+how far back the receiver reaches, which was two tone fields and is now
+one plus the search margin: 124\,478 $\rightarrow$ 67\,134 samples at
+EXTREME, measured identically on host and target. And because the
+processing lag is gone, that reach-back no longer has a backlog added to
+it --- previously the two summed to 164\,810 against a 147\,456-sample
+ring, an overrun; now 67\,134 sits inside 81\,920 with 14\,786 spare.
+288\,KB of RAM became 160\,KB.
+
+\paragraph{The clarification: this is not a decoding improvement.}
+It is tempting to read a $4\times$ acquisition saving as better
+reception, and it is not. The frames that decoded before still decode,
+bit-identically; the frames that failed before still fail. Nothing in
+the demodulator, the equaliser, the LLR calibration or the decoders was
+touched, and no sensitivity figure in this report moves. What changed is
+the \emph{cost} of finding a frame --- processor cycles and the RAM to
+buffer the search --- not the probability of finding one. The honest
+statement of the benefit is that the same reception now fits on a
+smaller, cheaper part with headroom to spare, which is a deployment
+result rather than a link-budget one.
+
+There is a plausible argument that narrowing the search should also
+\emph{reduce} false locks, since a spurious correlation peak now has
+4\,100 places to hide instead of 62\,500 --- but that is a hypothesis,
+not a measurement, and it is not claimed here.
+
+\paragraph{An unfinished validation.}
+The search margin is eight blocks. All eight streaming test cases pass
+there; four blocks fails and sixteen fails as well (at sixteen the
+anchor clamps to zero for NORMAL and the window re-admits data symbols,
+which is a false-lock risk). That the valid range is that narrow means
+the anchoring has not been shown \emph{robust}: the only noisy case in
+the C suite is NORMAL at $-5$\,dB, and there is no EXTREME noise sweep
+or noise-only false-alarm count behind the narrower window --- which is
+precisely the evidence the original detection thresholds were tuned
+against (Section~\ref{sec:sync}). The carrier-estimate change stands on
+firmer ground, having been verified numerically against the path it
+replaces. The anchoring should be treated as provisional until that
+sweep exists.
 
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}
