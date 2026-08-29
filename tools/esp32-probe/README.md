@@ -49,6 +49,53 @@ supply, not from the ESP32.
 | 25 | nSRST | NRST | optional, both |
 | GND | GND | GND | **required** |
 
+### Two boards on one probe
+
+JTAG daisy-chains, so one ESP32 can debug both boards of the audio-link
+stand at once -- `stm32h7-rbb-dual.cfg`. TCK/TMS/nTRST/nSRST fan out to
+both boards and only TDI/TDO chain, so beyond a second board's worth of
+the table above it costs **one** new wire:
+
+    ESP32 21 (TDI) --> board1 PA15
+                       board1 PB3  --> board2 PA15    <-- the new wire
+                                       board2 PB3 --> ESP32 22 (TDO)
+
+Both boards must be powered and wired before `init`: OpenOCD examines
+every TAP in the chain, so one missing board fails all of it. Keep using
+`stm32h7-rbb.cfg` for single-board work.
+
+The config declares the chain by sourcing the stock `stm32h7x.cfg` twice
+under `CHIPNAME` `stmA` and `stmB`. That is safe -- the file takes
+`CHIPNAME` from the environment, and its helper procs either take the
+target as an argument or recover the chip name from `target current`
+rather than a global. Each board contributes the same TAP pair in the
+same order (cpu irlen 4, then bs irlen 5), so two boards chained either
+way round give the same repeating 4,5,4,5 pattern; the declaration is
+right without having to settle OpenOCD's TDI-vs-TDO ordering convention.
+What the convention *does* decide is which label lands on which physical
+board, so settle that by measurement:
+
+    make ids        # stmA  uid/serial 3B0028000A51...
+
+`ab_ids` prints each chip's 96-bit UID formatted exactly as
+`ofdm_usb_serial()` does, so the label maps to a board you can then
+address by `host/ofdm_modem.py --serial`.
+
+Two consequences of the shared lines, both wanted here:
+
+- **nSRST resets both boards at once** -- a common start of time for the
+  audio link. To reset one alone, use SYSRESETREQ on that target instead.
+- **TCK fans out to two loads.** Fine at this speed: `remote_bitbang` was
+  measured at 42236 edges/s, about 20 kHz of TCK.
+
+While OpenOCD talks to one board the other's two TAPs sit in BYPASS,
+adding 2 bits to each DR scan. DAP DR scans are 35 bits, so ~6%. IR scans
+do double (9 -> 18 bits) but are rare next to the DR traffic that
+dominates flashing.
+
+SWD cannot do this: it has no chaining, so two SWD targets need a mux or
+a second probe.
+
 ### Which transport can I use?
 
 Look at the board for a debug header:

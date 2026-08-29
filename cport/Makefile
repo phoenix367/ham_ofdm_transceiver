@@ -316,7 +316,9 @@ bridge:
 	fi
 
 bridge-stop:
-	@pkill -f rbb_bridge.py && echo "bridge stopped" || echo "no bridge running"
+	@pids=$$(ps -eo pid,cmd | grep '[r]bb_bridge' | awk '{print $$1}'); \
+	 if [ -n "$$pids" ]; then for p in $$pids; do kill $$p 2>/dev/null; done; \
+	   echo "bridge stopped ($$pids)"; else echo "no bridge running"; fi
 
 reset:
 	@$(OCD) -c init -c halt -c "mww 0xE000ED0C 0x05FA0004" -c exit $(OCD_QUIET) | tail -1; \
@@ -361,4 +363,30 @@ restore-flash:
 	  $(OCD) -c init -c halt -c "flash write_image erase $(BACKUP) 0x08000000 bin" \
 	    -c exit $(OCD_QUIET) | grep -aE 'wrote|Error'
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash
+# --- two boards on one probe (JTAG daisy-chain) ------------------------
+# Needs BOTH boards wired and powered; see stm32h7-rbb-dual.cfg for the
+# wiring and tools/esp32-probe/README.md for why. `make ids` prints each
+# chip's UID in USB-serial form, which is how a label maps to a board.
+#
+#   make ids           which label is which physical board
+#   make beacons       USB-modem beacon from both
+#   make flash-usb-a / flash-usb-b    flash one, leave the other running
+
+DUAL_CFG ?= ../tools/esp32-probe/stm32h7-rbb-dual.cfg
+OCD2      = openocd -f $(DUAL_CFG)
+
+ids:
+	@$(OCD2) -c init -c ab_ids -c exit $(OCD_QUIET) | grep -a 'uid/serial'
+
+beacons:
+	@$(OCD2) -c init -c ab_beacons -c exit $(OCD_QUIET) | grep -aE 'stmA|stmB'
+
+flash-usb-a: usbflash
+	@$(OCD2) -c init -c "ab_flash stmA build/usb_flash.elf" -c exit $(OCD_QUIET) \
+	  | grep -aE 'Verified OK|Error'
+
+flash-usb-b: usbflash
+	@$(OCD2) -c init -c "ab_flash stmB build/usb_flash.elf" -c exit $(OCD_QUIET) \
+	  | grep -aE 'Verified OK|Error'
+
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b
