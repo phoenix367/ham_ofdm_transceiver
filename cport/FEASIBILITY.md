@@ -153,18 +153,53 @@ And the real-time problem is gone:
                          with 2.4x headroom, so there is no lag to add
     needed = 67134  <  81920            fits, 14786 samples spare
 
-**A caveat that has not been discharged.** The ZC anchor's margin is
-`ZC_ANCHOR_MARGIN_BLK` = 8 blocks. All 8 `test_stream` cases pass there;
-4 blocks fails, and 16 fails too (at 16 the anchor clamps to zero for
-NORMAL and the window re-admits data symbols, which is a false-lock
-risk). That the valid range is that narrow means this has NOT been shown
-robust -- `test_stream`'s only noisy case is NORMAL at -5 dB, and there
-is no EXTREME noise sweep or noise-only false-alarm count behind the new
-window, which is exactly the evidence the original thresholds were tuned
-against. Treat the anchor as provisional until that A/B exists. The
-lag-N change is on firmer ground: verified against the old path on a
-real EXTREME preamble across +-120 Hz of coarse word, worst disagreement
-0.0018 Hz against a 93.75 Hz bin.
+### Does the narrower search cost sensitivity? No -- measured
+
+Narrowing a search from ~62500 candidate offsets to ~4100 is exactly the
+kind of change that trades sensitivity for cost without saying so, and
+the C suite could not answer it (its only noisy case is NORMAL at -5 dB
+against golden samples). `make zcab` now does: it builds BOTH arms from
+one source (`-DZC_ANCHOR_LEGACY` restores the old anchor and window) and
+runs them over byte-identical EXTREME waveforms -- same seed, same
+Gaussian noise, same CFO -- so the comparison is paired.
+
+Wide sweep, 60 trials/point, 8 points: **legacy 291/480 decoded,
+anchored 291/480**. Identical.
+
+At the knee, where the curve is steepest and any loss would show, 250
+trials/point:
+
+| SNR | legacy | anchored | delta |
+|---|---|---|---|
+| -11.5 dB | 223 (89 %) | 222 (89 %) | -1 |
+| -12.0 dB | 195 (78 %) | 193 (77 %) | -2 |
+| -12.5 dB | 138 (55 %) | 133 (53 %) | -5 |
+| -13.0 dB | 58 (23 %) | 61 (24 %) | +3 |
+| **total** | **614/1000** | **609/1000** | **-5** |
+
+0.5 percentage points, with mixed-sign deltas. The curve falls ~43
+points per dB through there, so that bounds any sensitivity difference
+at **~0.01 dB** -- far below the ~0.5 dB effects this project treats as
+real (the gated coarse search, the stream resync).
+
+**Noise-only false alarms: 0 in 250 runs, both arms.** The original
+detection thresholds were tuned against 0/20, so this is an order of
+magnitude more evidence than the bar they were set at.
+
+(The SNR here is referenced to the full-band RMS of the transmitted
+waveform, which reads ~9 dB pessimistic against the article's
+convention. It does not matter: what is being compared is two arms on
+identical input, not an absolute sensitivity.)
+
+The margin itself remains a tuned constant. `ZC_ANCHOR_MARGIN_BLK` = 8
+blocks passes all 8 `test_stream` cases; 4 fails, and 16 fails too --
+at 16 the anchor clamps to zero for NORMAL and the window re-admits
+data symbols, which is a false-lock risk. So the value is not arbitrary
+and should not be changed without re-running `make zcab`.
+
+The lag-N change was verified separately, against the path it replaces,
+on a real EXTREME preamble across +-120 Hz of coarse word: worst
+disagreement 0.0018 Hz against a 93.75 Hz bin.
 
 Caveats, so this is not over-read:
 - The frame above is noiseless. A real channel spends longer in

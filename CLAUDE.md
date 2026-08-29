@@ -201,9 +201,13 @@ Cross-module invariants that are easy to break:
   (`ZC_ANCHOR_MARGIN_BLK`). Together: 124478 -> 67134 samples at
   EXTREME, ring 288 -> 160 kB, and the acquisition burst went from 166 %
   of a 480 MHz M7 to 42 %, i.e. from not keeping up to keeping up.
-  CAUTION: the anchor margin's valid range is narrow (8 blocks passes,
-  4 and 16 fail) and has no EXTREME noise sweep behind it yet -- see
-  FEASIBILITY.md before touching it.
+  The narrower search costs NO sensitivity: `make zcab` A/Bs both arms
+  (`-DZC_ANCHOR_LEGACY` builds the old one) over byte-identical EXTREME
+  waveforms -- 614 vs 609 decodes per 1000 at the knee, bounding the
+  difference at ~0.01 dB, and 0 false alarms in 250 noise-only runs
+  each. But `ZC_ANCHOR_MARGIN_BLK` = 8 is TUNED: 4 fails and 16 fails
+  (at 16 the anchor clamps to 0 for NORMAL and data symbols re-enter
+  the window). Re-run `make zcab` if you change it.
 - One scratch arena serves the whole C modem (`cport/src/arena.h`).
   Two separate facts make it safe and BOTH must hold: the receiver's
   detect/demod/decode scratch is call-scoped (nothing survives the

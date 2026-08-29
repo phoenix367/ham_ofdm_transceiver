@@ -280,10 +280,18 @@ rxs_t *rxs_open(link_mode_t mode, int calibrate)
      * two tone fields behind the write head by the time the detector
      * commits. Anchor at the tone field's end instead, with a margin of
      * four blocks either way. */
+#ifdef ZC_ANCHOR_LEGACY
+    /* pre-anchoring behaviour, kept buildable so the two can be A/B'd on
+     * identical waveforms -- see bench/zc_anchor_ab.c */
+    r->zc_anchor = 0;
+    r->zc_win = 3 * r->T * FFT_BINS + r->demod.symbol_len + 4 * FFT_BINS
+                + r->B;
+#else
     r->zc_anchor = 3 * r->T * FFT_BINS - ZC_ANCHOR_MARGIN_BLK * r->B;
     if (r->zc_anchor < 0)
         r->zc_anchor = 0;
     r->zc_win = r->demod.symbol_len + 2 * ZC_ANCHOR_MARGIN_BLK * r->B;
+#endif
     r->st = S_SEARCH;
     r->best_metric = -1;
     r->last_eval_blk = -1;

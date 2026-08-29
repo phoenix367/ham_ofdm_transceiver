@@ -566,19 +566,65 @@ There is a plausible argument that narrowing the search should also
 4\,100 places to hide instead of 62\,500 --- but that is a hypothesis,
 not a measurement, and it is not claimed here.
 
-\paragraph{An unfinished validation.}
-The search margin is eight blocks. All eight streaming test cases pass
-there; four blocks fails and sixteen fails as well (at sixteen the
-anchor clamps to zero for NORMAL and the window re-admits data symbols,
-which is a false-lock risk). That the valid range is that narrow means
-the anchoring has not been shown \emph{robust}: the only noisy case in
-the C suite is NORMAL at $-5$\,dB, and there is no EXTREME noise sweep
-or noise-only false-alarm count behind the narrower window --- which is
-precisely the evidence the original detection thresholds were tuned
-against (Section~\ref{sec:sync}). The carrier-estimate change stands on
-firmer ground, having been verified numerically against the path it
-replaces. The anchoring should be treated as provisional until that
-sweep exists.
+\paragraph{Does the narrower search cost sensitivity?}
+Cutting a search from 62\,500 candidate offsets to 4\,100 is exactly the
+kind of change that trades sensitivity for cost without announcing it,
+and the existing C suite could not answer the question --- its only
+noisy case is NORMAL at $-5$\,dB against stored samples. The A/B was
+therefore built: both arms compile from one source (a switch restores
+the original anchor and window) and run over \emph{byte-identical}
+EXTREME waveforms --- same seed, same Gaussian noise, same carrier
+offset --- so the comparison is paired rather than two independent
+samples of a noisy quantity.
+
+Over a wide sweep at 60 trials per point the two arms decoded 291
+frames out of 480 each: identical. At the knee, where the curve is
+steepest and any loss would show, Table~\ref{tab:zcab} gives 250 trials
+per point.
+
+\begin{table}[htbp]
+    \centering
+    \caption{Paired A/B of the ZC anchoring at the EXTREME sensitivity
+             edge, 250 trials per point, identical waveforms.}
+    \label{tab:zcab}
+    \small
+    \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    \textbf{SNR} & \textbf{Original} & \textbf{Anchored} &
+    \textbf{$\Delta$} \\
+    \midrule
+    $-11.5$\,dB & 223 (89\,\%) & 222 (89\,\%) & $-1$ \\
+    $-12.0$\,dB & 195 (78\,\%) & 193 (77\,\%) & $-2$ \\
+    $-12.5$\,dB & 138 (55\,\%) & 133 (53\,\%) & $-5$ \\
+    $-13.0$\,dB & \phantom{0}58 (23\,\%) & \phantom{0}61 (24\,\%) &
+        $+3$ \\
+    \midrule
+    \textbf{Total} & \textbf{614/1000} & \textbf{609/1000} &
+        \textbf{$-5$} \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Half a percentage point, with deltas of mixed sign. The curve falls
+$\approx$43 points per dB through that region, which bounds any
+sensitivity difference at \textbf{$\approx$0.01\,dB} --- two orders of
+magnitude below the $\approx$0.5\,dB effects this report treats as real,
+such as the gated coarse search or the streaming resync. And
+\textbf{noise-only false alarms were zero in 250 runs for both arms},
+against the 0/20 the original detection thresholds were tuned to
+(Section~\ref{sec:sync}).
+
+The SNR reference here is the full-band RMS of the transmitted
+waveform, which reads roughly 9\,dB pessimistic against the convention
+used elsewhere in this report; it is irrelevant to a paired comparison,
+where what is measured is two arms on the same input rather than an
+absolute sensitivity.
+
+One qualification survives. The margin is a \emph{tuned} constant:
+eight blocks passes every streaming test, four fails, and sixteen fails
+as well --- at sixteen the anchor clamps to zero for NORMAL and the
+window re-admits data symbols, which is a false-lock risk. The value is
+not arbitrary and should not be moved without re-running the sweep.
 
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}

@@ -137,4 +137,20 @@ armmeas: $(GEN) | $(BUILD)
 	    awk '$$3=="b"||$$3=="B"{t+=$$2; if($$2>=8000) printf "%9d  %s\n",$$2,$$4} \
 	         END{printf "%9d  TOTAL .bss\n",t}' | sort -rn
 
-.PHONY: bench armsize qemu armmeas
+# ZC anchor A/B: EXTREME noise sweep, both arms over identical waveforms.
+#   make zcab            (60 trials/point)
+#   make zcab TRIALS=250 (knee resolution ~0.01 dB)
+ZCAB_SRC = bench/zc_anchor_ab.c src/arena.c src/rx_stream.c src/rx_demod.c \
+           src/rx_detect.c src/ldpc.c src/tx.c src/packets.c src/bits.c \
+           src/conv.c src/fft.c src/dsp.c
+TRIALS ?= 60
+
+zcab: $(GEN) | $(BUILD)
+	$(CC) $(CFLAGS) -DZC_ANCHOR_LEGACY -Isrc -o $(BUILD)/zcab_legacy \
+	    $(ZCAB_SRC) -lm
+	$(CC) $(CFLAGS) -Isrc -o $(BUILD)/zcab_anchored $(ZCAB_SRC) -lm
+	@./$(BUILD)/zcab_legacy $(TRIALS)
+	@echo
+	@./$(BUILD)/zcab_anchored $(TRIALS)
+
+.PHONY: bench armsize qemu armmeas zcab
