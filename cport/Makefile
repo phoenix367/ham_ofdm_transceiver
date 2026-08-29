@@ -198,4 +198,19 @@ usbfw: | $(BUILD)
 	    -Wl,--gc-sections $(USBFW_SRC) -o $(BUILD)/usb_bringup.elf
 	@$(QEMUSIZE) $(BUILD)/usb_bringup.elf
 
-.PHONY: bench armsize qemu armmeas zcab usbfw
+# Analog loopback test stand: DAC1_OUT1 (PA4) -> wire -> ADC1 ch3 (PA6),
+# one board, a NORMAL frame through a real analog path. RAM-resident.
+ANALOG_SRC = target/start.c target/vectors.c bench/analog_loop.c \
+             src/arena.c src/tx.c src/packets.c src/bits.c src/conv.c \
+             src/ldpc.c src/fft.c src/dsp.c src/rx_demod.c \
+             src/rx_detect.c src/rx_stream.c
+
+analogfw: $(GEN) | $(BUILD)
+	$(QEMUCC) -std=c99 -O2 -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 \
+	    -mfloat-abi=hard -ffunction-sections -fdata-sections \
+	    -Isrc -Itarget -DMAX_LLRS=1024 -nostartfiles -specs=nano.specs \
+	    -T target/stm32h743_usb.ld -Wl,--gc-sections $(ANALOG_SRC) \
+	    -o $(BUILD)/analog_loop.elf
+	@$(QEMUSIZE) -A $(BUILD)/analog_loop.elf | grep -E '^\.(text|bss|d2_bss|dtcm_bss|results)'
+
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw
