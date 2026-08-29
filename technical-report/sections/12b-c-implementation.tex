@@ -478,7 +478,7 @@ Both anchored at $c$:
           tone segment $[c,\,c+2TN)$ --- 40\,960 samples at EXTREME, all
           of them re-read;
     \item the ZC scan, which searched forward from $c$ across the entire
-          tone field, $\approx$62\,500 candidate offsets, to find a
+          tone field, 62\,497 candidate offsets, to find a
           symbol that lives at the field's \emph{end}.
 \end{itemize}
 
@@ -499,8 +499,72 @@ against a 93.75\,Hz coarse bin.
 For the scan: the candidate $c$ is accurate to a fraction of a block.
 Measured offsets between $c$ and the true frame start were $+37$,
 $-219$ and $-220$ samples for the three modes --- against a search that
-swept 62\,500 offsets. Anchoring the window at the tone field's
-\emph{end} $\pm 8$ blocks reduces that to $\approx$4\,100.
+swept 62\,497 offsets. The ZC symbol is not somewhere in that span; it
+is at a \emph{known} place, the tone field's end, give or take however
+wrong $c$ is. So the window is anchored there instead:
+%
+\begin{align}
+    \text{anchor} &= 3TN - m B \\
+    \text{window} &= (\mathrm{CP} + z_L N) + 2 m B
+\end{align}
+%
+where $B$ is the detection block length and $m$ is
+\texttt{ZC\_ANCHOR\_MARGIN\_BLK}.
+
+\paragraph{What the margin is, and why it is a tuned constant.}
+$m$ is the slack allowed on either side of the expected ZC position,
+counted in \emph{detection blocks} rather than samples so that it tracks
+$B$, which is what the candidate's quantisation error tracks: $c$ is a
+block boundary, so it is wrong by at most a block from that alone, plus
+whatever the tone arg-max contributes. Measured total error is well
+under one block in every mode. The shipped value is $m=8$.
+
+Eight is not a large safety factor in the obvious sense --- it is
+roughly $8\times$ the observed error --- but the constant is bounded on
+\emph{both} sides, and the bounds are mode-dependent, which is what
+makes it delicate. Table~\ref{tab:zcmargin} shows why.
+
+\begin{table}[htbp]
+    \centering
+    \caption{The anchoring at $m=8$ blocks. The reduction is worth far
+             more at EXTREME than at NORMAL, and NORMAL is also the mode
+             that constrains $m$ from above.}
+    \label{tab:zcmargin}
+    \small
+    \begin{tabular}{@{}lrrrrr@{}}
+    \toprule
+    \textbf{Mode} & \textbf{Tone field} & \textbf{$mB$} &
+    \textbf{Offsets, was} & \textbf{now} & \textbf{Ratio} \\
+    \midrule
+    NORMAL  & 3\,840  & 2\,048 & 4\,641  & 4\,129 & 1.1$\times$ \\
+    ROBUST  & 15\,360 & 4\,096 & 16\,417 & 8\,225 & 2.0$\times$ \\
+    EXTREME & 61\,440 & 4\,096 & 62\,497 & 8\,225 & 7.6$\times$ \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Below the lower bound the window stops covering the ZC reliably and
+acquisitions are simply lost: $m=4$ fails the streaming suite. Above the
+upper bound something less obvious happens. The margin is subtracted
+from the tone field, and NORMAL's tone field is only 3\,840 samples ---
+so at $m=16$, $mB = 4\,096$ exceeds it, the anchor clamps to zero, and
+the window reverts to searching forward from $c$ while also being wide
+enough to reach past the preamble into the data symbols. Data carries
+no ZC but does carry structure, and a correlator given more places to
+find a peak will eventually find a spurious one. $m=16$ fails the suite
+too.
+
+So the valid range is bounded below by the candidate's accuracy and
+above by NORMAL's tone field, and the two bounds are only about a factor
+of two apart. That is narrow enough that $m$ should be treated as
+measured rather than chosen: the sweep below is the instrument, and it
+should be re-run if the value is ever moved.
+
+Table~\ref{tab:zcmargin} also explains where the saving actually comes
+from. The reduction is worth 7.6$\times$ at EXTREME and essentially
+nothing at NORMAL --- which is exactly the right shape, because EXTREME
+is the mode whose acquisition dominates the processor budget, and
+NORMAL's was never the problem.
 
 \paragraph{What this bought, and what it did not.}
 Table~\ref{tab:cport_stages} gives the whole-frame measurement, taken by
@@ -563,11 +627,11 @@ result rather than a link-budget one.
 
 There is a plausible argument that narrowing the search should also
 \emph{reduce} false locks, since a spurious correlation peak now has
-4\,100 places to hide instead of 62\,500 --- but that is a hypothesis,
+8\,225 places to hide instead of 62\,497 --- but that is a hypothesis,
 not a measurement, and it is not claimed here.
 
 \paragraph{Does the narrower search cost sensitivity?}
-Cutting a search from 62\,500 candidate offsets to 4\,100 is exactly the
+Cutting a search from 62\,497 candidate offsets to 8\,225 is exactly the
 kind of change that trades sensitivity for cost without announcing it,
 and the existing C suite could not answer the question --- its only
 noisy case is NORMAL at $-5$\,dB against stored samples. The A/B was

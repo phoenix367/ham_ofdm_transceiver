@@ -1,8 +1,8 @@
 /* Does anchoring the ZC scan at the tone field's end cost sensitivity?
  *
  * The anchoring cut EXTREME acquisition 4x and the raw ring nearly in
- * half, but it narrows the search from ~62500 candidate offsets to
- * ~4100 -- and a narrower search is exactly the kind of change that
+ * half, but it narrows the EXTREME search from 62497 candidate
+ * offsets to 8225 -- and a narrower search is exactly the kind of change
  * trades sensitivity for cost without saying so. The C suite could not
  * answer it: its only noisy case is NORMAL at -5 dB against golden
  * samples, so there is no EXTREME sweep and no false-alarm count.

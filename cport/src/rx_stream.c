@@ -27,8 +27,22 @@
 #define BLK_TOTAL (BLK_CAP_NORMAL + BLK_CAP_ROBUST + BLK_CAP)
 #define DECLINE_BLOCKS 3
 /* ZC search margin either side of the tone field's end, in blocks.
- * Tolerates a cs_abs error of this many blocks; measured error is well
- * under one block in every mode. */
+ *
+ * Counted in BLOCKS, not samples, so it tracks B -- which is what the
+ * candidate's error tracks: cs_abs is a block boundary, so it is wrong
+ * by up to a block from quantisation alone, plus whatever the tone
+ * arg-max adds. Measured total error is well under one block in every
+ * mode (+37 / -219 / -220 samples).
+ *
+ * TUNED, and bounded on BOTH sides, only a factor of two apart:
+ *   too small (4) -- the window stops covering the ZC and acquisitions
+ *     are lost;
+ *   too large (16) -- NORMAL's tone field is only 3840 samples, so
+ *     16*256 exceeds it, the anchor clamps to 0, and the window grows
+ *     wide enough to reach past the preamble into data symbols, where a
+ *     correlator will eventually find a spurious peak.
+ * Both fail test_stream. Re-run `make zcab` if you move this. */
+
 #define ZC_ANCHOR_MARGIN_BLK 8
 #define ZC_WIN_MAX 71000
 #define STREAM_MAX_SYM (CP_LEN + 64 * FFT_BINS)

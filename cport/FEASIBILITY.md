@@ -141,8 +141,9 @@ board, after:
 | demod | 809.0 | 856.8 | 1.06x | 5.5 % |
 | **whole frame** | **4954.0** | **1978.5** | **0.40x** | **9.5 %** |
 
-The ZC scan searches ~4100 offsets instead of ~62500, which is where the
-4x comes from. Tone search pays 10 % more for the per-block lag
+The ZC scan searches 8225 offsets instead of 62497 at EXTREME (7.6x),
+which is where most of the 4x comes from -- the rest of the acquisition
+bucket is fixed cost the anchoring does not touch. Tone search pays 10 % more for the per-block lag
 correlation -- 9 Mcycles to save 3032.
 
 And the real-time problem is gone:
@@ -155,7 +156,7 @@ And the real-time problem is gone:
 
 ### Does the narrower search cost sensitivity? No -- measured
 
-Narrowing a search from ~62500 candidate offsets to ~4100 is exactly the
+Narrowing a search from 62497 candidate offsets to 8225 is exactly the
 kind of change that trades sensitivity for cost without saying so, and
 the C suite could not answer it (its only noisy case is NORMAL at -5 dB
 against golden samples). `make zcab` now does: it builds BOTH arms from
