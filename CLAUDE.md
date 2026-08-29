@@ -191,6 +191,19 @@ Cross-module invariants that are easy to break:
   Python twin (`station.py`) does NOT mirror this -- it is an
   allocation change with no behavioural effect, and the C suites
   assert the counters stay zero.
+- The raw ring (`RXS_RAW_RING_LEN`) is sized by how far back the
+  receiver reaches when the tone detector COMMITS, which is ~2 tone
+  fields after the peak. Two things used to anchor at `cs_abs` and set
+  that depth; neither does now, and both must stay that way: the lag-N
+  residual is accumulated per block (`lag_sum_t`, its own ring because
+  `g_blk` only holds ONE tone window and commit needs two), and the ZC
+  scan is anchored at the tone field's END
+  (`ZC_ANCHOR_MARGIN_BLK`). Together: 124478 -> 67134 samples at
+  EXTREME, ring 288 -> 160 kB, and the acquisition burst went from 166 %
+  of a 480 MHz M7 to 42 %, i.e. from not keeping up to keeping up.
+  CAUTION: the anchor margin's valid range is narrow (8 blocks passes,
+  4 and 16 fail) and has no EXTREME noise sweep behind it yet -- see
+  FEASIBILITY.md before touching it.
 - One scratch arena serves the whole C modem (`cport/src/arena.h`).
   Two separate facts make it safe and BOTH must hold: the receiver's
   detect/demod/decode scratch is call-scoped (nothing survives the

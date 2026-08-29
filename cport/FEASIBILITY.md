@@ -124,31 +124,47 @@ CRC-clean (`ev.type == 1`), `rxs_ring_miss` zero, and
 | demod: header + data symbols | 390912 | 32.58 s | 809.0 | 6.2 % | 5.2 % |
 | **whole frame** | 521984 | 43.50 s | **4954.0** | **28.5 %** | **23.7 %** |
 
-Averaged over a frame the receiver costs a quarter of a 480 MHz core.
-But the cost is not spread evenly, and that is the finding:
+The first measurement of this said the acquisition burst does NOT run in
+real time -- 8.44 s of CPU inside a 5.08 s window at 480 MHz, falling
+3.36 s behind and catching up out of the ring, whose depth then had to
+cover the reach-back AND the lag: 164810 needed against 147456. That
+has since been fixed, by taking both of the reach-backs away (see
+`rx_stream.h`): the lag-N residual is now accumulated per block instead
+of re-reading the tone field, and the ZC scan is anchored at the tone
+field's END instead of searching forward from `cs_abs`. Same frame, same
+board, after:
 
-**The acquisition burst does not run in real time.** It needs 8.44 s of
-CPU inside a 5.08 s window at 480 MHz -- it falls behind by 3.36 s and
-catches up later out of the ring, which is the second reason `g_raw`
-exists (the first being the ZC re-anchor lookback). The two demands ADD:
+| phase | before Mcyc | after Mcyc | change | @480 after |
+|---|---|---|---|---|
+| tone search | 94.6 | 103.6 | 1.10x | 3.7 % |
+| **acquisition** | **4050.4** | **1018.0** | **0.25x** | 41.8 % |
+| demod | 809.0 | 856.8 | 1.06x | 5.5 % |
+| **whole frame** | **4954.0** | **1978.5** | **0.40x** | **9.5 %** |
 
-    ring capacity      147456 samples  (12.29 s)
-    measured lookback  124478 samples  (10.37 s)   <- re-anchor reach-back
-    headroom            22978 samples   (1.91 s)
-    processing lag @480  40332 samples   (3.36 s)  <- MEASURED here
+The ZC scan searches ~4100 offsets instead of ~62500, which is where the
+4x comes from. Tone search pays 10 % more for the per-block lag
+correlation -- 9 Mcycles to save 3032.
 
-    needed = lookback + lag = 164810  >  147456   OVERRUN by 17354
+And the real-time problem is gone:
 
-So on this part, at 480 MHz, an EXTREME acquisition needs about 2.4 s
-more ring than exists. This is a DERIVED conclusion, not a direct
-observation: the bench feeds samples as fast as the CPU takes them, so
-it has no real-time constraint and duly reported `rxs_ring_miss == 0`.
-A real 12 kHz feed would not be so forgiving. Ways out, in rough order
-of appeal: cut the acquisition work (the ring-size note in
-`rx_stream.h` already describes halving the reach-back, which cuts
-BOTH terms); enlarge the ring, which is RAM the largest build does not
-have; or accept a longer effective preamble. Demod, at 5.2 %, is not
-the problem and never was.
+    ring capacity       81920 samples  (6.83 s)
+    measured lookback   67134 samples  (5.59 s)   <- host AND target agree
+    acquisition @480     2.12 s CPU for 5.08 s of audio -- it KEEPS UP,
+                         with 2.4x headroom, so there is no lag to add
+    needed = 67134  <  81920            fits, 14786 samples spare
+
+**A caveat that has not been discharged.** The ZC anchor's margin is
+`ZC_ANCHOR_MARGIN_BLK` = 8 blocks. All 8 `test_stream` cases pass there;
+4 blocks fails, and 16 fails too (at 16 the anchor clamps to zero for
+NORMAL and the window re-admits data symbols, which is a false-lock
+risk). That the valid range is that narrow means this has NOT been shown
+robust -- `test_stream`'s only noisy case is NORMAL at -5 dB, and there
+is no EXTREME noise sweep or noise-only false-alarm count behind the new
+window, which is exactly the evidence the original thresholds were tuned
+against. Treat the anchor as provisional until that A/B exists. The
+lag-N change is on firmer ground: verified against the old path on a
+real EXTREME preamble across +-120 Hz of coarse word, worst disagreement
+0.0018 Hz against a 93.75 Hz bin.
 
 Caveats, so this is not over-read:
 - The frame above is noiseless. A real channel spends longer in
@@ -217,14 +233,14 @@ linked newlib's float formatter, which a station does not.)
 | Image | Flash | RAM (.bss) |
 |---|---|---|
 | Transmit only (`txs_open`/`txs_pull`) | 24 KB | **27 KB** |
-| **Full station, all three modes, no EXT frames** | **61 KB** | **690 KB** |
-| Full station, all three modes + EXT frames | 61 KB | 921 KB |
+| **Full station, all three modes, no EXT frames** | **61 KB** | **561 KB** |
+| Full station, all three modes + EXT frames | 61 KB | 793 KB |
 
 Where the station's RAM goes:
 
 | Component | Size |
 |---|---|
-| Shared raw int16 ring (147456 samples, all instances) | 288 KB |
+| Shared raw int16 ring (81920 samples, all instances) | 160 KB |
 | Scratch arena (RX detect/demod/decode + TX generator, unioned) | 128.5 KB |
 | Tone summaries, each instance sized to its own mode | 93.5 KB |
 | LLR buffers, 3 instances (int32) | 24 KB (192 KB with EXT frames) |
@@ -375,10 +391,10 @@ Data-capable total (all but ITCM): **1019904 B**. Measured `.bss`:
 
 | Configuration | `.bss` | Fits? |
 |---|---|---|
-| cport defaults, no EXT frames | 698804 | yes, 313 KB spare |
-| cport defaults + EXT frames | 935348 | yes, 82 KB spare |
-| demoapp settings, no EXT frames | 769748 | yes, 244 KB spare |
-| demoapp settings + EXT frames | 1006292 | yes, 13 KB spare |
+| cport defaults, no EXT frames | 574952 | yes, 434 KB spare |
+| cport defaults + EXT frames | 811496 | yes, 203 KB spare |
+| demoapp settings, no EXT frames | 645896 | yes, 365 KB spare |
+| demoapp settings + EXT frames | 882440 | yes, 134 KB spare |
 
 "cport defaults" throughout means the `#ifndef` values in the headers,
 with no `-D` on the command line -- what `make armmeas` builds. The ones

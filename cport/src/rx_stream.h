@@ -32,32 +32,38 @@ typedef struct rxs_state rxs_t; /* opaque; single instance */
  * receivers listen to the same audio; each push writes the same values
  * idempotently).
  *
- * What sets the size is NOT the preamble -- it is how late the tone
- * detector commits. Both consumers of the tone peak (the lag-N residual
- * in tone_commit, and the ZC scan in S_ZC_WAIT) anchor at `cs_abs`, the
- * START of the tone field; and on a channel where the metric never
- * falls cleanly back below threshold the commit waits for the argmax to
- * be stable for a full window span past the best block (rx_stream.c,
- * "commit when the above-threshold region ends, OR ..."). The best block
- * is already one window past cs_abs, so the write head ends up TWO tone
- * fields ahead of the sample the receiver then reaches back for:
+ * What sets the size is how far back the receiver reaches when the tone
+ * detector finally commits -- which is about TWO tone fields after the
+ * peak, because the detector takes the argmax over the whole
+ * above-threshold region and has to see that region end.
  *
- *   lookback = (2 * 3*T*FFT_BINS/B + DECLINE_BLOCKS) * B
- *              + (HILBERT_TAPS_N - 1)
+ * Both consumers of the tone peak USED to anchor at `cs_abs`, the START
+ * of the tone field, which made the reach-back two full tone fields:
  *
- * which is exact for all three modes -- 8510 / 32318 / 124478, matching
- * rxs_ring_hwm to the sample (test_stream prints it). EXTREME therefore
- * wants 124478, and 147456 is that with 18% margin: deliberately not a
- * power of two, since 2^17 would leave only 5%.
+ *   was:  (2 * 3*T*FFT_BINS/B + DECLINE_BLOCKS) * B + (HILBERT_TAPS_N-1)
+ *         = 8510 / 32318 / 124478 samples
  *
- * So the ring is 288 kB because of a detector TIMEOUT, not because a
- * frame is long. Halving it means making the lag-N estimate incremental
- * (it is a re-read of the tone field, which the block summaries already
- * traverse) and anchoring the ZC scan near the tone field's END rather
- * than its start -- both touch acquisition sensitivity, which is why
- * neither has been done casually. Overridable meanwhile. */
+ * Neither does any more. The lag-N residual is accumulated per block
+ * during the tone scan and summed at commit (see `lag_sum_t`), so the
+ * tone field is never re-read; and the ZC scan is anchored at the tone
+ * field's END, where the ZC actually is, rather than searching forward
+ * from cs_abs across the whole field. What remains is one tone field
+ * plus the search margin:
+ *
+ *   now:  3*T*FFT_BINS + ZC_ANCHOR_MARGIN_BLK*B + (DECLINE_BLOCKS+1)*B
+ *                      + (HILBERT_TAPS_N - 1)
+ *         = 6718 / 21054 / 67134 samples   (measured, test_stream prints
+ *                                           rxs_ring_hwm per mode)
+ *
+ * 81920 is EXTREME's 67134 with 22 % margin. Deliberately not a power of
+ * two only by accident now -- it is 80*1024, which simply fits.
+ *
+ * The other reason this ring exists is capacity, not lookback: the
+ * acquisition burst does not run in real time on a 480 MHz M7, so the
+ * receiver falls behind and catches up from here. That lag ADDS to the
+ * reach-back above; see FEASIBILITY.md, which measures both. */
 #ifndef RXS_RAW_RING_LEN
-#define RXS_RAW_RING_LEN 147456
+#define RXS_RAW_RING_LEN 81920
 #endif
 
 /* diagnostic: deepest ring lookback observed (samples behind the write

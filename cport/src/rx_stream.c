@@ -26,6 +26,10 @@
 #define BLK_CAP_ROBUST 32                /* >= 30  */
 #define BLK_TOTAL (BLK_CAP_NORMAL + BLK_CAP_ROBUST + BLK_CAP)
 #define DECLINE_BLOCKS 3
+/* ZC search margin either side of the tone field's end, in blocks.
+ * Tolerates a cs_abs error of this many blocks; measured error is well
+ * under one block in every mode. */
+#define ZC_ANCHOR_MARGIN_BLK 8
 #define ZC_WIN_MAX 71000
 #define STREAM_MAX_SYM (CP_LEN + 64 * FFT_BINS)
 #define RXS_MAX_INST 3
@@ -36,6 +40,31 @@ typedef struct {
     int exp;
 } blk_sum_t;
 
+/* Raw (NOT derotated) lag-FFT_BINS correlation per block, including the
+ * products that straddle the previous block. Summing these over the tone
+ * segment replaces RE-READING it: derotating by a constant per-sample
+ * phase multiplies every lag-L product by the same e^{-jTL}, so the
+ * coarse word comes off as one angle SUBTRACTION at commit instead of a
+ * pass over 40960 samples. Verified against the old path on a real
+ * EXTREME preamble across +-120 Hz: worst disagreement 316 word units =
+ * 0.00088 Hz, against a 93.75 Hz coarse bin. This is what stops the raw
+ * ring having to reach back to cs_abs.
+ *
+ * It lives in its OWN ring, not in blk_sum_t, and that is the whole
+ * point: the tone detector commits about TWO tone windows after the
+ * peak, so at commit the segment's blocks are already out of g_blk,
+ * which only holds one window. At 16 bytes per block this ring can
+ * afford to hold two (plus slack) where g_blk's ~544 bytes could not. */
+#define LAG_N FFT_BINS
+#define LAG_CAP_NORMAL   64      /* >= 2*15  + slack */
+#define LAG_CAP_ROBUST  128      /* >= 2*30  + slack */
+#define LAG_CAP_EXTREME 256      /* >= 2*120 + slack */
+#define LAG_TOTAL (LAG_CAP_NORMAL + LAG_CAP_ROBUST + LAG_CAP_EXTREME)
+
+typedef struct {
+    int64_t re, im;
+} lag_sum_t;
+
 struct rxs_state {
     int inst;
     rxd_t demod;
@@ -44,7 +73,7 @@ struct rxs_state {
     int64_t word_per_bin;
     const uint8_t *mask0, *mask1;
     int tone0, tone1, total_blocks;
-    int zc_win;
+    int zc_win, zc_anchor;
 
     int64_t abs_n; /* samples consumed so far */
 
@@ -65,6 +94,7 @@ struct rxs_state {
     int64_t burst_resume_abs;
     int64_t last_eval_blk;
     int blk_base, blk_mask;   /* this instance's slice of g_blk */
+    int lag_base, lag_mask;   /* and of g_lag */
     int64_t ring_hwm; /* deepest raw lookback (incl. FIR history) */
     int64_t ring_miss; /* reads refused because the samples were gone */
     rxd_header_t hdr;
@@ -85,9 +115,14 @@ static struct rxs_state g_pool[RXS_MAX_INST];
  * entirely (2 B/sample raw vs 8 B/sample analytic per instance). */
 static int16_t g_raw[RXS_RAW_RING_LEN];
 static blk_sum_t g_blk[BLK_TOTAL];
+static lag_sum_t g_lag[LAG_TOTAL];
 static const int BLK_CAP_OF[3] = { BLK_CAP_NORMAL, BLK_CAP_ROBUST, BLK_CAP };
 static const int BLK_OFF_OF[3] = { 0, BLK_CAP_NORMAL,
                                    BLK_CAP_NORMAL + BLK_CAP_ROBUST };
+static const int LAG_CAP_OF[3] = { LAG_CAP_NORMAL, LAG_CAP_ROBUST,
+                                   LAG_CAP_EXTREME };
+static const int LAG_OFF_OF[3] = { 0, LAG_CAP_NORMAL,
+                                   LAG_CAP_NORMAL + LAG_CAP_ROBUST };
 static llr_t g_h64[RXS_MAX_INST][MAX_LLRS], g_d64[RXS_MAX_INST][MAX_LLRS];
 static int g_hexps[RXS_MAX_INST][MAX_SYMS], g_dexps[RXS_MAX_INST][MAX_SYMS];
 /* per-call scratch (never live across rxs_push calls) */
@@ -233,10 +268,22 @@ rxs_t *rxs_open(link_mode_t mode, int calibrate)
     r->total_blocks = r->tone0 + r->tone1;
     r->blk_base = BLK_OFF_OF[(int)mode];
     r->blk_mask = BLK_CAP_OF[(int)mode] - 1;
+    r->lag_base = LAG_OFF_OF[(int)mode];
+    r->lag_mask = LAG_CAP_OF[(int)mode] - 1;
     if (r->total_blocks > BLK_CAP_OF[(int)mode])
         return 0;   /* window does not fit its slice -- caps are wrong */
-    r->zc_win = 3 * r->T * FFT_BINS + r->demod.symbol_len + 4 * FFT_BINS
-                + r->B;
+    /* The ZC sits at the END of the tone field, and cs_abs is accurate to
+     * a few hundred samples (measured +37 / -219 / -220 for the three
+     * modes). Scanning from cs_abs across the whole tone field therefore
+     * searched ~60000 offsets to find something within a block or two of
+     * a known place -- and, worse, anchored the read at cs_abs, which is
+     * two tone fields behind the write head by the time the detector
+     * commits. Anchor at the tone field's end instead, with a margin of
+     * four blocks either way. */
+    r->zc_anchor = 3 * r->T * FFT_BINS - ZC_ANCHOR_MARGIN_BLK * r->B;
+    if (r->zc_anchor < 0)
+        r->zc_anchor = 0;
+    r->zc_win = r->demod.symbol_len + 2 * ZC_ANCHOR_MARGIN_BLK * r->B;
     r->st = S_SEARCH;
     r->best_metric = -1;
     r->last_eval_blk = -1;
@@ -269,12 +316,30 @@ static void block_summary(rxs_t *r, int64_t blk_idx)
      * deliberately undersized to 8192, aborting here took a receiver
      * that decoded 16 of 16 blocks down to 0. */
     {   /* the ring yields samp_t; the FFT works in int64 */
-        samp_t sre[512], sim[512];   /* DET_B max */
+        samp_t sre[512 + LAG_N], sim[512 + LAG_N];   /* DET_B max + lag */
         int t;
-        ring_copy(r, blk_idx * B, B, sre, sim);
+        int64_t base = blk_idx * B - LAG_N;
+        int hist = LAG_N;
+
+        if (base < 0) {           /* first block: no history to correlate */
+            base = 0;
+            hist = 0;
+        }
+        ring_copy(r, base, B + hist, sre, sim);
         for (t = 0; t < B; t++) {
-            re[t] = sre[t];
-            im[t] = sim[t];
+            re[t] = sre[hist + t];
+            im[t] = sim[hist + t];
+        }
+        {   /* raw lag-N correlation, same term order as lag_words_src() */
+            lag_sum_t *ls = &g_lag[r->lag_base
+                                   + (int)(blk_idx & r->lag_mask)];
+            ls->re = 0;
+            ls->im = 0;
+            for (t = (hist ? 0 : LAG_N); t < B; t++) {
+                int a = hist + t - LAG_N, b = hist + t;
+                ls->re += (int64_t)sre[a] * sre[b] + (int64_t)sim[a] * sim[b];
+                ls->im += (int64_t)sre[a] * sim[b] - (int64_t)sim[a] * sre[b];
+            }
         }
     }
     fft_bfp(re, im, B, 13, &exp);
@@ -387,16 +452,42 @@ static void tone_commit(rxs_t *r)
          r->best_shift, (long long)r->best_metric);
     r->cs_abs = r->best_off_blk * r->B;
     r->cw = (int64_t)r->best_shift * r->word_per_bin;
-    {   /* pulled: the lag correlation needs a 128-sample delay line, not
-         * the 40960-sample segment, so nothing is materialised here */
-        zc_ring_ctx_t z;
-        zc_src_t src;
-        z.r = r;
-        z.base_abs = r->cs_abs;
-        z.cw = r->cw;
-        src.ctx = &z;
-        src.fetch = zc_ring_fetch;
-        r->cw += rx_lag_n_word_src(&src, seg_n);
+    {   /* Summed from the per-block summaries -- the tone segment is NOT
+         * re-read. The blocks were correlated raw, so the coarse word is
+         * removed here as an angle subtraction (blk_sum_t). Before this,
+         * the re-read anchored at cs_abs and single-handedly set the raw
+         * ring's size. */
+        int64_t rr = 0, ri = 0, ang, mag;
+        int nb = seg_n / r->B, b;
+        for (b = 0; b < nb; b++) {
+            const lag_sum_t *ls =
+                &g_lag[r->lag_base
+                       + (int)((r->best_off_blk + b) & r->lag_mask)];
+            rr += ls->re;
+            ri += ls->im;
+        }
+        cordic_atan2(ri, rr, &ang, &mag);
+        ang = (int64_t)(int32_t)(uint32_t)(ang - r->cw * LAG_N);
+        {
+            int64_t fine = ang >= 0 ? (ang + LAG_N / 2) / LAG_N
+                                    : -((-ang + LAG_N / 2) / LAG_N);
+#ifdef LAG_AB
+            {   /* the old path, for comparison only */
+                zc_ring_ctx_t z; zc_src_t src; int64_t ref;
+                z.r = r; z.base_abs = r->cs_abs; z.cw = r->cw;
+                src.ctx = &z; src.fetch = zc_ring_fetch;
+                ref = rx_lag_n_word_src(&src, seg_n);
+                fprintf(stderr,
+                        "[lag] mode=%d nb=%d off_blk=%lld  old=%lld new=%lld"
+                        "  diff=%lld (%.4f Hz)\n",
+                        (int)r->mode, nb, (long long)r->best_off_blk,
+                        (long long)ref, (long long)fine,
+                        (long long)(fine - ref),
+                        (double)(fine - ref) * 12000.0 / 4294967296.0);
+            }
+#endif
+            r->cw += fine;
+        }
     }
     r->st = S_ZC_WAIT;
 }
@@ -554,13 +645,13 @@ static int advance(rxs_t *r, rxs_event_t *ev)
         case S_ZC_WAIT: {
             int ft;
             int64_t fw;
-            if (r->abs_n < r->cs_abs + r->zc_win)
+            if (r->abs_n < r->cs_abs + r->zc_anchor + r->zc_win)
                 return 0;
             {
                 zc_ring_ctx_t z;
                 zc_src_t src;
                 z.r = r;
-                z.base_abs = r->cs_abs;
+                z.base_abs = r->cs_abs + r->zc_anchor;
                 z.cw = r->cw;
                 src.ctx = &z;
                 src.fetch = zc_ring_fetch;
@@ -580,7 +671,7 @@ static int advance(rxs_t *r, rxs_event_t *ev)
             }
             SDBG("zc: ft=%d fw=%lld -> start=%lld\n", ft, (long long)fw,
                  (long long)(r->cs_abs + ft));
-            r->start_abs = r->cs_abs + ft;
+            r->start_abs = r->cs_abs + r->zc_anchor + ft;
             r->cfo_word = r->cw + fw;
             r->n_hdr = (conv_cc_elements(CC_R13, HEADER_BITS)
                         + N_DATA_CARRIERS - 1) / N_DATA_CARRIERS;
