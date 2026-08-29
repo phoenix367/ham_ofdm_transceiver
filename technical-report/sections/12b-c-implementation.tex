@@ -977,6 +977,162 @@ offset. A tighter number needs a much longer capture, which needs the
 receiver to decode as it goes rather than into a buffer; that is the
 next step for this stand, not a result of it.
 
+\subsection{A Board That Is a Radio}
+\label{sec:cport_radio}
+
+Section~\ref{sec:cport_usb} gave the board an identity and a host
+protocol, but bound the station to a \emph{stub} PHY: queues, rate
+ladder, ARQ and reply timers all ran for real, and nothing reached the
+air. Section~\ref{sec:cport_twoboard} gave the opposite half --- frames
+crossing copper between two boards' converters --- with no link layer
+above them and no host beside them. This section is the two in one
+image: a board a host drives over USB and a peer hears over a wire.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{images/radio_firmware.png}
+    \caption{The radio firmware. Half duplex here is a contract rather
+             than a simplification: the streaming generator's state
+             lives in the shared arena \emph{across} \texttt{txs\_pull}
+             calls while the receiver's scratch is call-scoped, so
+             \texttt{rxs\_push} must never run during a transmission ---
+             and does not, because the tick feeds only one FIFO at a
+             time.}
+    \label{fig:radiofw}
+\end{figure}
+
+\paragraph{The transmitter never renders a frame.}
+\texttt{station\_phy\_t::build} is frame-at-once: it is handed a buffer
+and returns a sample count. An EXTREME frame is about 456\,000 samples
+--- 912\,kB --- which this part cannot hold, and demoapp's answer (a
+600\,000-sample buffer) is not available. It is also unnecessary. The
+station never reads or writes those samples: \texttt{out} and
+\texttt{out\_cap} appear nowhere in \texttt{station\_poll\_tx} except
+where they are passed through to \texttt{build}, and the count is what
+the caller acts on. So \texttt{build} here opens a \emph{streaming}
+generator and returns the total it reports without writing a sample,
+and the main loop pulls from that generator into a 2048-sample FIFO as
+the tick drains it. The waveform is identical either way --- a one-block
+burst with no resync is bit-for-bit a frame, which both test suites
+already assert.
+
+The 12\,kHz tick never blocks. The analog bench of
+Section~\ref{sec:cport_twoboard} started a conversion and waited for it
+inside the tick, 19.2\,\textmu s of an 83.3\,\textmu s period; that was
+free when the decoder ran afterwards and is not free when the decoder
+has to keep up. Here the tick reads the conversion the \emph{previous}
+tick started and immediately starts the next, so the sample is one tick
+old --- a constant delay indistinguishable from cable length.
+
+\paragraph{What it corrected: the flash images never enabled the
+caches.} The receiving board dropped 1\,522\,686 captured samples ---
+64\,\% of everything its ADC produced --- and decoded nothing, while the
+transmitting board underran its DAC 375 times. \texttt{SCB\_CCR} read
+\texttt{0x00040200} on the running part: both L1 caches off.
+\texttt{startup\_flash.c} had never enabled them, so code ran from flash
+at two wait states with no instruction cache and every SRAM access
+uncached, which is five to ten times slower than the same code out of
+ITCM. It had not mattered while the flash images only ran a USB endpoint
+and a link layer, and the RAM benches never showed it because their
+\texttt{.text} lives in ITCM and needs no cache. Enabling both (the data
+cache invalidated by set/way first) cut overruns by 61$\times$. Two
+consequences follow and are handled rather than discovered later: a
+debugger reading over the AHB-AP does \emph{not} see dirty lines, so the
+beacon is cleaned explicitly before each read; and a RAM image that now
+inherits \texttt{DC}=1 needs its vector-table writes cleaned, which is
+what Section~\ref{sec:cport_twoboard} already had to fix.
+
+Three smaller faults surfaced with it. The flash linker script listed
+\texttt{.bss} \emph{before} \texttt{.d2\_bss}, and \texttt{.bss}'s
+\texttt{*(.bss*)} matches \texttt{.bss.g\_raw} too --- so the D2 lines
+matched nothing, the 160\,kB sample ring sat in AXI, and adding the
+receiver overflowed AXI by 100\,kB while D2 stood completely empty
+(\texttt{stm32h743\_usb.ld} always had the right order, which is why only
+the flash images were affected). \texttt{TIM6\_DAC}, IRQ~54, had no entry
+in the vector table: designated initialisers leave every other slot
+\texttt{NULL}, so the first tick would have vectored to address zero.
+And arming an empty DAC FIFO underran it once per transmission ---
+166 underruns across 3 frames, each one a mid-rail sample on the air ---
+which pre-filling before starting the carrier reduces to zero.
+
+\paragraph{Sizing the capture FIFO: the worst burst, not the average.}
+The decoder's cost is wildly uneven. Quiet blocks are cheap; the commit
+at the end of a frame --- acquisition, demodulation of every tiled
+symbol, Viterbi --- is one long blocking call, measured at 2283\,ms
+inside a single \texttt{rxs\_push} against a 19.5\,s frame. As an
+average that is about 12\,\% duty, comfortably real time. What matters
+is not the average but whether the FIFO can hold the samples that keep
+arriving \emph{through} the burst: 16\,384 samples (1.37\,s) could not,
+dropping 33\,036 samples mid-frame and decoding nothing, while 65\,536
+(5.5\,s) decodes with no overruns at all. The beacon carries
+\texttt{cap\_overruns} and \texttt{push\_ms\_max} so this is checked on
+the part rather than reasoned about.
+
+\paragraph{The receiver follows the negotiated rung.} Each open receiver
+runs its own detector over every sample and the EXTREME one is much the
+most expensive; three concurrently do not fit real time on this part.
+They cannot simply be opened selectively either, because every instance
+shares one raw sample ring and indexes it by its \emph{own} sample
+counter --- feed a subset and they write each other's history at the
+wrong offsets. So all three are opened and the unwanted ones are
+\emph{muted}: a muted instance still consumes every sample, keeping the
+ring and its own timeline coherent, and skips only the per-block
+detection, which is where the cost is. Unmuting rearms the search rather
+than resuming, since a state machine that was mid-frame when it went
+quiet would otherwise decode a frame whose middle it never saw.
+
+Which are active follows \texttt{ladder\_mode(ctl.my\_req)} --- the rung
+\emph{this} station asked the peer to transmit at --- plus two others
+that are not optional. EXTREME always, because it is rung~0 and
+therefore the bootstrap, it is where the ladder decays to after a spell
+of silence, and it is what a peer that cannot hear us falls back to;
+muting it would make the link undiscoverable and unrecoverable exactly
+when recovery is needed. And the mode last decoded on, because
+\texttt{my\_req} is a request rather than an observation: between raising
+it and the peer acting on it, the peer is still transmitting at the old
+mode, and dropping that mode immediately would make the station deaf for
+precisely the exchange that would have confirmed the change --- timeout,
+request decays, link oscillates. In the settled bootstrap state, both
+terms are EXTREME and exactly one detector runs.
+
+\begin{table}[H]
+    \centering
+    \caption{Two boards, one wire, driven from two host consoles. Every
+             figure read off the boards' beacons or the consoles.}
+    \label{tab:radio}
+    \small
+    \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Quantity} & \textbf{Measured} & \textbf{Note} \\
+    \midrule
+    First message, end to end & 36\,s & EXTREME bootstrap,
+                                        $\approx$19.5\,s of air \\
+    Second message            & \textbf{15\,s} & after the ladder
+                                                 climbed \\
+    Frames / decodes, each board & 1 / 1 & B decoded, replied, A decoded
+                                           the reply \\
+    Capture overruns          & \textbf{0} & both boards, throughout \\
+    DAC underruns             & \textbf{0} & both boards, after
+                                             pre-filling \\
+    Worst single decode       & 2283\,ms & of a 19.5\,s frame,
+                                           $\approx$12\,\% duty \\
+    Idle listening set        & EXTREME & \texttt{my\_req} 0, one
+                                          detector \\
+    After the climb           & NORMAL$+$EXTREME & \texttt{my\_req} 9
+                                                   (A), 7 (B) \\
+    SNR reported              & $+15.0$ / $+9.7$\,dB & A and B \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+What this build does not yet do is decode streamed bursts: it provides
+\texttt{build\_burst} but leaves \texttt{receive\_burst} \texttt{NULL},
+so the station uses per-frame bursts --- which is a supported
+configuration rather than a hole, since it is also where the link falls
+back when a stream stops delivering. Streamed reception needs
+\texttt{rxs\_continue\_burst} driven from the link layer's marker, as
+demoapp does.
+
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}
 

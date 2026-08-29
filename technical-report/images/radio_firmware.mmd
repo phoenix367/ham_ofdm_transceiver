@@ -1,0 +1,29 @@
+flowchart TB
+    subgraph TXP["transmit &mdash; nothing ever holds a frame"]
+        direction LR
+        H1["host<br/>board_console.py"] --> U1["usb_modem<br/>CMD_SUBMIT"]
+        U1 --> S1["<b>station_t</b><br/>queues, ladder,<br/>ARQ, carrier sense"]
+        S1 --> B1["<b>phy.build</b><br/>opens a streaming<br/>generator, returns the<br/>COUNT, writes nothing"]
+        B1 --> F1["DAC FIFO<br/>2048 samples<br/>pre-filled first"]
+        F1 --> I1["TIM6 tick<br/>one DAC store"]
+        I1 --> D1["DAC1_OUT1<br/><b>PA4</b>"]
+    end
+
+    subgraph RXP["receive"]
+        direction LR
+        A2["ADC1_INP3<br/><b>PA6</b>"] --> I2["TIM6 tick<br/>read the conversion the<br/>PREVIOUS tick started,<br/>then start the next"]
+        I2 --> F2["capture FIFO<br/>65536 = 5.5 s<br/>sized by the worst<br/>burst, not the average"]
+        F2 --> R2["<b>rxs_push</b> &times; 3<br/>muted ones still consume<br/>samples, skip detection"]
+        R2 --> S2["<b>station_on_decoded</b><br/>then the ladder,<br/>ARQ, delivery"]
+        S2 --> U2["usb_modem<br/>EVT_MESSAGE"]
+        U2 --> H2["host<br/>board_console.py"]
+    end
+
+    TXP == "PA4 &rarr; one wire &rarr; PA6 on the peer board" ==> RXP
+
+    classDef fw fill:#e8f4ff,stroke:#3b7dd8
+    classDef hw fill:#fff4e6,stroke:#d98b30
+    classDef host fill:#eef7ee,stroke:#4a8a4a
+    class U1,S1,B1,F1,F2,R2,S2,U2 fw
+    class I1,D1,A2,I2 hw
+    class H1,H2 host
