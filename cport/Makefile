@@ -244,4 +244,21 @@ sanitize: $(GEN) | $(BUILD)
 	    src/usb_proto.c && printf '%-16s ' fuzz_usb && ./$(BUILD)/san_fuzz_usb
 	@echo "sanitize: clean"
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize
+# Flash-resident firmware: boots on its own from 0x08000000 and survives
+# reset, unlike the RAM images (which inherit the resident firmware's
+# clock via the JTAG load). target/startup_flash.c brings up the 400 MHz
+# clock tree, FPU and vector table from cold. Program with:
+#   openocd -f ../tools/esp32-probe/stm32h7-rbb.cfg -c init -c halt \
+#     -c "program build/<img>.elf verify" -c exit
+FLASHCC = /usr/bin/arm-none-eabi-gcc
+FLASHFLAGS = -std=c99 -O2 -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 \
+             -mfloat-abi=hard -ffunction-sections -fdata-sections \
+             -Isrc -Itarget -nostartfiles -T target/stm32h743_flash.ld \
+             -Wl,--gc-sections
+
+heartbeat: | $(BUILD)
+	$(FLASHCC) $(FLASHFLAGS) target/startup_flash.c bench/heartbeat_flash.c \
+	    -o $(BUILD)/heartbeat_flash.elf
+	@$(QEMUSIZE) $(BUILD)/heartbeat_flash.elf
+
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat
