@@ -41,13 +41,20 @@ supply, not from the ESP32.
 
 | ESP32 | signal | STM32H7 pin | needed for |
 |---|---|---|---|
-| 18 | TCK / SWCLK | PA14 | both |
-| 19 | TMS / SWDIO | PA13 | both |
-| 21 | TDI | PA15 | JTAG only |
-| 22 | TDO | PB3 | JTAG only |
-| 23 | nTRST | PB4 | JTAG only, optional |
+| 18 | TCK / SWCLK | PA14 (LQFP100 pin 76) | both |
+| 19 | TMS / SWDIO | PA13 (LQFP100 pin 72) | both |
+| 21 | TDI | PA15 (LQFP100 pin 77) | JTAG only |
+| 22 | TDO | PB3 (LQFP100 pin 89) | JTAG only |
+| 23 | nTRST | PB4 (LQFP100 pin 90) | JTAG only, **optional** -- see below |
 | 25 | nSRST | NRST | optional, both |
 | GND | GND | GND | **required** |
+
+**nTRST can be left unwired.** Both configs use `reset_config srst_only`,
+so OpenOCD never drives TRST, and PB4/NJTRST has an internal pull-up that
+holds the TAP out of reset on its own. It is in the table because the
+probe firmware can drive it, not because the link needs it. Pin numbers
+above are LQFP100 (the `V` in H743**V**I); they are the standard STM32
+LQFP100 debug pins, confirmed against Table 9 of DS12110 Rev 11.
 
 For a second board on the same probe, the three push-pull control lines
 have a duplicate pin each -- 26 (TCK), 27 (TMS), 13 (nTRST) -- see
@@ -56,9 +63,9 @@ have a duplicate pin each -- 26 (TCK), 27 (TMS), 13 (nTRST) -- see
 ### Two boards on one probe
 
 JTAG daisy-chains, so one ESP32 can debug both boards of the audio-link
-stand at once -- `stm32h7-rbb-dual.cfg`. TCK/TMS/nTRST/nSRST fan out to
-both boards and only TDI/TDO chain, so beyond a second board's worth of
-the table above it costs **one** new wire:
+stand at once -- `stm32h7-rbb-dual.cfg`. TCK/TMS/nTRST get a driver pin
+per board and nSRST is shared; only TDI/TDO chain, which is the one wire
+that makes it a chain:
 
     ESP32 21 (TDI) --> board1 PA15
                        board1 PB3  --> board2 PA15    <-- the chain wire
