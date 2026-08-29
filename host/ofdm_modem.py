@@ -27,6 +27,7 @@ round trip exercises both ends of the real protocol.
 """
 
 import argparse
+import errno
 import select
 import struct
 import subprocess
@@ -164,6 +165,18 @@ class _UsbTransport:
         self.dev = matches[0]
         self.dev.set_configuration()
         usb.util.claim_interface(self.dev, 0)
+        # Clear any halt left behind by a previous session. A process
+        # killed mid-transfer can leave an endpoint halted, and the next
+        # open then inherits it: writes are accepted by libusb and never
+        # reach the device, which looks exactly like unresponsive
+        # firmware. Observed here after a hung read was SIGTERMed --
+        # rx_bytes on the device stayed frozen while the host saw no
+        # error at all.
+        for ep in (EP_OUT, EP_IN):
+            try:
+                self.dev.clear_halt(ep)
+            except Exception:
+                pass          # not halted, or the device disallows it
         self.serial = usb.util.get_string(self.dev, self.dev.iSerialNumber)
         self.desc = f"usb:{VID:04x}:{PID:04x}/{self.serial}"
 
@@ -173,10 +186,22 @@ class _UsbTransport:
     def read(self, timeout):
         import usb.core
         try:
+            # Clamp to >=1 ms: libusb reads timeout=0 as "block forever",
+            # and a deadline that has just expired computes to exactly
+            # zero. The previous bug hid this one -- the exception
+            # escaped before any caller could ask for a zero wait.
+            ms = int(timeout * 1000)
             return bytes(self.dev.read(EP_IN, 4096,
-                                       timeout=int(timeout * 1000)))
+                                       timeout=ms if ms > 0 else 1))
+        except usb.core.USBTimeoutError:
+            # A read timing out is the NORMAL case for an event stream:
+            # the device has nothing to say. Caught by TYPE, not by
+            # matching the message -- libusb renders it "Operation timed
+            # out", which does not contain the substring "timeout", so a
+            # text match silently let it escape and killed the session.
+            return b""
         except usb.core.USBError as e:
-            if "timeout" in str(e).lower():
+            if e.errno == errno.ETIMEDOUT:
                 return b""
             raise
 
