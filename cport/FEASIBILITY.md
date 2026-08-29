@@ -264,9 +264,29 @@ Data-capable total (all but ITCM): **1019904 B**. Measured `.bss`:
 | demoapp settings, no EXT frames | 892396 | yes, 125 KB spare |
 | demoapp settings + EXT frames | 1128940 | **no**, over by 109 KB |
 
-(demoapp settings = `ST_MSG_MAX=4096 ST_ASM_MAX=8192
-BURST_STREAM_MAX=16`, which take `g_st` from 28 KB to 193 KB. That is an
-application queue budget, not a PHY cost.)
+"cport defaults" throughout means the `#ifndef` values in the headers,
+with no `-D` on the command line -- what `make armmeas` builds. The ones
+that matter: `ST_MAX_MSGS` 8, `ST_MSG_MAX` 256, `ST_ASM_MAX` 4096,
+`ST_DELIVERED_MAX` 16, `BURST_STREAM_MAX` 8, `BC_MAX_GROUP` 8,
+`MAX_LLRS` 8192, `RXS_RAW_RING_LEN` 147456, `OFDM_ARENA_BYTES` 131584.
+
+"demoapp settings" adds the three overrides in `demoapp/Makefile`, whose
+measured costs are additive:
+
+| override | delta .bss |
+|---|---|
+| `ST_MSG_MAX` 256 -> 4096 | **+161280** |
+| `BURST_STREAM_MAX` 8 -> 16 | +16672 |
+| `ST_ASM_MAX` 4096 -> 8192 | +8192 |
+
+`ST_MSG_MAX` dominates because it is multiplied 42 times inside
+`station_t`: `qdata[3][8][ST_MSG_MAX]`, `delivered[16][ST_MSG_MAX]`, and
+the two current messages. 42 x 3840 = 161280 exactly. So the knob that
+decides whether the largest configuration fits is not a PHY parameter --
+it is how big a message the link layer queues, times how many it keeps
+in flight and remembers for duplicate suppression. Size it to the
+application, or pool the queues instead of giving all 42 slots the worst
+case.
 
 **Code in RAM: yes.** The image is 62009 B against ITCM's 65536 -- 94.6 %
 full, 3527 B spare. Only ~32 KB of that is instructions; the other
