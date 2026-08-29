@@ -28,6 +28,7 @@ typedef struct {
     up_info_t info;
     int delivered_seen;      /* how much of the delivered log we have sent */
     double now;              /* protocol time, set by the caller */
+    int diag_on;             /* UP_CFG_DIAG_STREAM, default 0 */
 } usb_modem_t;
 
 void usb_modem_init(usb_modem_t *m, station_t *st, const uint8_t uid[12],

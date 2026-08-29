@@ -49,7 +49,8 @@ RSP_INFO, EVT_MESSAGE, EVT_STATUS, EVT_DIAG, RSP_PONG, EVT_LOG, EVT_AUDIO = (
     0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87)
 
 CFG = {"rung_ceiling": 1, "burst_window": 2, "burst_stream": 3,
-       "freq_trim_mhz": 4, "audio_tap": 5, "anchor": 6}
+       "freq_trim_mhz": 4, "audio_tap": 5, "anchor": 6,
+       "diag_stream": 7}
 
 TYPE_NAME = {RSP_INFO: "info", EVT_MESSAGE: "message", EVT_STATUS: "status",
              EVT_DIAG: "diag", RSP_PONG: "pong", EVT_LOG: "log",

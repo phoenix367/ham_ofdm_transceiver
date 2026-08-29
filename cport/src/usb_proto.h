@@ -76,7 +76,8 @@ enum {
     UP_CFG_BURST_STREAM = 3, /* 0/1 */
     UP_CFG_FREQ_TRIM_MHZ= 4, /* millihertz, signed */
     UP_CFG_AUDIO_TAP    = 5, /* 0 = off, else decimation factor */
-    UP_CFG_ANCHOR       = 6  /* 0/1, AFC frequency reference */
+    UP_CFG_ANCHOR       = 6, /* 0/1, AFC frequency reference */
+    UP_CFG_DIAG_STREAM  = 7  /* 0/1, default OFF -- see usb_modem.c */
 };
 
 /* --- payload layouts, all little-endian, all fixed size ------------- */

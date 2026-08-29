@@ -78,6 +78,7 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
                 station_freq_trim(m->st, (double)v / 1000.0);
                 break;
             case UP_CFG_ANCHOR: m->st->afc_anchor = v ? 1 : 0; break;
+            case UP_CFG_DIAG_STREAM: m->diag_on = v ? 1 : 0; break;
             default: break;
             }
         }
@@ -177,13 +178,32 @@ int usb_modem_poll(usb_modem_t *m, uint8_t *out, int cap)
     return n;
 }
 
+/* The diagnostic stream is OFF until the host asks for it, and even then
+ * it yields to everything else.
+ *
+ * A station with no radio attached times out continuously, and each
+ * event was a frame. With nothing draining them they filled the 512-byte
+ * endpoint buffer within milliseconds and it never recovered: the device
+ * sent exactly 549 bytes and then went silent, while its loop counter
+ * kept climbing and every register read healthy. Command RESPONSES were
+ * stuck behind a debug firehose.
+ *
+ * So: opt-in, and dropped rather than queued once the staging ring is
+ * half full, because a lost diagnostic costs nothing and a lost reply
+ * costs the session. */
 void usb_modem_diag(void *ctx, int ev, int a, int b, int c, int d,
                     double t)
 {
     usb_modem_t *m = (usb_modem_t *)ctx;
     uint8_t out[UP_HDR_LEN + 21];
-    int n = up_encode_diag(ev, a, b, c, d, (uint32_t)(t * 1000.0),
-                           out, (int)sizeof(out));
+    int n;
+
+    if (!m->diag_on || m->txq_len > UM_TXQ / 2) {
+        m->dropped++;
+        return;
+    }
+    n = up_encode_diag(ev, a, b, c, d, (uint32_t)(t * 1000.0),
+                       out, (int)sizeof(out));
     if (n > 0)
         txq_push(m, out, n);
 }

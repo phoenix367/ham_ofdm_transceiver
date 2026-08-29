@@ -179,7 +179,9 @@ CMSIS5    ?= /tmp/cmsis5
 USB_RHPORT ?= 0
 
 USBFW_SRC = target/start.c usb/usb_main.c usb/usb_descriptors.c \
-            usb/bsp_stm32h7.c src/usb_proto.c \
+            usb/bsp_stm32h7.c src/usb_proto.c src/usb_modem.c \
+            src/arena.c src/station.c src/link.c src/packets.c \
+            src/bits.c src/conv.c src/ldpc.c src/tx.c src/fft.c \
             $(TINYUSB)/src/tusb.c $(TINYUSB)/src/common/tusb_fifo.c \
             $(TINYUSB)/src/device/usbd.c \
             $(TINYUSB)/src/class/vendor/vendor_device.c \

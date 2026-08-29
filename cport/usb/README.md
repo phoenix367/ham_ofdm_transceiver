@@ -120,9 +120,50 @@ in place; `reset halt` does not work here because NRST is not wired to
 the probe. A flashed build should install its own table and report
 faults.
 
-## Next
+## Status of the station binding: INCOMPLETE
 
-`usb_main.c` answers the protocol itself; `usb_modem.c` binds it to a
-real station and is already tested against the host driver over a pipe.
-Swapping one for the other is the remaining step, and needs no new
-USB work.
+`usb_main.c` now runs a real `station_t` behind the endpoints via
+`usb_modem.c`, with a stub PHY (no codec on this board, so the link
+layer's timers and rate ladder run for real while the samples go
+nowhere).
+
+It **enumerates correctly** -- `stage` 6, `mounted` 1, the host driver
+opens it by serial -- but the data path **stalls**: the device answers,
+sends exactly 549 bytes in 16 frames, and then both directions stop
+while the main loop keeps running. Reproduced identically across four
+builds, so it is deterministic rather than a race.
+
+Ruled out, each by measurement rather than by argument:
+
+- **the diagnostic firehose.** A station with no radio times out
+  constantly and every event was a frame. Gating the stream behind
+  `UP_CFG_DIAG_STREAM` (now off by default, and dropped above a
+  half-full queue) is right on its own merits -- a debug stream must
+  never crowd out command replies -- but the stall was unchanged.
+- **loop starvation.** With interrupts masked, `tud_int_handler()` runs
+  only as often as the loop does, and calling `station_poll_tx()` every
+  iteration cut the loop from 653 M to 6.6 M. Rate-limiting the station
+  restored it to 14.5 M; the stall was unchanged.
+- **cache versus DMA.** The buffers are in AXI-SRAM with the D-cache on,
+  which would be a real bug if the dwc2 core were mastering them. It is
+  not: `CFG_TUD_DWC2_DMA_ENABLE` defaults to 0 and slave mode to 1, so
+  the CPU copies every byte.
+- **the clock.** `s_cycles` reads 21.0 G, i.e. 52.6 s at 400 MHz, so
+  the station's timers are being driven correctly.
+
+Two genuine bugs were found and fixed on the way, neither of which was
+the cause: the drain loop called `usb_modem_poll()` (which REMOVES
+bytes) before checking `tud_vendor_write_available()`, discarding data
+and desynchronising the host's parser when the endpoint was briefly
+full; and `station_on_tx_end()` was never called, so the station
+believed it was permanently on the air.
+
+549 bytes is suspiciously close to `CFG_TUD_VENDOR_TX_BUFSIZE` (512),
+which points at the endpoint buffer filling and never draining. The next
+diagnostic is to put `txq_len`, `dropped` and
+`tud_vendor_write_available()` into the beacon and watch them at the
+moment it stops -- reading them from guessed struct offsets produced
+garbage and should not be repeated.
+
+Until that is resolved, the **stub** bring-up image (commit 74a3936) is
+the one that demonstrably exchanges data over USB end to end.
