@@ -1009,10 +1009,21 @@ static int usb_console(const char *serial)
     printf("> ");
     fflush(stdout);
 
+    time_t last_ping = 0;
     for (;;) {
         fd_set rf;
         struct timeval tv = { 0, 0 };
-        int n = usbh_read(g_usb, buf, (int)sizeof(buf), 50);
+        time_t now = time(0);
+        int n;
+        /* one ping a second keeps the board's "host attached" state
+         * (and its LED) alive: closing this program does not unmount
+         * the device, so the board would otherwise never notice */
+        if (now != last_ping) {
+            uint32_t tok = (uint32_t)now;
+            usb_send_frame(UP_CMD_PING, &tok, 4);
+            last_ping = now;
+        }
+        n = usbh_read(g_usb, buf, (int)sizeof(buf), 50);
         if (n < 0) {
             printf("\n[%s] usb read failed -- board unplugged?\n", g_name);
             break;

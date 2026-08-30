@@ -490,8 +490,17 @@ def main():
                   "it. 'help' for commands.")
         print("> ", end="", flush=True)
 
+        last_ping = 0.0
         try:
             while True:
+                # one ping a second keeps the board's "host attached"
+                # state (and its LED) alive -- closing this program does
+                # not unmount the device, so the board cannot tell
+                now = time.monotonic()
+                if now - last_ping >= 1.0:
+                    modem.t.write(__import__("ofdm_modem").encode(
+                        0x04, int(now).to_bytes(4, "little")))
+                    last_ping = now
                 # events() yields the SHORT names from TYPE_NAME
                 # ("status", not "EVT_STATUS"), and poke=False because a
                 # ping per loop returns a pong per loop -- measured at

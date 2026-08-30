@@ -893,6 +893,13 @@ enum { LED_ST_OFF = 0, LED_ST_HOST, LED_ST_RX, LED_ST_TX };
 static int g_cs_busy_seen;     /* last verdict from the tx gate's call */
 static uint32_t g_led_rx_ms;   /* g_ms of the last decoded frame */
 static int g_host_seen;        /* a host program has talked to us */
+static uint32_t g_host_last_ms; /* g_ms of the last host command */
+static uint32_t g_host_cmds_seen;
+/* A console that closes does not unmount anything -- the cable is
+ * still in and TinyUSB still says mounted -- so "attached" has to be
+ * kept alive by traffic. Both consoles ping once a second; three
+ * missed beats and the indication goes down. */
+#define HOST_ALIVE_MS 3000u
 
 static void led_tick(void)
 {
@@ -1284,12 +1291,12 @@ int main(void)
             /* the cable being plugged in is not a host: the console
              * announces itself with a command, and an unplug takes the
              * indication back down */
-            if (!tud_mounted()) {
-                g_host_seen = 0;
-                g_modem.host_cmds = 0;
-            } else if (g_modem.host_cmds) {
-                g_host_seen = 1;
+            if (g_modem.host_cmds != g_host_cmds_seen) {
+                g_host_cmds_seen = g_modem.host_cmds;
+                g_host_last_ms = g_ms ? g_ms : 1;
             }
+            g_host_seen = tud_mounted() && g_host_last_ms
+                          && (uint32_t)(g_ms - g_host_last_ms) < HOST_ALIVE_MS;
             led_tick();
             /* expire wedged walks (peer died mid-stream: no events) */
             {
