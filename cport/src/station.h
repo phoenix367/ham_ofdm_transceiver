@@ -376,6 +376,12 @@ void station_set_diag(station_t *st,
                       void (*cb)(void *ctx, int ev, int a, int b, int c,
                                  int d, double t),
                       void *ctx);
-const char *station_diag_name(int ev); /* short label, e.g. "RUNG" */
+const char *station_diag_name(int ev);
+/* Render one diagnostic event as a human-readable line ("burst engage:
+ * 2 frag(s) x 200 B, transfer 1" rather than "a=2 b=200 c=1"), using
+ * the field semantics documented on the enum above. Every console
+ * should print THIS -- the raw a..d numbers are write-only. */
+void station_diag_format(int ev, int a, int b, int c, int d,
+                         char *out, int cap); /* short label, e.g. "RUNG" */
 
 #endif /* OFDM_STATION_H */

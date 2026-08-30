@@ -804,10 +804,12 @@ static void usb_on_frame(void *ctx, uint8_t type, const uint8_t *pl, int len)
     case UP_EVT_DIAG:
         if (len >= 21 && g_debug) {
             int32_t a, b, c, d;
+            char line[160];
             memcpy(&a, pl + 1, 4); memcpy(&b, pl + 5, 4);
             memcpy(&c, pl + 9, 4); memcpy(&d, pl + 13, 4);
-            printf("\n%s [%s] diag %s a=%d b=%d c=%d d=%d\n> ", tstamp(),
-                   g_name, station_diag_name(pl[0]), a, b, c, d);
+            station_diag_format(pl[0], a, b, c, d, line,
+                                (int)sizeof(line));
+            printf("\n%s [%s] . %s\n> ", tstamp(), g_name, line);
             fflush(stdout);
         }
         break;

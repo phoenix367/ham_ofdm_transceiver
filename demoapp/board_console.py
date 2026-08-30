@@ -60,15 +60,42 @@ FILE_MAX_SRC = 1 << 19          # same cap app.c uses
 
 QOS_CONTROL, QOS_INTERACTIVE, QOS_BULK = 0, 1, 2
 
-# station.h's diagnostic events, in order. The station reports its own
-# decisions here -- which is far quicker than inferring them from
-# counters when a transfer misbehaves.
-DIAG = ["TX", "RX", "TIMEOUT", "RUNG", "BURST_ENGAGE", "BURST_FRAG",
-        "BURST_ACKTX", "BURST_ACKRX", "BURST_PROBE", "BURST_DONE",
-        "BURST_STREAM", "BURST_SRX", "BURST_SOFF", "RTO", "BURST_WIN",
-        "BURST_REFRAG"]
-SOFF = {1: "BUILD (the PHY refused)", 2: "NOACK (peer did not follow)",
-        3: "TIMEOUT (windows kept timing out)"}
+# station.h's diagnostic events rendered as human-readable lines -- the
+# Python twin of station_diag_format() in cport/src/station.c; keep the
+# wording in step with it.
+FLAGS = {0: "data", 1: "last-frag", 2: "no-data", 3: "burst-ack",
+         4: "stream", 5: "stream+last", 6: "burst-data", 7: "burst+last"}
+TYPS = {0: "beacon", 4: "data", 5: "ext-data", 6: "bcast"}
+SOFF = {1: "the PHY refused to build", 2: "peer did not follow (sticky)",
+        3: "windows kept timing out"}
+DIAG_FMT = [
+    lambda a, b, c, d: f"tx: rung {a}, {TYPS.get(b, '?')} frame, flags "
+                       f"{FLAGS.get(c, c)}, {d} B payload",
+    lambda a, b, c, d: f"rx: flags {FLAGS.get(a, a)}, seq {b}, ack {c}, "
+                       f"snr {d / 10.0:+.1f} dB",
+    lambda a, b, c, d: f"TIMEOUT at rung {b} -> {a} consecutive loss(es)"
+                       + (" (first burst-ack miss, forgiven)" if c else ""),
+    lambda a, b, c, d: f"rung {a} -> {b} (losses {c}, cap {d})",
+    lambda a, b, c, d: f"burst engage: {a} frag(s) x {b} B, transfer {c}",
+    lambda a, b, c, d: f"burst frag {a}"
+                       + (" +ack-request" if b else "") + f", window left {c}",
+    lambda a, b, c, d: f"bitmap ack sent (transfer {a}, {b} B)",
+    lambda a, b, c, d: f"bitmap ack: {a}/{b} frag(s) delivered",
+    lambda a, b, c, d: f"burst timeout -> 1-frame probe (transfer {a})",
+    lambda a, b, c, d: "burst transfer "
+                       + ("received whole" if a else "fully acked"),
+    lambda a, b, c, d: f"STREAMED {a} block(s) behind one preamble, {b} "
+                       f"samples ({b / 12000.0:.1f} s air), resync {c}",
+    lambda a, b, c, d: f"stream rx: {a} of {b} block(s) decoded",
+    lambda a, b, c, d: f"streaming OFF: {SOFF.get(a, a)}"
+                       + (", remembered for this peer" if b else ""),
+    lambda a, b, c, d: f"reply timer: srtt {a} ms, var {b} ms -> budget "
+                       f"{c} ms (air term {d} ms)",
+    lambda a, b, c, d: f"burst window {b} of {a} (ceiling), {c} frag(s), "
+                       f"{d} s air",
+    lambda a, b, c, d: f"frag {a} B exceeds the air cap at rung {b} "
+                       f"({c} frags) -> disengage, legacy path",
+]
 QOS_NAME = {0: "ctl", 1: "inter", 2: "bulk"}
 
 BOARD_MSG_MAX = 256             # cport ST_MSG_MAX default
@@ -200,12 +227,12 @@ class Console:
                      f" {on_air} on air{ratio})")
 
     def on_diag(self, d):
-        name = DIAG[d["ev"]] if d["ev"] < len(DIAG) else f"ev{d['ev']}"
-        extra = ""
-        if name == "BURST_SOFF":
-            extra = "  <- " + SOFF.get(d["a"], str(d["a"]))
-        self.say(f"diag {name} a={d['a']} b={d['b']} c={d['c']} d={d['d']}"
-                 + extra)
+        ev = d["ev"]
+        if ev < len(DIAG_FMT):
+            self.say(". " + DIAG_FMT[ev](d["a"], d["b"], d["c"], d["d"]))
+        else:
+            self.say(f"diag ev{ev} a={d['a']} b={d['b']} c={d['c']} "
+                     f"d={d['d']}")
 
     def on_log(self, text):
         if "refused" in text:

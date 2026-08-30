@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include <stdio.h>
 #include "station.h"
 #include "packets.h"
 #include "rom_modes.h"
@@ -234,6 +235,113 @@ const char *station_diag_name(int ev)
     return ev >= 0 && ev < (int)(sizeof(names) / sizeof(names[0]))
                ? names[ev]
                : "?";
+}
+
+static const char *diag_flags_name(int f)
+{
+    switch (f) {
+    case 0: return "data";
+    case FLAG_LAST_FRAGMENT: return "last-frag";
+    case FLAG_NO_DATA: return "no-data";
+    case FLAG_BURST_ACK: return "burst-ack";
+    case FLAG_PRIO_STREAM: return "stream";
+    case FLAG_PRIO_STREAM | FLAG_LAST_FRAGMENT: return "stream+last";
+    case FLAG_BURST_DATA: return "burst-data";
+    case FLAG_BURST_DATA | FLAG_LAST_FRAGMENT: return "burst+last";
+    default: return "?";
+    }
+}
+
+static const char *diag_typ_name(int t)
+{
+    switch (t) {
+    case PKT_TYP_BEACON: return "beacon";
+    case PKT_TYP_DATA: return "data";
+    case PKT_TYP_EXT_DATA: return "ext-data";
+    case PKT_TYP_BCAST: return "bcast";
+    default: return "?";
+    }
+}
+
+void station_diag_format(int ev, int a, int b, int c, int d,
+                         char *out, int cap)
+{
+    switch (ev) {
+    case ST_EV_TX:
+        snprintf(out, (size_t)cap, "tx: rung %d, %s frame, flags %s, "
+                 "%d B payload", a, diag_typ_name(b), diag_flags_name(c),
+                 d);
+        break;
+    case ST_EV_RX:
+        snprintf(out, (size_t)cap, "rx: flags %s, seq %d, ack %d, "
+                 "snr %+.1f dB", diag_flags_name(a), b, c, d / 10.0);
+        break;
+    case ST_EV_TIMEOUT:
+        snprintf(out, (size_t)cap, "TIMEOUT at rung %d -> %d consecutive "
+                 "loss(es)%s", b, a,
+                 c ? " (first burst-ack miss, forgiven)" : "");
+        break;
+    case ST_EV_RUNG:
+        snprintf(out, (size_t)cap, "rung %d -> %d (losses %d, cap %d)",
+                 a, b, c, d);
+        break;
+    case ST_EV_BURST_ENGAGE:
+        snprintf(out, (size_t)cap, "burst engage: %d frag(s) x %d B, "
+                 "transfer %d", a, b, c);
+        break;
+    case ST_EV_BURST_FRAG:
+        snprintf(out, (size_t)cap, "burst frag %d%s, window left %d",
+                 a, b ? " +ack-request" : "", c);
+        break;
+    case ST_EV_BURST_ACKTX:
+        snprintf(out, (size_t)cap, "bitmap ack sent (transfer %d, %d B)",
+                 a, b);
+        break;
+    case ST_EV_BURST_ACKRX:
+        snprintf(out, (size_t)cap, "bitmap ack: %d/%d frag(s) delivered",
+                 a, b);
+        break;
+    case ST_EV_BURST_PROBE:
+        snprintf(out, (size_t)cap, "burst timeout -> 1-frame probe "
+                 "(transfer %d)", a);
+        break;
+    case ST_EV_BURST_DONE:
+        snprintf(out, (size_t)cap, "burst transfer %s",
+                 a ? "received whole" : "fully acked");
+        break;
+    case ST_EV_BURST_STREAM:
+        snprintf(out, (size_t)cap, "STREAMED %d block(s) behind one "
+                 "preamble, %d samples (%.1f s air), resync %d", a, b,
+                 b / 12000.0, c);
+        break;
+    case ST_EV_BURST_SRX:
+        snprintf(out, (size_t)cap, "stream rx: %d of %d block(s) decoded",
+                 a, b);
+        break;
+    case ST_EV_BURST_SOFF:
+        snprintf(out, (size_t)cap, "streaming OFF: %s%s",
+                 a == ST_SOFF_BUILD ? "the PHY refused to build"
+                 : a == ST_SOFF_NOACK ? "peer did not follow (sticky)"
+                 : a == ST_SOFF_TIMEOUT ? "windows kept timing out"
+                 : "?", b ? ", remembered for this peer" : "");
+        break;
+    case ST_EV_RTO:
+        snprintf(out, (size_t)cap, "reply timer: srtt %d ms, var %d ms "
+                 "-> budget %d ms (air term %d ms)", a, b, c, d);
+        break;
+    case ST_EV_BURST_WIN:
+        snprintf(out, (size_t)cap, "burst window %d of %d (ceiling), "
+                 "%d frag(s), %d s air", b, a, c, d);
+        break;
+    case ST_EV_BURST_REFRAG:
+        snprintf(out, (size_t)cap, "frag %d B exceeds the air cap at "
+                 "rung %d (%d frags) -> disengage, legacy path", a, b, c);
+        break;
+    default:
+        snprintf(out, (size_t)cap, "%s a=%d b=%d c=%d d=%d",
+                 station_diag_name(ev), a, b, c, d);
+        break;
+    }
 }
 
 /* report a tx-rung change with the controller inputs that caused it */
