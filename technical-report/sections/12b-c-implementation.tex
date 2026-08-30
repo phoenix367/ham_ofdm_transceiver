@@ -1766,6 +1766,43 @@ by that very transfer --- its record arrives too late to size it. A
 small bulk item sent first primes the record when the difference
 matters.
 
+\subsubsection*{The ceilings become operator knobs}
+
+The record's window field had been the compile-time buffer limit, and
+the protocol had carried a related embarrassment since its first
+revision: \texttt{config rung\_ceiling} --- the operator's cap on the
+rate ladder --- was documented in the USB key list and implemented
+nowhere. The modem's configuration handler simply had no case for it,
+and nothing ever noticed, because nothing ever read the setting.
+
+Both ceilings are now real, runtime, and declared. \texttt{config
+win\_max} bounds the streamed window this station accepts \emph{and}
+sends (byte 4 of the record); \texttt{config rung\_ceiling} bounds
+the rung it transmits at or requests (byte 9, encoded as
+ceiling$+$1 so the zero an older firmware sends still reads as
+``unspecified''). Changing either while a peer is known pushes a
+refreshed record at once, rather than waiting for the next transfer to
+re-handshake.
+
+Enforcement sits in the station, deliberately outside the rate
+controller: every transmit-rung decision passes through a clamp ---
+the controller's choice, bounded by our own ceiling and by the fastest
+rung the peer declared --- because clamping \emph{inside} the
+controller would poison its per-rung offset learning with rungs it
+never actually chose. Requests are clamped the same way, and the
+window at engage is the minimum of the operator window, the buffer
+limit, our declared ceiling and the peer's.
+
+The verification ran over USB, no rebuild involved: board~B was given
+\texttt{win\_max 4} and \texttt{rung\_ceiling 9} from its console,
+and board~A --- whose controller wanted rung~12 on a clean wire ---
+sent fourteen frames at rung~9 and none above, every window engage
+reading \texttt{4 of 16 (ceiling)}, with A's status line showing the
+declared limits: \texttt{window 4, rung ceiling 9 (handshake
+complete)}. The suite holds the same case synthetically: a peer
+declaring window~4 and ceiling~9 against a controller that wants the
+top rung, asserted on both the window and every frame's rung.
+
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}
 
