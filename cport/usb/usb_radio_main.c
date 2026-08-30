@@ -855,6 +855,20 @@ int main(void)
             if (g_tx_pulled != g_tx_total)
                 g_beacon.tx_short++;
             g_tx_on = 0;
+            /* Park the DAC at MID-RAIL. The tick only writes the DAC
+             * while transmitting, so without this the pin HOLDS the
+             * frame's last sample -- anywhere within +-0.9 V -- until
+             * the next transmission. The receiver never noticed (bin 0
+             * is unused; decoding is DC-blind), but the peer's carrier
+             * sense reads mean SQUARE, and a parked DAC 0.83 V off
+             * mid-rail puts a constant 2.7e8 on the peer's cs: its
+             * floor glues to it, its busy logic lives on a cliff, and
+             * the level changes with every frame's final sample --
+             * which is why the stand's failures wandered like a loose
+             * wire and healed when a frame happened to end near zero.
+             * Measured: quiet cs 8.6e4 after a fresh boot (DAC at
+             * dac_init's mid-rail), 2.75e8 after the first frame. */
+            DAC_DHR12R1 = 2048;
             g_cap_r = g_cap_w;            /* drop what leaked in */
             station_on_tx_end(&g_st, t);
         }

@@ -382,14 +382,20 @@ Cross-module invariants that are easy to break:
   boards' first-ever key-ups at ms=300031/300029 = CS_REBASE_S exactly.
   channel_busy() returns idle and leaves the floor alone until
   g_ms >= 1000.
-- A FLATLINED ADC reads as permanent carrier: a disconnected DAC->ADC
-  wire floats at some DC (measured 0.81 V, sigma 27 counts), cs sits at
-  DC^2 (2.7e8 for 16.4k counts), and busy latches until a rebase. The
-  diagnostic signature is cs nearly CONSTANT (+-0.1%) across seconds --
-  real OFDM varies far more -- and the raw capture ring (g_cap over
-  JTAG) settles it in one read: stdev ~27 = no wire, stdev ~11000 =
-  signal. The two-board stand's wires are breadboard-flaky; check them
-  before chasing firmware.
+- The IDLE DAC must be PARKED AT MID-RAIL explicitly (usb_radio_main
+  tx-end path). The tick only writes the DAC while transmitting, so
+  without the park the pin HOLDS the frame's last sample -- anywhere in
+  +-0.9 V -- until the next transmission. Decoding never notices (bin 0
+  unused, DC-blind) but the peer's carrier sense reads mean SQUARE: a
+  park 0.83 V off mid-rail puts a constant 2.7e8 on the peer's cs, its
+  floor glues to it, and the level changes with every frame's final
+  sample. This manufactured every "flaky wire" symptom on the stand --
+  wandering DC levels, heal-and-relapse, power-cycle "fixes" (fresh
+  dac_init parks mid-rail until the first frame ends). The diagnostic
+  signature is cs nearly CONSTANT (+-0.4%) across seconds while frames
+  still DECODE fine; the raw capture ring (g_cap over JTAG) settles it
+  in one read (stdev ~27 at a fixed mean = a parked/floating level,
+  stdev ~11000 = signal). Suspect the park/bias before the wire.
 - The CS floor's climb rate is defined PER 40 ms WINDOW (demoapp's
   cadence), not per call: `channel_busy()` runs at 1 kHz on the boards
   vs ~25 Hz in demoapp, and multiplying per call raised the floor 40x
