@@ -90,7 +90,22 @@ Cross-module invariants that are easy to break:
   gain-weights symbol rows by mean |LLR| — equal-weight pooling counts QSB
   fading as noise (measured 5–15 dB pessimistic on EXTREME frames) and
   stalls the rate ladder; its −7.2 dB calibration constant is measured, not
-  derived. The frequency search (fixed: first symbol via `COARSE_GATE_Q4`;
+  derived. On top of that raw estimate sits a per-(mode, modulation)
+  OUTPUT MAP (`FixedReceiver.SNR_MAP` in `fixed/rx.py`, emitted into
+  `rom_modes.h` by gen_vectors.py, applied by `rxd_snr_map` in both C
+  receive paths): the raw estimate rails at a per-combo ceiling (LLRs
+  saturate, then the tile_db subtraction spreads the ceilings up to
+  12 dB apart), so EXTREME frames read +0.5 dB on a wire NORMAL frames
+  read at +12 dB, and every EXTREME decode cratered the peer's filtered
+  SNR and whipsawed the ladder (measured: rung 10 -> 0 -> 8 with zero
+  losses). The map is measured (est_fixed, est_float) pairs over
+  simulate_channel's own nominal convention, so the integer twin now
+  reports what the FLOAT estimator -- the reference the ladder was
+  system-tested against -- reads on the same waveform; post-map the
+  twins agree to ~0.3 dB across the grid and `fixed_point.py` asserts
+  that parity at −7/0/+15 (the old "estimate ≈ nominal" check described
+  the pre-map contract and is gone). Recalibrate by re-running the
+  sweep if the estimator or the channel model changes. The frequency search (fixed: first symbol via `COARSE_GATE_Q4`;
   float: every symbol via `TiledOFDMModem.COARSE_GATE`) is two-stage behind
   a measured contrast gate; don't remove the full-grid fallback — the
   quarter-length coarse argmax alone costs ~0.5 dB at the EXTREME edge

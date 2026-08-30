@@ -32,6 +32,52 @@ static samp_t g_i[RXD_MAX_SAMPLES], g_q[RXD_MAX_SAMPLES];
 static const double TILE_DBS[3] = { TILE_DB_NORMAL, TILE_DB_ROBUST,
                                     TILE_DB_EXTREME };
 
+static const double *snr_map_fx(link_mode_t m, int mui, int *n)
+{
+#define ROW(NM) do { \
+        if (mui == 0) { *n = SNR_MAP_N_##NM##_MU0; return SNR_MAP_FX_##NM##_MU0; } \
+        if (mui == 1) { *n = SNR_MAP_N_##NM##_MU1; return SNR_MAP_FX_##NM##_MU1; } \
+        *n = SNR_MAP_N_##NM##_MU2; return SNR_MAP_FX_##NM##_MU2; \
+    } while (0)
+    switch (m) {
+    case MODE_ROBUST:  ROW(ROBUST);
+    case MODE_EXTREME: ROW(EXTREME);
+    default:           ROW(NORMAL);
+    }
+#undef ROW
+}
+
+static const double *snr_map_fl(link_mode_t m, int mui)
+{
+#define ROW(NM) do { \
+        if (mui == 0) return SNR_MAP_FL_##NM##_MU0; \
+        if (mui == 1) return SNR_MAP_FL_##NM##_MU1; \
+        return SNR_MAP_FL_##NM##_MU2; \
+    } while (0)
+    switch (m) {
+    case MODE_ROBUST:  ROW(ROBUST);
+    case MODE_EXTREME: ROW(EXTREME);
+    default:           ROW(NORMAL);
+    }
+#undef ROW
+}
+
+double rxd_snr_map(link_mode_t mode, int mu, double est)
+{
+    int mui = mu == 4 ? 2 : (mu == 2 ? 1 : 0);
+    int n, i;
+    const double *fx = snr_map_fx(mode, mui, &n);
+    const double *fl = snr_map_fl(mode, mui);
+
+    if (est <= fx[0])       /* below the range: continue the 1st segment */
+        return fl[0] + (est - fx[0]) * (fl[1] - fl[0]) / (fx[1] - fx[0]);
+    for (i = 1; i < n; i++)
+        if (est <= fx[i])
+            return fl[i - 1] + (est - fx[i - 1])
+                   * (fl[i] - fl[i - 1]) / (fx[i] - fx[i - 1]);
+    return fl[n - 1];       /* at/above the rail: clamp to the ceiling */
+}
+
 double rxd_tile_db(link_mode_t mode)
 {
     return TILE_DBS[mode];
@@ -619,8 +665,9 @@ static llr_t *const comb = (llr_t *)(rx_arena + 3 * MAX_LLRS * sizeof(llr_t));
         }
         if (num > 0 && den > 0) {
             int l2 = rxd_log2_q4(num) - rxd_log2_q4(den);
-            r->last_snr_db = (double)l2 / 16.0 * TEN_LOG10_2
-                             - TILE_DBS[r->mode] + SNR_CAL_DB;
+            r->last_snr_db = rxd_snr_map(r->mode, mu,
+                             (double)l2 / 16.0 * TEN_LOG10_2
+                             - TILE_DBS[r->mode] + SNR_CAL_DB);
         } else {
             r->last_snr_db = -30.0;
         }

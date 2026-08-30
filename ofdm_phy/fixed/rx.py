@@ -525,6 +525,48 @@ class FixedReceiver:
     # modes/modulations (in-band vs 6 kHz-band reference + estimator gain)
     SNR_CAL_DB = -7.2
 
+
+    # Per-(mode, modulation) output map for the SNR estimate: measured
+    # (est_fixed, est_float) pairs over simulate_channel's own nominal
+    # convention, applied piecewise-linearly so the integer estimator
+    # reports what the FLOAT estimator -- the reference the rate ladder
+    # was system-tested against -- would report on the same waveform.
+    # Without it the raw estimate saturates at a per-(mode,mod) ceiling
+    # (LLRs rail, then the tile_db subtraction spreads the ceilings up
+    # to 12 dB apart), and EXTREME frames read +0.5 dB on a wire that
+    # NORMAL frames read at +12 dB: every EXTREME decode cratered the
+    # peer's filtered SNR and whipsawed the ladder (measured on the
+    # two-board stand: rung 10 -> 0 -> 8 with zero losses). Data:
+    # 7 combos x 5-7 nominals x 2 seeds, generator in the session log.
+    # EXTREME QPSK/QAM16 are never emitted by the ladder; they fall
+    # back to the EXTREME/BPSK map.
+    SNR_MAP = {
+        ('EXTREME', 1): [(-21.9, -9.2), (-16.1, -3.6), (-10.0, 2.9), (-5.3, 8.9), (-2.7, 13.1), (-1.6, 15.3), (-1.4, 16.2)],
+        ('NORMAL', 1): [(-10.1, 3.7), (-5.3, 7.7), (-1.6, 11.6), (1.4, 14.3), (5.0, 18.3), (8.2, 22.2), (9.5, 24.7)],
+        ('NORMAL', 2): [(-8.1, 9.3), (-4.5, 12.2), (-1.8, 14.6), (1.8, 18.2), (4.7, 21.4), (5.8, 22.9)],
+        ('NORMAL', 4): [(-0.3, 14.4), (2.5, 15.6), (6.3, 18.2), (10.4, 21.3), (11.9, 22.5)],
+        ('ROBUST', 1): [(-14.3, -1.3), (-7.7, 5.0), (-1.7, 10.6), (2.0, 16.4), (3.6, 19.7), (4.2, 21.7)],
+        ('ROBUST', 2): [(-14.9, 2.0), (-10.6, 5.2), (-5.5, 10.4), (-1.5, 15.8), (0.2, 18.4), (0.7, 19.5)],
+        ('ROBUST', 4): [(-6.3, 8.4), (-1.0, 10.9), (3.7, 15.0), (5.9, 17.1), (6.5, 17.9)],
+    }
+
+    @classmethod
+    def _snr_map(cls, mode_name, mu, est):
+        pts = cls.SNR_MAP.get((mode_name, mu))
+        if pts is None:
+            pts = cls.SNR_MAP.get((mode_name, 1))
+        if est <= pts[0][0]:
+            # below the measured range: continue the first segment
+            x0, y0 = pts[0]
+            x1, y1 = pts[1]
+            return y0 + (est - x0) * (y1 - y0) / (x1 - x0)
+        for i in range(1, len(pts)):
+            if est <= pts[i][0]:
+                x0, y0 = pts[i - 1]
+                x1, y1 = pts[i]
+                return y0 + (est - x0) * (y1 - y0) / (x1 - x0)
+        return pts[-1][1]     # at/above the rail: clamp to the ceiling
+
     @staticmethod
     def _snr_block_moments(arr64, ref, cap):
         """Per-column moments of one LLR block, with per-symbol GAIN
@@ -552,7 +594,7 @@ class FixedReceiver:
         den = w * int(np.sum(p_c)) - num
         return (num, den) if num > 0 and den > 0 else None
 
-    def _estimate_snr_db(self, blocks):
+    def _estimate_snr_db(self, blocks, mu=1):
         """Data-aided SNR estimate: per-column moments of the aligned LLRs
         (columns remove the multipath |H|^2 spread, rows are gain-weighted
         against fading), pooled Es/N0 over all blocks, integer log2 -> dB,
@@ -568,7 +610,9 @@ class FixedReceiver:
         if num <= 0 or den <= 0:
             return None
         l2 = self._log2_q4(num) - self._log2_q4(den)
-        return l2 / 16.0 * (10.0 * np.log10(2.0)) - self._tile_db + self.SNR_CAL_DB
+        raw = l2 / 16.0 * (10.0 * np.log10(2.0)) - self._tile_db \
+              + self.SNR_CAL_DB
+        return self._snr_map(self.mode.name, mu, raw)
 
     def _fit_alpha_q12(self, h64, hdr_bits):
         """Integer temperature fit on the header block: 96 known bits after
@@ -712,7 +756,8 @@ class FixedReceiver:
                 cap_d = self._m.data_carriers_len * mapper.MU
                 ref_d = self._known_ref(
                     codec.encode(data_bits.astype(np.uint8)), cap_d)
-                snr = self._estimate_snr_db([(d64, ref_d, cap_d)])
+                snr = self._estimate_snr_db([(d64, ref_d, cap_d)],
+                                            mu=mapper.MU)
             packets.append(packet)
             block_snrs.append(snr)
             block_llrs.append(None if packet is not None else llrs)
@@ -810,7 +855,7 @@ class FixedReceiver:
             cap_d = self._m.data_carriers_len * mapper.MU
             ref_d = self._known_ref(codec.encode(data_bits.astype(np.uint8)), cap_d)
             blocks.append((d64, ref_d, cap_d))
-        snr_db = self._estimate_snr_db(blocks)
+        snr_db = self._estimate_snr_db(blocks, mu=mapper.MU)
         self.last_stats = FixedRxStats(
             header=header, start_sample=start, cfo_hz=cfo_hz,
             snr_db=snr_db if snr_db is not None else -30.0,

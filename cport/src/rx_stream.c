@@ -642,8 +642,9 @@ static int finish_frame(rxs_t *r, rxs_event_t *ev)
         }
         if (num > 0 && den > 0) {
             int l2 = rxd_log2_q4(num) - rxd_log2_q4(den);
-            ev->snr_db = (double)l2 / 16.0 * TEN_LOG10_2
-                         - rxd_tile_db(r->mode) + SNR_CAL_DB;
+            ev->snr_db = rxd_snr_map(r->mode, r->mu, (double)l2 / 16.0 * TEN_LOG10_2
+                         
+                         - rxd_tile_db(r->mode) + SNR_CAL_DB);
         }
     }
     ev->type = 1;

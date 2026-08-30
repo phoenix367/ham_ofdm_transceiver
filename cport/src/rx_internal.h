@@ -70,5 +70,9 @@ int rxd_snr_block_moments(const llr_t *arr, const int8_t *ref, int n,
                           int cap, int64_t *num_out, int64_t *den_out);
 int rxd_log2_q4(int64_t v);
 double rxd_tile_db(link_mode_t mode);
+/* per-(mode, mu) output map for the SNR estimate: integer-estimator dB
+ * in, float-reference dB out (rom_modes.h knots; see fixed/rx.py
+ * SNR_MAP for the measurement story) */
+double rxd_snr_map(link_mode_t mode, int mu, double est);
 
 #endif /* OFDM_RX_INTERNAL_H */

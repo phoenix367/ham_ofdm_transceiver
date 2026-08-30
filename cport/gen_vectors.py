@@ -149,6 +149,23 @@ def gen_mode_roms():
     out.append(carr("RECAL_ROM", FixedReceiver.RECAL_ROM, "int16_t"))
     out.append(carr("LOG2_FRAC_Q4", FixedReceiver.LOG2_FRAC_Q4, "int16_t"))
     out.append(f"#define SNR_CAL_DB {float(FixedReceiver.SNR_CAL_DB)!r}")
+    # per-(mode, mu) SNR output map (fixed -> float reference); EXTREME
+    # QPSK/QAM16 fall back to EXTREME/BPSK, emitted explicitly so the C
+    # lookup stays a plain [mode][mu_index] table
+    out.append("#define SNR_MAP_MAX_KNOTS 8")
+    for mode in LinkMode:
+        for mui, mu in enumerate((1, 2, 4)):
+            pts = FixedReceiver.SNR_MAP.get((mode.name, mu))
+            if pts is None:
+                pts = FixedReceiver.SNR_MAP[(mode.name, 1)]
+            fx = [float(a) for a, _ in pts]
+            fl = [float(b) for _, b in pts]
+            nm = f"{mode.name}_MU{mui}"
+            out.append(f"#define SNR_MAP_N_{nm} {len(pts)}")
+            out.append("static const double SNR_MAP_FX_" + nm + "[] = { "
+                       + ", ".join(repr(v) for v in fx) + " };")
+            out.append("static const double SNR_MAP_FL_" + nm + "[] = { "
+                       + ", ".join(repr(v) for v in fl) + " };")
     out.append(f"#define TEN_LOG10_2 {float(10.0 * np.log10(2.0))!r}")
     for mode in LinkMode:
         rx = FixedReceiver(mode)

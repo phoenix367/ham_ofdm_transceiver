@@ -886,6 +886,34 @@ static const int16_t LOG2_FRAC_Q4[16] = {
 };
 
 #define SNR_CAL_DB -7.2
+#define SNR_MAP_MAX_KNOTS 8
+#define SNR_MAP_N_NORMAL_MU0 7
+static const double SNR_MAP_FX_NORMAL_MU0[] = { -10.1, -5.3, -1.6, 1.4, 5.0, 8.2, 9.5 };
+static const double SNR_MAP_FL_NORMAL_MU0[] = { 3.7, 7.7, 11.6, 14.3, 18.3, 22.2, 24.7 };
+#define SNR_MAP_N_NORMAL_MU1 6
+static const double SNR_MAP_FX_NORMAL_MU1[] = { -8.1, -4.5, -1.8, 1.8, 4.7, 5.8 };
+static const double SNR_MAP_FL_NORMAL_MU1[] = { 9.3, 12.2, 14.6, 18.2, 21.4, 22.9 };
+#define SNR_MAP_N_NORMAL_MU2 5
+static const double SNR_MAP_FX_NORMAL_MU2[] = { -0.3, 2.5, 6.3, 10.4, 11.9 };
+static const double SNR_MAP_FL_NORMAL_MU2[] = { 14.4, 15.6, 18.2, 21.3, 22.5 };
+#define SNR_MAP_N_ROBUST_MU0 6
+static const double SNR_MAP_FX_ROBUST_MU0[] = { -14.3, -7.7, -1.7, 2.0, 3.6, 4.2 };
+static const double SNR_MAP_FL_ROBUST_MU0[] = { -1.3, 5.0, 10.6, 16.4, 19.7, 21.7 };
+#define SNR_MAP_N_ROBUST_MU1 6
+static const double SNR_MAP_FX_ROBUST_MU1[] = { -14.9, -10.6, -5.5, -1.5, 0.2, 0.7 };
+static const double SNR_MAP_FL_ROBUST_MU1[] = { 2.0, 5.2, 10.4, 15.8, 18.4, 19.5 };
+#define SNR_MAP_N_ROBUST_MU2 5
+static const double SNR_MAP_FX_ROBUST_MU2[] = { -6.3, -1.0, 3.7, 5.9, 6.5 };
+static const double SNR_MAP_FL_ROBUST_MU2[] = { 8.4, 10.9, 15.0, 17.1, 17.9 };
+#define SNR_MAP_N_EXTREME_MU0 7
+static const double SNR_MAP_FX_EXTREME_MU0[] = { -21.9, -16.1, -10.0, -5.3, -2.7, -1.6, -1.4 };
+static const double SNR_MAP_FL_EXTREME_MU0[] = { -9.2, -3.6, 2.9, 8.9, 13.1, 15.3, 16.2 };
+#define SNR_MAP_N_EXTREME_MU1 7
+static const double SNR_MAP_FX_EXTREME_MU1[] = { -21.9, -16.1, -10.0, -5.3, -2.7, -1.6, -1.4 };
+static const double SNR_MAP_FL_EXTREME_MU1[] = { -9.2, -3.6, 2.9, 8.9, 13.1, 15.3, 16.2 };
+#define SNR_MAP_N_EXTREME_MU2 7
+static const double SNR_MAP_FX_EXTREME_MU2[] = { -21.9, -16.1, -10.0, -5.3, -2.7, -1.6, -1.4 };
+static const double SNR_MAP_FL_EXTREME_MU2[] = { -9.2, -3.6, 2.9, 8.9, 13.1, 15.3, 16.2 };
 #define TEN_LOG10_2 3.010299956639812
 #define TILE_DB_NORMAL 6.020599913279624
 #define TILE_DB_ROBUST 12.041199826559248

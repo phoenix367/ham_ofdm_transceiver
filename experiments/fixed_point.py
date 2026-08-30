@@ -183,9 +183,16 @@ def main():
 
     # header-aided integer SNR estimate (feeds link adaptation via FixedPHY)
     snr_errs = []
-    for snr_true in (-7, 0):
+    # The estimator's CONTRACT changed with the SNR output map: it now
+    # reports what the FLOAT estimator -- the reference the rate ladder
+    # was system-tested against -- reads on the same waveform, instead
+    # of tracking the channel nominal (which it only did near the knee,
+    # railing at a per-(mode,mod) ceiling above it that whipsawed the
+    # ladder on the two-board stand). So the check is now TWIN PARITY:
+    # fixed-mapped vs float, same waveforms, across the range.
+    for snr_true in (-7, 0, 15):
         rng2 = np.random.default_rng(555 + snr_true)
-        est = []
+        errs = []
         for _ in range(6):
             p2 = Data(reserved=1, payload=rng2.bytes(27))
             s2 = ftx.build_frame(p2)
@@ -193,12 +200,15 @@ def main():
                                     snr_db=snr_true, rng=rng2)
             try:
                 frx.receive(to_int16(rxc2))
-                est.append(frx.last_stats.snr_db)
+                _, fstats = flt.demod_frame(rxc2)
+                errs.append(abs(frx.last_stats.snr_db - fstats.snr_db))
             except Exception:
                 pass
-        snr_errs.append(abs(float(np.median(est)) - snr_true) if est else 99.0)
-    check("integer SNR estimate within 2 dB", max(snr_errs) < 2.0,
-          f"errs {snr_errs[0]:.1f}/{snr_errs[1]:.1f} dB at -7/0")
+        snr_errs.append(float(np.median(errs)) if errs else 99.0)
+    check("mapped SNR estimate tracks the float twin within 3 dB",
+          max(snr_errs) < 3.0,
+          f"median errs {'/'.join(f'{e:.1f}' for e in snr_errs)} dB "
+          f"at -7/0/+15")
 
     frx_cal = FixedReceiver(LinkMode.NORMAL, calibrate=True)
     d_c, *_ = frx_cal.receive(np.concatenate([pad16, ftx.build_frame(pkt)]))
