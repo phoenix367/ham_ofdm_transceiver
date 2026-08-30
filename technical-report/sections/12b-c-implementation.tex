@@ -1590,6 +1590,39 @@ thing from the other side, at $\sim$8\% of acquisitions before the
 lag-$N$ unwrap fix). Broadcast cannot retransmit, which is precisely
 why the EOS event reports what arrived.
 
+\subsubsection*{A file over the broadcast}
+
+\texttt{bcastfile [-r <rung>] <path>} carries a file the same way ---
+raw bytes, the opaque payload type, no delivery guarantee --- and the
+receivers on every path (both consoles and the socket demo) store it
+as \texttt{rx\_broadcast.bin}. The constraint worth the paragraph is
+memory: the socket demo holds a 64\,kB source buffer because a PC
+can, while the board's broadcast source is 8\,kB of DTCM, so the file
+\emph{streams} from the host. Two bits of the command's payload-type
+byte do the framing --- \emph{more follows} and \emph{continuation}
+--- with both clear meaning the old one-shot broadcast, so nothing
+existing changed; the host paces its chunks against a
+\texttt{bc\_free} field the status frame now reports.
+
+Chunking put two rules into the transmitter that the one-shot case
+never needed. The EOS flag is emitted only once the host has declared
+the stream complete --- an EOS computed from ``buffer drained'' would
+fire at every pacing stall. And while chunks are still arriving, only
+\emph{full} groups are keyed: a starved tail group would go out
+without EOS, and the receiver's walk would never see the end of a
+stream whose true last frame was still in transit over USB.
+
+The first live run earned its regression comment. The C console's
+chunk pump marked completion by setting its offset to $-1$ --- and
+kept looping, because $-1$ is less than the length and the loop had no
+\texttt{break}: it re-sent overlapping chunks twenty-four times, and
+the receiving board stored 19\,380 bytes from a 1\,024-byte source.
+(The Python console's pump, written the same hour, had the
+\texttt{break}.) With the loop fixed and the board taught to ignore a
+continuation when no broadcast is in flight, the retest delivered the
+1\,kB file byte-exact in 19 seconds at rung~12 --- 44 frames in
+eleven groups, zero lost, one completion message.
+
 \subsection{The Capability Handshake, and 2\,kB Messages}
 \label{sec:cport_caps}
 
