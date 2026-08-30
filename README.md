@@ -8,11 +8,25 @@ simulator and its BER/PER results.
 
 **C port for DSP/MCU: [cport/](cport/README.md)** — portable C99, no
 malloc, no float on the signal path, validated bit-exactly against the
-Python model (79 golden-vector tests); MCU streaming receiver (one
+Python model (golden-vector suites); MCU streaming receiver (one
 shared raw sample ring, Hilbert-on-read), burst ARQ + extended frames,
-diagnostic and oscillator fine-tune endpoints. Measured footprint
-≈57 KB flash / ≈453 KB RAM for all three modes — the full station fits
-the STM32H723 target ([cport/FEASIBILITY.md](cport/FEASIBILITY.md)).
+streamed burst windows, diagnostic and oscillator fine-tune endpoints
+([cport/FEASIBILITY.md](cport/FEASIBILITY.md)).
+
+**Running on real hardware: two STM32H743 boards** — flash-resident
+firmware (`cport/usb/usb_radio_main.c`) that is a complete station: a
+USB modem device (vendor class, addressed by the chip's unique serial)
+with the radio behind it — DAC out, ADC in at 12 kHz over a cross-wired
+audio link between the boards. Full ARQ exchanges, SNR-adaptive rate
+ladder, streamed bursts (8 blocks behind one preamble), and an 8 kB
+file transfer measured byte-exact in ~4 minutes including bootstrap.
+Programmed and debugged through an ESP32 JTAG probe daisy-chained
+through both boards ([tools/esp32-probe/](tools/esp32-probe/README.md));
+receiver robustness is host-regression-gated (`make -C cport robust`:
+carrier-sense scenario suite + an input-abuse decode matrix), and the
+integer SNR estimator carries a measured per-(mode, modulation)
+calibration map so the ladder reads one truth whatever frame carried
+the measurement.
 
 **Real radio: [demoapp/sdr_driver.py](demoapp/README.md)** — the same
 device interface over SSB on a HackRF One (or any SoapySDR device), with a
@@ -23,12 +37,17 @@ so it can be tested and regression-checked without a radio.
 over a virtual HF channel (two station devices + config device), running
 the C fixed-point stack end to end in real time, with an audible mode
 (stereo output, one station's receiver per ear) and multi-part file
-transfer over the burst protocol.
+transfer over the burst protocol. The same console speaks USB
+(`ofdm_console --usb`, `--list` to enumerate boards), becoming a
+terminal onto a real board's own station.
 
 **Technical report:
 [technical-report/OFDM_Transceiver_Technical_Report.pdf](technical-report/OFDM_Transceiver_Technical_Report.pdf)**
-(68 pages, committed; includes the measured transmit spectrum, drive-level
-sweep, receiver calibration and off-air decode from a HackRF One + tinySA Ultra) — rebuild with `make` inside
+(100+ pages, committed; from the article reproduction through the C
+port, on-target measurement on silicon, the modem as a USB device, the
+two-board audio stand, streamed-burst debugging, receiver hardening and
+the SNR calibration — plus the measured transmit spectrum, drive-level
+sweep and off-air decode from a HackRF One + tinySA Ultra) — rebuild with `make` inside
 [technical-report/](technical-report/README.md).
 
 **Full documentation with architecture diagrams: [docs/](docs/README.md)** —
@@ -338,6 +357,16 @@ Known deltas vs the float model: tone-detection FFT is 256-point for NORMAL
 (so the coarse CFO grid is fine enough for an unambiguous lag-N residual),
 and the demodulator uses the frequency-search tracker for all tile factors
 (the float model's polynomial phase fit is not RTL-friendly).
+
+The integer SNR estimate carries a measured per-(mode, modulation)
+**output map** (`FixedReceiver.SNR_MAP`, emitted into the C tables by
+`gen_vectors.py`): the raw LLR-moment estimate rails at a per-combo
+ceiling at high SNR, and the tiling-gain subtraction spreads those
+ceilings up to 12 dB apart — EXTREME frames read +0.5 dB on a wire
+NORMAL frames read at +12 dB, whipsawing the rate ladder. The map is
+built from (integer, float) estimate pairs on identical waveforms, so
+the integer twin reports what the float reference reads (±0.3 dB across
+the measured grid).
 
 ## Adaptive link modes (beyond the article)
 

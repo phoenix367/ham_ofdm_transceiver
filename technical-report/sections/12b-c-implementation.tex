@@ -1384,6 +1384,69 @@ every bug this campaign found, had it existed a day earlier.
     \end{tabular}
 \end{table}
 
+\subsection{Calibrating the SNR Estimate}
+\label{sec:cport_snrcal}
+
+The chat transcripts from the two-board stand exposed one more defect,
+subtler than anything the stress campaign found because nothing
+\emph{failed}: messages were delivered, but the rate ladder whipsawed
+--- \texttt{rung 10 $\to$ 0 $\to$ 8} with zero losses --- and every
+bootstrap climb crawled. The tell was in the diagnostics: EXTREME
+frames reported $+0.5$\,dB on a wire that NORMAL frames reported at
+$+12$\,dB.
+
+A host sweep of all seven (mode, modulation) combinations the ladder
+emits found the mechanism (Figure~\ref{fig:snrcal}, left). The integer
+estimator derives SNR from LLR moments, and LLRs \emph{rail} at high
+SNR --- at roughly the same raw ratio in every BPSK mode. The estimator
+then subtracts the mode's tiling gain (6.02\,/\,12.04\,/\,18.06\,dB),
+which is correct near the sensitivity knee where the ratio still moves,
+but applied to a railed ratio it simply spreads the ceilings apart:
+predicted separations 12.04 and 6.02\,dB, measured 11.9 and 6.1.
+Modulation adds its own spread. The consequence is quantitative: the
+ladder compares these readings against one \texttt{LADDER\_SENS} table,
+and EXTREME's $+0.5$ ceiling sits below
+$\texttt{SENS}[10..12]+\texttt{MARGIN\_UP}=+3.2..+7.2$\,dB while
+NORMAL's $+12.4$ does not --- so a station that had just decoded an
+EXTREME frame could never request the top rungs, however clean the
+wire, and one dip to rung~0 dragged both stations down after it.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{images/snr_calibration.png}
+    \caption{The calibration, before and after. Left: the raw integer
+             estimate rails at a per-(mode, modulation) ceiling, and
+             EXTREME's ceiling falls below the threshold the top rung
+             requires. Right: the mapped estimate, which tracks the
+             float reference (dotted) to $\sim$0.3\,dB across the grid.}
+    \label{fig:snrcal}
+\end{figure}
+
+The fix is a measured map, not a touched constant. Both twins were fed
+the \emph{same} noisy waveforms across \texttt{simulate\_channel}'s own
+nominal convention --- seven combinations, five to seven nominals each
+--- and the resulting (integer estimate, float estimate) pairs became
+piecewise-linear output maps. The target is the float estimator
+deliberately: it is the reference the rate ladder was system-tested
+against, and near the knee the two estimators already agreed (the
+fixed-point suite asserted $\pm$2\,dB there), so the map is close to
+identity exactly where the existing calibration was right and lifts
+only the railed region. The knots live in one place
+(\texttt{FixedReceiver.SNR\_MAP}), the generator emits them into
+\texttt{rom\_modes.h}, and \texttt{rxd\_snr\_map()} applies them in
+both C receive paths --- the parity between twins is by construction,
+and the fixed-point suite now asserts the new contract: mapped-integer
+tracks float within 3\,dB at nominals $-7/0/{+}15$ (measured medians
+0.5\,/\,0.3\,/\,1.2\,dB).
+
+On the boards the change is immediate: EXTREME frames read
+$+16.2$\,dB and NORMAL $+20.9..{+}22.5$ on the same wire ---
+consistent to $\sim$6\,dB across modes instead of 12 apart, the
+residual being the estimators' genuine mode differences --- and the
+ladder now climbs $0 \to 11$ in a \emph{single} exchange where it
+previously stepped for minutes. The staleness decay's conservative
+re-probe after long silence remains, by design.
+
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}
 
