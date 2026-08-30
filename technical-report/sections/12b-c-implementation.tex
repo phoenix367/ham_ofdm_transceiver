@@ -1125,13 +1125,136 @@ terms are EXTREME and exactly one detector runs.
     \end{tabular}
 \end{table}
 
-What this build does not yet do is decode streamed bursts: it provides
-\texttt{build\_burst} but leaves \texttt{receive\_burst} \texttt{NULL},
-so the station uses per-frame bursts --- which is a supported
-configuration rather than a hole, since it is also where the link falls
-back when a stream stops delivering. Streamed reception needs
-\texttt{rxs\_continue\_burst} driven from the link layer's marker, as
-demoapp does.
+Streamed bursts --- a whole selective-repeat window behind one
+preamble --- are the one part of the link this section does not settle:
+their first implementation on the boards failed in a way that every
+plausible theory misdiagnosed, and finding out why is a story worth a
+subsection of its own.
+
+\subsection{Debugging the Streamed Bursts}
+\label{sec:cport_burstdebug}
+
+The streaming continuation itself is small: after a decoded block whose
+packet carries the link layer's streamed marker, the receiver takes the
+next block from the deterministic offset past this one instead of
+hunting for a preamble, and stops on the ack-request bit of the last
+block. (\texttt{phy.receive\_burst} stays \texttt{NULL} by design ---
+the station only reaches it from the frame-at-once \texttt{receive}
+path, which is handed a whole recording this firmware never has.) The
+same machinery passes every host test and runs demoapp's transfers. On
+the boards it failed totally: block~0 of a stream decoded, and
+\emph{every} continued block failed its data CRC, on every attempt, at
+every rung --- while the same file crossed byte-exact as per-frame
+fragments.
+
+The failure looked exactly like a channel problem, and the two boards
+are the first stand in the project where the two ends share no sample
+clock --- so clock drift was the obvious suspect, with quantization
+noise and the resync geometry close behind. All of it was wrong, and
+what kept the search honest was the discipline in
+Figure~\ref{fig:burstdebug}: reproduce on the \emph{host} first, where
+a cycle costs seconds against the seven minutes of a
+build--flash--transfer round on the boards.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{images/burst_debug.png}
+    \caption{The diagnostic ladder. The host harness exonerates the
+             physics before any board cycle is spent; the board-side
+             instruments then carry the burden of proof, and each of the
+             three convictions ends with a measured signature, not an
+             argument.}
+    \label{fig:burstdebug}
+\end{figure}
+
+\paragraph{Step 1: exonerate the physics.} A host harness
+(\texttt{bench/burst\_repro.c}, \texttt{make burstrepro}) builds the
+\emph{firmware's} streamed waveform --- station-style \texttt{EXT\_DATA}
+blocks through the streaming generator --- and walks it with the
+firmware's own burst logic, under the board's impairments applied one at
+a time: the 12-bit DAC re-read by the 16-bit ADC at 3/4 scale, the
+mid-rail DC offset, and a sample-rate offset between the ends. It
+decoded 8 of 8 blocks under all of them at once, up to 56\,ppm ---
+worse than the wire, whose $+0.01$\,Hz residual CFO puts the real
+offset near 5\,ppm. It also replayed the DAC FIFO's exact
+variable-sized pull pattern (sample-identical to a flat render) and
+interleaved transmit-generator arena traffic mid-walk (harmless). Five
+plausible theories died in one afternoon without touching a board, and
+what remained was a certainty worth more than any of them: the bug was
+in the firmware's \emph{interaction}, not in the shared DSP.
+
+\paragraph{Steps 2 and 3: make the boards testify.} Two instruments
+carried the rest. The station's diagnostic event stream
+(\texttt{UP\_EVT\_DIAG}, readable from the host console) reports the
+link layer's own decisions --- windows engaged, streams sent, bitmaps
+received, streaming abandoned and why. And the firmware's beacon grew
+\emph{forensic} fields: for the first failed continued block, the
+decoded bits of its leading 44 bits (the LC word and sub-header are
+predictable, so near-correct bits mean ``aligned but noisy'' while
+garbage means the walk ran off the waveform), the SNR the demodulator
+saw, and the carrier-sense level --- plus a recorder of the last four
+transmitter key-ups with the carrier-sense mean and floor at each.
+Reading them over JTAG needs neither a debugger halt nor
+instrumentation in the signal path.
+
+\paragraph{The three convictions.} None was the burst machinery.
+
+\emph{First}, the radio build had inherited \texttt{-DMAX\_LLRS=1024}
+from the small-frame bench images. A streamed block's LLR store is
+sized by the padded symbol count, and any fragment size above roughly
+100 bytes overflows \texttt{g\_d64} --- silently, because nothing
+guarded it, and invisibly on the host, where the overflow lands in the
+neighbouring receiver instance's rows and reads back self-consistently.
+The harness convicted it cleanly: 0 of 3 blocks decode at 1024, 3 of 3
+at the default. The receiver now \emph{refuses} a header whose
+announced frame exceeds its buffers --- the header was valid; this
+build cannot decode what it describes --- and the radio build sizes
+\texttt{MAX\_LLRS} for the largest EXT frame, with the store placed in
+DTCM by the linker script.
+
+\emph{Second, carrier sense was dead} --- and had been since the commit
+that claimed to move it into the converter tick. That patch defined the
+tick-side function and never inserted the call: the scripted edit's
+pattern had the wrong indentation, and a text replacement with no
+assertion silently replaced nothing. The measured mean stayed zero,
+\texttt{channel\_busy()} answered idle forever, and the commit's fix
+had never run. The key-up recorder caught it in one glance ---
+\texttt{cs=0} at every key-up, where a quiet wire reads about
+$2\times10^4$, since the idle peer's DAC holds mid-rail. The repair is
+one call; the lesson is a rule: every scripted patch replacement gets
+an assertion.
+
+\emph{Third}, the station answered block~0 \emph{over the top of the
+rest of the stream}. A stream's first block carries the ack request on
+purpose, so a peer that cannot stream still replies; with carrier
+sense dead, nothing stopped the receiving board keying its bitmap ack
+two seconds into the peer's 9.75\,s transmission --- and key-up drops
+its own capture. The forensics showed precisely that: the first failed
+block decoded at $-30$\,dB with garbage lead bits --- the signal was
+simply gone --- while the transmitting board's counters showed a
+complete, clean carrier. The structural fix does not lean on carrier
+sense: a receiver whose walk still expects blocks holds its own
+transmitter, with a deadline so a peer dying mid-stream cannot mute the
+station forever. The ack then leaves when the walk ends, which is the
+contract the link layer wanted all along.
+
+\paragraph{The verdict run.} With all three fixes and \emph{no}
+host-side configuration --- the burst defaults are now on --- one
+8-block stream behind a single preamble acked 8 of 11 file fragments
+in a single bitmap, the receiver's beacon read
+\texttt{blocks 8, misses 0}, capture overruns and DAC underruns stayed
+zero on both boards, and the 1200-byte incompressible file crossed
+byte-exact. The 224-second-frame hazard that had earlier argued for
+shipping bursts off (fragment size is fixed at engage, and a rung
+collapse mid-transfer keeps sending fragments sized for the rung it
+engaged at) turned out to be a symptom of these same bugs poisoning
+the rate controller, not a property of the machinery.
+
+The instruments outlived the hunt: the harness is a build target, the
+beacon parser is a checked-in tool
+(\texttt{bench/radio\_beacon.py}) whose field list lives in one place
+beside the append-only beacon struct, and the triage ladder itself is
+recorded where the next investigation will find it.
 
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}

@@ -1,0 +1,31 @@
+flowchart LR
+    F["<b>the symptom</b><br/>streamed bursts die<br/>between the boards:<br/>block 0 decodes, every<br/>continued block fails<br/>data CRC &mdash; while the<br/>same transfer works<br/>per-frame"]
+
+    H["<b>step 1: host harness</b><br/>seconds per cycle<br/><br/>burst_repro replays the<br/>firmware's exact waveform<br/>and walk logic:<br/>requantization 8/8<br/>mid-rail DC 8/8<br/>56 ppm offset 8/8<br/>FIFO pull pattern identical<br/>arena traffic mid-walk 8/8<br/><br/><b>every physical theory<br/>exonerated</b>"]
+
+    B["<b>steps 2+3: diag + beacon</b><br/>7 minutes per cycle<br/><br/>station diag over USB<br/>(BURST_STREAM, ACKRX,<br/>SOFF, per-decode SNR)<br/><br/>beacon forensics: decoded<br/>bits + SNR + carrier sense<br/>of the FIRST failed block,<br/>cs and floor at every key-up"]
+
+    subgraph C["the three convictions &mdash; none of them the burst machinery"]
+        direction TB
+        C1["<b>MAX_LLRS=1024</b> overflowed g_d64 at<br/>frag_size &ge; 100 &mdash; host: 0/3 blocks at<br/>1024, 3/3 default &mdash; <i>guard + 4416 + DTCM</i>"]
+        C2["<b>carrier sense dead</b> &mdash; note_busy_isr<br/>defined, never called (silent patch no-op)<br/>key-ups all cs=0 &mdash; <i>call it; assert patches</i>"]
+        C3["<b>acked over the live stream</b> &mdash; block 0<br/>carries ack_req by design; first miss &minus;30 dB,<br/>garbage bits &mdash; <i>the walk holds the transmitter</i>"]
+        C1 ~~~ C2
+        C2 ~~~ C3
+    end
+
+    R["<b>verdict run</b><br/>shipped defaults<br/><br/>one 8-block stream<br/>acks 8 of 11 fragments<br/>blocks 8, misses 0,<br/>overruns 0<br/>file byte-exact<br/>burst defaults ON"]
+
+    F --> H
+    H --> B
+    B --> C
+    C --> R
+
+    classDef sym fill:#ffecec,stroke:#c0392b
+    classDef host fill:#e8f4ff,stroke:#3b7dd8
+    classDef ver fill:#fffbe6,stroke:#d9b310
+    classDef fix fill:#eef7ee,stroke:#4a8a4a
+    class F sym
+    class H,B host
+    class C1,C2,C3 ver
+    class R fix
