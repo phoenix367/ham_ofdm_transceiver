@@ -428,7 +428,9 @@ def main():
             print("error: board did not answer CMD_INFO", file=sys.stderr)
             return 1
         serial = info["serial"]
-        name = args.name or serial[-4:]
+        # first 4, not last 4: the UID tail is the wafer/lot ID and is
+        # identical for chips from one wafer (both boards end ...3436)
+        name = args.name or serial[:4]
         con = Console(modem, name, args.msg_max, not args.no_compress)
         stale = getattr(modem.t, "stale", 0)
         if stale:

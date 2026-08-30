@@ -1518,7 +1518,11 @@ int main(int argc, char **argv)
         if (argc > ai)
             g_name = argv[ai];
         else if (serial)
-            g_name = strdup(serial + 20);   /* last 4 of the serial */
+            /* FIRST 4 of the serial, not the last: the UID's tail is
+             * the wafer/lot ID, identical for chips from one wafer --
+             * both stand boards end in ...3436 and printed the same
+             * name. The head is the die coordinate, which differs. */
+            g_name = strndup(serial, 4);
         return usb_console(serial);
     }
     if (argc >= 3)
