@@ -382,6 +382,22 @@ Cross-module invariants that are easy to break:
   boards' first-ever key-ups at ms=300031/300029 = CS_REBASE_S exactly.
   channel_busy() returns idle and leaves the floor alone until
   g_ms >= 1000.
+- The receive front end is DC-BLIND BY CONSTRUCTION: the firmware ISR
+  runs every ADC sample through `src/dcblock.h` (one-pole blocker,
+  7.5 Hz corner, integer-only) BEFORE the capture FIFO and carrier
+  sense, so no input operating point -- parked peer DAC, AC-coupling
+  bias network, ground offset -- can reach the busy logic. Verified:
+  -0.02 dB at 300 Hz, a +12000 DC step settles in 117 ms, and the
+  decode matrix passes 8/8 at DC +-18000.
+- Carrier sense lives in `src/csense.c` (shared, host-testable), NOT in
+  the firmware: `make cstest` replays every measured field failure as a
+  scenario regression (boot latch, parked DC bare vs through dcblock,
+  45-s busy hold, frame/gap cycling, DC-step transient). `make robust`
+  is the receiver-reliability gate: cstest + the input-abuse decode
+  matrix (DC/steps/clipping/hum/impulses/stuck-converter through
+  burst_repro). The DEMODULATOR passes the whole matrix even bare --
+  every field failure of the stress campaign lived in carrier sense,
+  which is why CS gets the scenario suite.
 - The IDLE DAC must be PARKED AT MID-RAIL explicitly (usb_radio_main
   tx-end path). The tick only writes the DAC while transmitting, so
   without the park the pin HOLDS the frame's last sample -- anywhere in

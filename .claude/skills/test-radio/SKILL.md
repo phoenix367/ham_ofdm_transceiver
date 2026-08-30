@@ -19,10 +19,18 @@ one was wrong. The ladder below is the order that actually converges.
 reproduce off-board with the firmware's exact waveform and walk logic:
 
 ```bash
-cd cport && make burstrepro
-./build/burst_repro -q -d 5              # wire model + 5 ppm: expect 8/8
+cd cport && make robust     # the whole reliability gate: carrier-sense
+                            # scenario suite + the input-abuse decode
+                            # matrix (DC, steps, clip, hum, impulses,
+                            # stuck converter) -- every line must pass
+./build/burst_repro -q -dcb -dc -16577 -step -hum -imp 5   # one-off combos
 ./build/burst_repro -f 100 -r 7 -n 3 0   # the frag size that found MAX_LLRS
 ```
+
+Carrier sense is `src/csense.c` and the DC blocker `src/dcblock.h` --
+shared and host-tested (`make cstest`), because every field failure of
+the 8 kB stress campaign lived in carrier sense while the demodulator
+survived the full abuse matrix bare.
 
 If the harness fails, the bug is in the shared C code -- fix it on the
 host where a cycle is seconds. If the harness passes everything, the

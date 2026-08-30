@@ -51,7 +51,7 @@ SECTIONS
         /* the carrier-sense ring: touched every 12 kHz tick from the
          * ISR, and the 960 B that put AXI 504 B over when its call
          * site became real. DTCM is where an ISR-hot ring belongs. */
-        *(.bss.g_bring)
+        *(.bss.g_cs)
         *(.dtcm_bss*)
         . = ALIGN(8); _edtcmbss = .;
     } > DTCM

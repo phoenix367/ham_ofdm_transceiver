@@ -13,12 +13,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "packets.h"
 #include "link.h"
 #include "station.h"
 #include "tx.h"
 #include "rx_stream.h"
+#include "dcblock.h"
 
 #define RESYNC BURST_STREAM_RESYNC
 static int N_BLOCKS = 8;
@@ -62,20 +64,47 @@ static int build_burst_wave(int *pkt_n_out)
     return pos == total ? pos : -1;
 }
 
-/* the wire: DAC 12-bit at 3/4 scale -> ADC 16-bit, plus DC */
-static int16_t wire(int16_t s, int quant, int dc)
+/* the wire and the abuse: everything an input can do to the receiver.
+ * Each impairment is a measured or plausible field condition; the
+ * matrix in `make robust` asserts decode under all of them. */
+static int g_dc = 0;          /* -dc N : static DC (parked peer DAC) */
+static int g_step = 0;        /* -DC step every 30000 samples */
+static int g_clip = 0;        /* -clip : drive 2.5x into saturation */
+static int g_hum = 0;         /* -hum  : 50 Hz at 8000 LSB (mains) */
+static int g_imp = 0;         /* -imp  : 3-sample +-20000 clicks, 50/s */
+static int g_stuck = 0;       /* -stuck: ADC holds one value 60/s, 8 smp */
+static int g_dcb = 0;         /* -dcb  : the firmware's DC blocker */
+static dcblock_t g_blk_state;
+
+static int16_t wire(int16_t s, int quant, int dc_unused, long n)
 {
     int32_t v = s;
+    (void)dc_unused;
+    if (g_clip)
+        v = (v * 5) / 2;
+    if (g_hum)
+        v += (int32_t)(8000.0 * sin(2 * 3.14159265358979 * 50.0
+                                    * (double)n / 12000.0));
     if (quant) {
-        uint32_t d = (uint32_t)(2048 + ((v * 3) >> 6));   /* firmware ISR */
-        v = (int32_t)(d << 4) - 32768;                    /* ADC reads it */
-        /* undo the 3/4 analog gain so the receiver sees comparable
-         * amplitude to the digital case; keep the quantization */
-        v = (v * 85) >> 6;   /* x64/48 ~ x85/64 */
+        uint32_t d;
         if (v > 32767) v = 32767;
         if (v < -32768) v = -32768;
+        d = (uint32_t)(2048 + ((v * 3) >> 6));            /* firmware ISR */
+        v = (int32_t)(d << 4) - 32768;                    /* ADC reads it */
+        v = (v * 85) >> 6;   /* undo the 3/4 analog gain */
     }
-    return (int16_t)(v + (dc ? -143 : 0));
+    v += g_dc;
+    if (g_step)
+        v += ((n / 30000) & 1) ? 14000 : -9000;   /* peer re-parks */
+    if (g_imp && (n % 240) < 3)
+        v += ((n / 240) & 1) ? 20000 : -20000;
+    if (g_stuck && (n % 200) < 8)
+        v = g_dc; /* converter wedged at the DC level */
+    if (v > 32767) v = 32767;
+    if (v < -32768) v = -32768;
+    if (g_dcb)
+        return dcblock_step(&g_blk_state, (int16_t)v);
+    return (int16_t)v;
 }
 
 /* Replicate the firmware's DAC-FIFO pull pattern: tx_fill() tops a
@@ -141,6 +170,13 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-r")) RUNG = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-n")) N_BLOCKS = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-q")) quant = 1;
+        else if (!strcmp(argv[i], "-dc")) g_dc = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-step")) g_step = 1;
+        else if (!strcmp(argv[i], "-clip")) g_clip = 1;
+        else if (!strcmp(argv[i], "-hum")) g_hum = 1;
+        else if (!strcmp(argv[i], "-imp")) g_imp = 1;
+        else if (!strcmp(argv[i], "-stuck")) g_stuck = 1;
+        else if (!strcmp(argv[i], "-dcb")) g_dcb = 1;
         else if (!strcmp(argv[i], "-d")) dc = 1;
         else if (!strcmp(argv[i], "-fifo")) do_fifo = 1;
         else if (!strcmp(argv[i], "-tx")) do_tx = 1;
@@ -148,6 +184,9 @@ int main(int argc, char **argv)
     }
     memset(got_blocks, 0, sizeof(got_blocks));
 
+    if (dc && !g_dc)
+        g_dc = -143;               /* the old -d flag's meaning */
+    dcblock_init(&g_blk_state);
     n = build_burst_wave(&pkt_n);
     if (n <= 0) { printf("build failed\n"); return 1; }
     if (do_fifo)
@@ -164,7 +203,7 @@ int main(int argc, char **argv)
             double fr = src - i0;
             double v = g_wave[i0] * (1.0 - fr) + g_wave[i0 + 1] * fr;
             g_air[lead + k++] = wire((int16_t)(v + (v >= 0 ? 0.5 : -0.5)),
-                                     quant, dc);
+                                     quant, dc, (long)k);
             src += step;
         }
         air_n = lead + k + 700;
@@ -234,8 +273,9 @@ int main(int argc, char **argv)
         int ok = 0;
         for (i = 0; i < N_BLOCKS; i++)
             ok += got_blocks[i];
-        printf("RESULT ppm=%g quant=%d dc=%d : %d/%d blocks decoded\n",
-               ppm, quant, dc, ok, N_BLOCKS);
+        printf("RESULT ppm=%g quant=%d dc=%d step=%d clip=%d hum=%d imp=%d stuck=%d dcb=%d : %d/%d blocks decoded\n",
+               ppm, quant, g_dc, g_step, g_clip, g_hum, g_imp, g_stuck,
+               g_dcb, ok, N_BLOCKS);
         return ok == N_BLOCKS ? 0 : 1;
     }
 }

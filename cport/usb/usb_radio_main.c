@@ -61,6 +61,8 @@
 #include "link.h"
 #include "tx.h"
 #include "rx_stream.h"
+#include "dcblock.h"
+#include "csense.h"
 
 void ofdm_usb_bsp_init(int rhport);
 int  ofdm_usb_bsp_supply_ready(void);
@@ -91,7 +93,7 @@ typedef struct {
     uint32_t miss_cs;                     /* cs_mean at first miss */
     /* the last four key-ups: when, and what carrier sense saw.
      * B transmitted over A's live stream while poll_tx is gated
-     * on channel_busy() -- so either CS answered idle against
+     * on the busy verdict -- so either CS answered idle against
      * 2e8 of mean-square signal, or the key-up came at a moment
      * the air was genuinely quiet. This is the recorder that
      * stops that being a mystery a second time. */
@@ -112,7 +114,8 @@ enum { ST_ENTER = 1, ST_SUPPLY, ST_ANALOG, ST_RXS, ST_TUSB, ST_LOOP,
 #define IRQ_TIM6_DAC 54
 
 static volatile uint32_t g_ms;
-static void note_busy_isr(int16_t v);  /* carrier sense, defined below */
+static dcblock_t g_dcb;
+static csense_t g_cs;
 
 void SysTick_Handler(void) { g_ms++; }
 
@@ -223,10 +226,18 @@ static void tim6_isr(void)
         uint32_t w = g_cap_w;
         /* the conversion started last tick is finished long since */
         int16_t v = (int16_t)(ADC_DR - 32768u);
+        /* DC blocker FIRST, so every consumer -- capture FIFO, carrier
+         * sense -- sees a zero-mean signal whatever operating point the
+         * analog side carries: a parked peer DAC, a bias network for
+         * AC-coupling capacitors, a ground offset. The peer-side park
+         * fix (tx end) remains for the peer's benefit, but this
+         * receiver no longer CARES what the input's DC is. Corner
+         * 7.5 Hz, two decades under the band; see dcblock.h. */
+        v = dcblock_step(&g_dcb, v);
         /* carrier sense on LIVE samples. This call was meant to arrive
-         * with the note_busy_isr commit and did not -- the edit's
+         * with its own commit and did not -- the edit's
          * pattern had the wrong indentation and replaced nothing, so
-         * g_cs_mean stayed 0 and channel_busy() answered idle FOREVER.
+         * the mean stayed 0 and the busy verdict answered idle FOREVER.
          * That is what let this station answer block 0's ack request
          * over the top of the peer's still-running stream. Caught by
          * the key-up recorder: cs=0 at every key-up, when a quiet wire
@@ -243,7 +254,7 @@ static void tim6_isr(void)
          * deaf-mute together at boot. At the old 60 s rebase the same
          * latch-up existed but freed before anyone could see it. */
         if (g_ms > 500u)
-            note_busy_isr(v);
+            cs_feed(&g_cs, v);
         if ((uint32_t)(w - g_cap_r) < CAP_N)
             g_cap[w & (CAP_N - 1)] = v, g_cap_w = w + 1;
         else
@@ -398,7 +409,6 @@ static void tx_fill(uint32_t slack)
 }
 
 static rxs_t *g_rxs[3];   /* declared here: burst_advance() needs it */
-static volatile uint32_t g_cs_mean;  /* defined with carrier sense below */
 
 /* --- streamed bursts -------------------------------------------------
  *
@@ -494,7 +504,7 @@ static void burst_advance(int m, const rxs_event_t *ev)
             g_beacon.miss_lead_lo = lo;
             g_beacon.miss_snr_q8 = (int32_t)(ev->snr_db * 256.0);
             g_beacon.miss_start = ev->start_abs;
-            g_beacon.miss_cs = g_cs_mean;
+            g_beacon.miss_cs = g_cs.mean;
         }
         if (++g_burst_miss[m] >= 2)
             g_burst_left[m] = 0;
@@ -511,105 +521,11 @@ static void burst_advance(int m, const rxs_event_t *ev)
                                     + rxs_ring_miss(g_rxs[2]));
 }
 
-/* --- carrier sense --------------------------------------------------- */
-/* Same shape as demoapp -- a 40 ms power window against a floor that
- * drops instantly and climbs slowly, plus the rebase that stops a step
- * rise in the noise floor from freezing carrier sense at BUSY (measured
- * there at 82 s of dead air after a -37 dB step); CS_REBASE_S must stay
- * above the longest frame, 38 s at EXTREME.
- *
- * MEASURED IN THE ISR, not on the decoder's feed. demoapp accumulates
- * over the samples it pushes into the receiver, which is the same thing
- * there because it pushes in real time. Here it is not: a single
- * rxs_push can block for 2.4 s while it commits a frame, so the pushed
- * stream runs seconds behind the air. Carrier sense computed on it
- * reports the channel as it was, not as it is -- and this station
- * therefore keyed up in the middle of a peer's streamed burst, dropped
- * its own capture FIFO at key-up, and lost the rest of the burst.
- * Measured: 8 transmissions during one transfer, every streamed burst
- * abandoned after two blocks (burst_starts 2, burst_blocks 0).
- *
- * The ISR keeps the ring and an int64 accumulator and publishes the
- * mean as one 32-bit store, which the main loop can read without
- * tearing. */
-#define BUSY_WIN 480
-#define BUSY_RATIO_SQ 9.0
-/* The rebase window must exceed the LONGEST FRAME THIS STATION CAN
- * EMIT, not demoapp's. 60 s was copied from there with its own
- * justification ("> the 38 s longest frame") -- but demoapp's QoS caps
- * keep frames under 38 s, and this station has no such cap on burst
- * fragments: frag_size is fixed at engage, so a transfer engaged at
- * rung 10 with 203-byte frags that collapses to rung 0 sends 203-byte
- * EXTREME frames of ~224 s of air. Measured on the 8 kB stress
- * transfer: at t+60 s of one such frame the peer's floor re-baselined
- * ONTO the signal, declared the channel idle, and keyed over the rest
- * -- key-up recorded with cs = 3.0e8 -- which timed the frame out,
- * kept the rung at 0, and kept every following frame 224 s long. A
- * death spiral with both boards perfectly healthy. 300 s clears the
- * worst case (a 255-byte EXT frame at EXTREME, ~280 s) with margin;
- * the cost is only how long a genuine noise-floor step takes to
- * re-baseline. */
-#define CS_REBASE_S 300.0
-static int16_t g_bring[BUSY_WIN];
-static int g_bpos;
-static int64_t g_bacc;
-static volatile uint32_t g_cs_mean;      /* published by the ISR */
-static double g_floor = 1e9, g_busy_since = -1.0;
+/* --- carrier sense: src/csense.c + dcblock.h, scenario-tested on the
+ * host (`make cstest`): boot latch, parked DC, 45-s busy hold,
+ * frame/gap cycling, DC steps -- every measured failure replayed.
+ * g_cs itself is declared beside g_dcb at the top: the ISR uses both. */
 
-/* called from the 12 kHz tick, one live sample at a time */
-static void note_busy_isr(int16_t v)
-{
-    int16_t old = g_bring[g_bpos];
-    g_bacc += (int64_t)v * v - (int64_t)old * old;
-    g_bring[g_bpos] = v;
-    if (++g_bpos >= BUSY_WIN)
-        g_bpos = 0;
-    g_cs_mean = (uint32_t)(g_bacc / BUSY_WIN);
-}
-
-static int channel_busy(double now)
-{
-    double p = (double)g_cs_mean;
-    static uint32_t climb_ms;
-    int busy;
-    /* The warm-up gate must cover the CONSUMER, not just the ISR feed.
-     * Gating only the feed left g_cs_mean at 0 through warm-up, and
-     * this function -- called every millisecond from boot -- read that
-     * zero and snapped the floor to its 25.0 clamp; the real quiet
-     * wire then read "busy" against 9x25 forever, and the station sat
-     * mute until CS_REBASE_S. Measured twice, to the millisecond:
-     * first key-ups at ms=300031/300029 (rebase 300), and again at
-     * t+300 after the feed-only guard. Until the ring holds real
-     * samples, report idle and leave the floor alone: a station that
-     * transmits blind for its first second is demoapp's behaviour
-     * too. */
-    if (g_ms < 1000u)
-        return 0;
-    if (p < g_floor) {
-        g_floor = p;
-    } else if ((uint32_t)(g_ms - climb_ms) >= 40u) {
-        /* The climb rate is DEFINED per 40 ms window (demoapp's cadence,
-         * 0.05% per block), not per call: this function runs at 1 kHz
-         * here against demoapp's ~25 Hz, and multiplying per call made
-         * the floor rise 40x too fast -- x1.65 per second of continuous
-         * signal instead of x1.013. */
-        g_floor *= 1.0005;
-        climb_ms = g_ms;
-    }
-    if (g_floor < 25.0)
-        g_floor = 25.0;
-    busy = p > BUSY_RATIO_SQ * g_floor;
-    if (!busy)
-        g_busy_since = -1.0;
-    else if (g_busy_since < 0.0)
-        g_busy_since = now;
-    else if (now - g_busy_since > CS_REBASE_S) {
-        g_floor = p;
-        g_busy_since = -1.0;
-        busy = 0;
-    }
-    return busy;
-}
 
 /* --- receivers, one per mode over the shared raw ring ----------------
  *
@@ -714,6 +630,8 @@ int main(void)
     g_beacon.stage = ST_ANALOG;
     RCC_AHB4ENR |= (1u << 0);         /* GPIOA: PA4/PA6 stay analog */
     dac_init();
+    dcblock_init(&g_dcb);
+    cs_init(&g_cs);
     g_beacon.adc_ready = (uint32_t)adc_init();
     ADC_CR |= (1u << 2);              /* prime the first conversion */
     tim6_init();
@@ -942,7 +860,7 @@ int main(void)
              * block of the burst has been processed. */
             if (!g_tx_on && !g_txs
                 && !(g_burst_left[0] | g_burst_left[1] | g_burst_left[2])) {
-                int air = station_poll_tx(&g_st, t, channel_busy(t),
+                int air = station_poll_tx(&g_st, t, cs_busy(&g_cs, g_ms),
                                           (int16_t *)air_dummy,
                                           1 << 24);
                 if (air > 0 && g_txs) {
@@ -963,8 +881,8 @@ int main(void)
                     {
                         uint32_t ki = g_beacon.keyups & 3u;
                         g_beacon.keyup_ms[ki] = g_ms;
-                        g_beacon.keyup_cs[ki] = g_cs_mean;
-                        g_beacon.keyup_floor[ki] = (uint32_t)g_floor;
+                        g_beacon.keyup_cs[ki] = g_cs.mean;
+                        g_beacon.keyup_floor[ki] = (uint32_t)g_cs.floor_;
                         g_beacon.keyups++;
                     }
                     g_tx_on = 1;
