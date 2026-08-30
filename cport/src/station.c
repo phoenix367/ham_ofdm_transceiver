@@ -713,13 +713,19 @@ void burst_stream_off_pub(station_t *st, int reason, double t)
 /* bits in one streamed packet: 20 reserved + payload + 16 CRC */
 #define ST_STREAM_PKT_BITS (36 + 8 * (BURST_SUBHDR + 253))
 
+/* File scope so a linker script can place it by name: at
+ * BURST_STREAM_MAX 16 this is 33 kB, which the radio image parks in
+ * D2 (a function-local static gets a compiler-numbered section that
+ * cannot be matched portably -- the same lesson as g_bc_blocks). */
+static uint8_t g_stream_blocks[BURST_STREAM_MAX * ST_STREAM_PKT_BITS];
+
 /* Build and hand over one streamed window. Returns the sample count, or 0
  * to mean "not this time" -- every such exit leaves the burst state
  * untouched so the caller just sends the next fragment as its own frame. */
 static int burst_send_stream(station_t *st, int rung_idx, int16_t *out,
                              int out_cap, double t)
 {
-    static uint8_t blocks[BURST_STREAM_MAX * ST_STREAM_PKT_BITS];
+    uint8_t *blocks = g_stream_blocks;
     uint8_t payload[BURST_SUBHDR + 253];
     int idxs[BURST_STREAM_MAX];
     lc_word_t lc;

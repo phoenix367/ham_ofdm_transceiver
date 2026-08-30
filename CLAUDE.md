@@ -172,13 +172,34 @@ Cross-module invariants that are easy to break:
   expect the first frame to be theirs, not a probe). The Python
   `station.py` does NOT mirror this (it never mirrored burst ARQ
   either); `test_link.c` `test_caps` is the twin.
-- The radio boards hold 2 kB messages (`-DST_MSG_MAX=2048` in radiofw)
-  and `g_st` lives in DTCM (`stm32h743_flash.ld`) because the pool grew
-  21 kB. `UP_MAX_PAYLOAD` is 2064 so one message crosses USB in one
-  frame; the modem's delivered-message buffers are static (a 2 kB
-  message twice over is not for the stack). The consoles take the
-  board's `msg_max` from INFO and the peer's from STATUS and split
-  files against the smaller -- never hardcode 256 again.
+- The radio boards hold 3328-byte messages (`-DST_MSG_MAX=3328`,
+  `-DBURST_STREAM_MAX=16` in radiofw). Placement: `g_st` (~58 kB)
+  lives in SRAM4 -- the D3 domain, the SLOWEST RAM for the M7 (two bus
+  bridges), which is fine because the station runs at frame cadence
+  from the main loop and never the ISR; the 16-block stream TX buffer
+  (`g_stream_blocks`, hoisted to file scope in station.c so the linker
+  can place it by name) joins the rings in D2, which is now full to
+  ~2 kB. SRAM4 has NO RCC gate for CPU access; it needs its own zero
+  loop in startup_flash.c (`_ssram4bss`). `UP_MAX_PAYLOAD` is 3336 so
+  one message crosses USB in one frame; the modem's delivered-message
+  buffers are static. The consoles take the board's `msg_max` from
+  INFO and the peer's from STATUS and split files against the smaller
+  -- and the console-side buffer cap (`USB_MSG_CAP`) must move with
+  `ST_MSG_MAX`, because the INFO value is only as useful as the buffer
+  behind it (a measurement run silently split at the old 2048).
+- File parts must be WINDOW-ALIGNED: one part is one station message,
+  and the throughput lever is acknowledgments per byte. The consoles
+  split at `peer_win_max * 200 - head` so the MESSAGE (envelope
+  included) is an exact multiple of the 200-byte fragment -- the
+  streamer deliberately refuses short tails in windows
+  (`last_len != fs` in burst_send_stream), so a misaligned part pays a
+  whole extra ack cycle for its tail. Measured on the 68 kB wire
+  transfer at rung 12: 2048-byte parts 87 B/s (3 acks/part), aligned
+  1600-byte parts 102 B/s (1 ack/part), 2 kB parts under window 16
+  98 B/s (the tail penalty). The FIRST bulk transfer to a stranger
+  still splits conservatively (window 8): the caps handshake is
+  triggered BY that transfer, so its record arrives too late to size
+  it -- prime with any small bulk item when it matters.
 - `ST_SOFF_NOACK` is the ONLY streaming failure that is a peer property,
   and the only one remembered across transfers (`peer_stream_ok`,
   re-probed after `PEER_STREAM_RETRY`). `ST_SOFF_TIMEOUT`/`ST_SOFF_BUILD`

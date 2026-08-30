@@ -642,7 +642,12 @@ static void handle_delivered(int before)
  * that does not report one gets). Once the capability handshake has
  * run, the PEER's limit applies too: a part the receiver cannot hold
  * is refused there, not here. */
-#define USB_MSG_CAP 2048         /* buffer size: the largest we handle */
+#define USB_MSG_CAP 3328         /* buffer size: the largest we handle
+                                  * (the radio boards' ST_MSG_MAX; run 3
+                                  * of the throughput measurement split
+                                  * at 2048 because this cap lagged the
+                                  * boards -- the INFO value is only as
+                                  * useful as the buffer behind it) */
 static int g_umsg_max = 256;     /* this board's, from INFO */
 static int usb_msg_max(void);
 #define USB_INFLIGHT 4           /* file parts allowed in q_bulk */
@@ -760,6 +765,19 @@ static void usb_sendfile(const char *path)
 
     head = 1 + (int)strlen(FILE_TAG) + (int)strlen(base) + 1 + 4;
     part_data = usb_msg_max() - head;
+    {   /* Align each part to the peer's streamed window: a part IS one
+         * station message, the station fragments it at 200 B (top
+         * rungs), and one window is answered by ONE acknowledgment. A
+         * 2048-byte part at window 8 went out as 8+2+1 fragments =
+         * three ack cycles; a window-sized part costs exactly one.
+         * (win*200 is window-aligned at the mid rungs too: fragments
+         * are 100 B there, so it is two full windows.) */
+        int win = (g_ust_valid && g_ust.peer_state >= 2
+                   && g_ust.peer_win_max > 0) ? g_ust.peer_win_max : 8;
+        int target = win * 200 - head;
+        if (target > 0 && part_data > target)
+            part_data = target;
+    }
     if (part_data <= 0) {
         printf("%s [%s] sendfile: name too long for a %d-byte message\n",
                tstamp(), g_name, usb_msg_max());

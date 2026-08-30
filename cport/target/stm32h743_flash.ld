@@ -8,6 +8,10 @@ MEMORY
     DTCM  (rw) : ORIGIN = 0x20000000, LENGTH = 128K
     AXI   (rw) : ORIGIN = 0x24000000, LENGTH = 512K
     D2    (rw) : ORIGIN = 0x30000000, LENGTH = 288K
+    /* D3 domain, CPU access through two bus bridges: the slowest RAM
+     * on the part and the right home for cold, frame-cadence data.
+     * No RCC gate for CPU access (only autonomous/low-power bits). */
+    SRAM4 (rw) : ORIGIN = 0x38000000, LENGTH = 64K
 }
 
 _estack = ORIGIN(DTCM) + LENGTH(DTCM);
@@ -36,7 +40,7 @@ SECTIONS
      * that matters, but they are zeroed anyway -- see below. */
     .d2_bss (NOLOAD) : {
         . = ALIGN(8); _sd2bss = .;
-        *(.bss.g_raw) *(.bss.g_blk) *(.d2_bss*)
+        *(.bss.g_raw) *(.bss.g_blk) *(.bss.g_stream_blocks) *(.d2_bss*)
         . = ALIGN(8); _ed2bss = .;
     } > D2
 
@@ -52,15 +56,22 @@ SECTIONS
          * ISR, and the 960 B that put AXI 504 B over when its call
          * site became real. DTCM is where an ISR-hot ring belongs. */
         *(.bss.g_cs)
-        /* the station itself (~42 kB at ST_MSG_MAX 2048): the message
-         * pool grew 21 kB for 2 kB messages, which AXI could not take
-         * and DTCM can. Everything in it is CPU-only. */
-        *(.bss.g_st)
         /* broadcast engine: src payload + one group's packet bits */
         *(.bss.g_bc_src) *(.bss.g_bc_blocks)
         *(.dtcm_bss*)
         . = ALIGN(8); _edtcmbss = .;
     } > DTCM
+
+    /* The station lives in SRAM4: it runs at frame cadence from the
+     * main loop only (never the ISR), so D3 latency is irrelevant, and
+     * its 58 kB (ST_MSG_MAX 3328) would not fit DTCM beside the LLR
+     * store and the stack. The 16-block stream TX buffer joins the
+     * rings in D2 for the same reason. */
+    .sram4_bss (NOLOAD) : {
+        . = ALIGN(8); _ssram4bss = .;
+        *(.bss.g_st)
+        . = ALIGN(8); _esram4bss = .;
+    } > SRAM4
 
     /* .results first, so the beacon keeps its fixed address at the base
      * of AXI (0x24000000) whatever else lands in .bss. */

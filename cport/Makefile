@@ -426,7 +426,7 @@ USBRADIO_SRC = $(subst usb/usb_flash_main.c,usb/usb_radio_main.c,$(USBFLASH_SRC)
 radiofw: $(GEN) | $(BUILD)
 	$(FLASHCC) $(FLASHFLAGS) -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
 	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx -DMAX_LLRS=4416 \
-	    -DST_MSG_MAX=2048 \
+	    -DST_MSG_MAX=3328 -DBURST_STREAM_MAX=16 \
 	    -DOFDM_RX_MODES=$(RXMODES) -DBURST_STREAM_RESYNC=$(RESYNC) \
 	    $(USBRADIO_SRC) -lm -o $(BUILD)/usb_radio.elf
 	@$(QEMUSIZE) $(BUILD)/usb_radio.elf

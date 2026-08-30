@@ -331,6 +331,13 @@ class Console:
 
         head = 1 + len(FILE_TAG) + len(base.encode("utf-8")) + 1 + 4
         part_data = self.msg_max - head
+        # align each part to the peer's streamed window (one ack per
+        # part): a part is one station message, fragmented at 200 B
+        win = (self.status or {}).get("peer_win_max", 0) \
+            if (self.status or {}).get("peer_state", 0) >= 2 else 0
+        target = (win or 8) * 200 - head
+        if 0 < target < part_data:
+            part_data = target
         if part_data <= 0:
             self.plain(f"sendfile: name too long for a {self.msg_max}-byte"
                        " message")

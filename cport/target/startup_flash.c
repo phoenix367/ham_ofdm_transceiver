@@ -17,6 +17,7 @@
 
 extern uint32_t _sidata, _sdata, _edata, _sbss, _ebss, _estack;
 extern uint32_t _sd2bss, _ed2bss, _sdtcmbss, _edtcmbss;
+extern uint32_t _ssram4bss, _esram4bss;
 extern int main(void);
 void Reset_Handler(void);
 void Default_Handler(void);
@@ -160,6 +161,8 @@ void Reset_Handler(void)
     for (dst = &_sd2bss; dst < &_ed2bss; )
         *dst++ = 0;
     for (dst = &_sdtcmbss; dst < &_edtcmbss; )
+        *dst++ = 0;
+    for (dst = &_ssram4bss; dst < &_esram4bss; )
         *dst++ = 0;
 
     __asm__ volatile("dsb; isb");

@@ -49,7 +49,7 @@
  * so a transfer paid one acknowledgment per 260 bytes -- ~50 B/s at
  * rung 12 where the raw rate is ~1 kbit/s). */
 #ifndef UP_MAX_PAYLOAD
-#define UP_MAX_PAYLOAD 2064
+#define UP_MAX_PAYLOAD 3336
 #endif
 #define UP_MAX_FRAME (UP_HDR_LEN + UP_MAX_PAYLOAD)
 
