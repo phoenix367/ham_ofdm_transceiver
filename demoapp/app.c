@@ -901,10 +901,10 @@ static int usb_command(char *line)
     } else if (!strcmp(cmd, "bcast") && rest) {
         uint8_t body[2 + 1022];
         int rung = 0xFF, n;
-        /* `-r N` pins the rung. A broadcast has no peer to negotiate
-         * with, so by default it goes at the rung the link last used
-         * -- but a beacon meant for stations that have never been
-         * heard from belongs at a slow, robust one. */
+        /* `-r N` pins the rung. Without it the board uses the rung it
+         * would send the peer a frame at -- the one rung the peer is
+         * certainly listening on -- and says which that was in a log
+         * line. A beacon for stations never heard from wants `-r 0`. */
         if (rest[0] == '-' && rest[1] == 'r' && rest[2] == ' ') {
             char *e;
             long v = strtol(rest + 3, &e, 10);
@@ -928,7 +928,7 @@ static int usb_command(char *line)
             usb_send_frame(UP_CMD_BCAST, body, n + 2);
             char rb[24];
             if (rung == 0xFF)
-                snprintf(rb, sizeof(rb), "the link's last rung");
+                snprintf(rb, sizeof(rb), "the link's own rung");
             else
                 snprintf(rb, sizeof(rb), "rung %d", rung);
             printf("%s [%s] >> broadcast queued, %d bytes at %s (non-ARQ: "

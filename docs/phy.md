@@ -183,10 +183,15 @@ Three things the firmware has to get right that no host model faced:
   frames are 9.2 s at rung 4, and at EXTREME a single frame is already
   42 s.
 
-The rung is not negotiated, because there is no peer to negotiate with.
-An explicit `-r` is honoured as given: EXTREME is the only mode an idle
-station is guaranteed to still be listening on, so a beacon meant for
-strangers belongs there. Measured on the two-board stand, a `-r 0`
+The rung decides whether the peer is listening at all: active modes
+follow the negotiated rung and decay to EXTREME-only after a couple of
+minutes of silence. The default is therefore `ctl_tx_rung()` — the rung
+this station would send the peer a frame at, which *is* the peer's own
+request and so the one rung it is certainly receiving on — and the
+board logs which rung that was, because "nothing arrived" looks the
+same from the host whatever the cause. An explicit `-r` is honoured as
+given: EXTREME is the only mode an idle station is guaranteed to still
+be listening on, so a beacon meant for strangers belongs there. Measured on the two-board stand, a `-r 0`
 broadcast to a board that had never exchanged a frame with the sender
 (listening EXTREME only) arrived byte-exact at +16.2 dB — 2 groups of
 one 42-s frame each. At rung 4 (122-byte payload, four-frame groups):

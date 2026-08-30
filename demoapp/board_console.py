@@ -337,9 +337,9 @@ class Console:
         self.plain(f">> queued {n}-byte test pattern (bulk)")
 
     def cmd_bcast(self, text):
-        # `-r N` pins the rung; without it the board picks the rung the
-        # link last used (0xFF), which for a broadcast is a guess -- there
-        # is no peer to negotiate with.
+        # `-r N` pins the rung; without it (0xFF) the board uses the rung
+        # it would send the peer a frame at -- the one rung the peer is
+        # certainly listening on -- and logs which that was.
         rung = 0xFF
         if text.startswith("-r "):
             part = text[3:].split(None, 1)
@@ -360,7 +360,7 @@ class Console:
         # UP_CMD_BCAST = 0x06: ptype (0 = telemetry/text), then the rung
         self.m.t.write(__import__("ofdm_modem").encode(
             0x06, bytes([0, rung]) + data))
-        at = "the link's last rung" if rung == 0xFF else f"rung {rung}"
+        at = "the link's own rung" if rung == 0xFF else f"rung {rung}"
         self.plain(f">> broadcast queued, {len(data)} bytes at {at} "
                    f"(non-ARQ)")
 

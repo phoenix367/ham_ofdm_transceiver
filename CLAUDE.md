@@ -400,11 +400,21 @@ Cross-module invariants that are easy to break:
     log2(group) -- and is capped by air time (`bc_group_frames`): four
     26-byte frames are 9.2 s at rung 4 but over a minute at EXTREME,
     which would break the carrier-sense time constants above.
-  * The rung is NOT negotiated (there is no peer to negotiate with). An
-    explicit `bcast -r N` is honoured as given, including a slow one --
-    EXTREME is the only mode an idle peer is guaranteed to be listening
-    on (`follow_rung`), so a beacon for strangers belongs there. The
-    default (0xFF) is the link's last rung floored at `BURST_MIN_RUNG`.
+  * The rung DECIDES WHETHER THE PEER IS LISTENING AT ALL, because
+    active modes follow the negotiated rung (`follow_rung`) and decay
+    to EXTREME-only after `RX_STALE_S` of silence. So the default
+    (0xFF) is `ctl_tx_rung()` -- the rung we would send the peer a
+    frame at, which IS the peer's own request and therefore the one
+    rung it is certainly receiving on. Do NOT floor it: an earlier
+    default floored `stats.last_rung` at `BURST_MIN_RUNG`, which
+    turned "this link runs at EXTREME" into "broadcast at NORMAL", and
+    a peer whose ladder had decayed heard the carrier at 1.1e8 and
+    decoded nothing -- twice, with every counter healthy on both
+    boards. An explicit `bcast -r N` is honoured as given, including a
+    slow one: EXTREME is the only mode an idle station is guaranteed
+    to keep active, so a beacon for strangers belongs there. bc_cmd
+    logs the rung it chose (UP_EVT_LOG) precisely because "nothing
+    arrived" cannot distinguish the two cases from the host.
   * A lost group is lost WHOLE: the loss is a missed preamble
     acquisition, and every frame behind it goes with it. Measured at
     rung 4 (4-frame groups, 9.2 s each): 24/24 groups over a

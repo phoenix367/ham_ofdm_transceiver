@@ -598,6 +598,33 @@ static uint32_t g_bc_rx_last_ms = 0;   /* 0 = never */
  * payload with a fresh SYNC, which is exactly what a receiver needs to
  * follow the switch. There is no queue: a broadcast nobody
  * acknowledges has no backpressure to queue against. */
+static int bc_group_frames(void);
+
+/* the image has no stdio: two helpers are cheaper than pulling one in */
+static char *bc_num(char *p, int v)
+{
+    char t[12];
+    int n = 0;
+    if (v < 0) {
+        *p++ = '-';
+        v = -v;
+    }
+    do {
+        t[n++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    while (n-- > 0)
+        *p++ = t[n];
+    return p;
+}
+
+static char *bc_str(char *p, const char *s)
+{
+    while (*s)
+        *p++ = *s++;
+    return p;
+}
+
 static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
                    int len)
 {
@@ -609,17 +636,53 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
     g_bc_src_off = 0;
     g_bc_seq = 0;
     g_bc_ptype_tx = ptype & 0x0F;
-    /* An explicit rung is honoured exactly -- including a slow one: a
+    /* An explicit rung is honoured exactly, including a slow one: a
      * broadcast meant for stations that have never been heard from
-     * belongs at EXTREME, which is the only mode every idle receiver
-     * keeps active (see follow_rung). Only the DEFAULT is floored at
-     * BURST_MIN_RUNG, because the link's last rung is 0 until the
-     * ladder has climbed and nobody means "take four minutes" by
-     * leaving the rung unspecified. */
+     * belongs at EXTREME, the only mode every idle receiver keeps
+     * active (see follow_rung).
+     *
+     * The DEFAULT is the rung this station would send the peer a
+     * frame at -- ctl_tx_rung(), which IS the peer's own request --
+     * because that is the one rung the peer is guaranteed to be
+     * listening on. Two earlier defaults were wrong and the second
+     * was wrong on the wire: `stats.last_rung` is what we last
+     * TRANSMITTED at (stale, and 0 before the ladder has climbed),
+     * and flooring it at BURST_MIN_RUNG turned "this link runs at
+     * EXTREME" into "broadcast at NORMAL" -- measured, a station
+     * whose peer had decayed to EXTREME-only listening heard the
+     * carrier at 1.1e8 and decoded nothing, twice, with every
+     * counter healthy. A broadcast nobody can hear is worse than a
+     * slow one, and the group air cap keeps the slow case honest. */
     g_bc_rung = (rung >= 0 && rung <= 12)
                     ? rung
-                    : (g_st.stats.last_rung >= BURST_MIN_RUNG
-                           ? g_st.stats.last_rung : BURST_MIN_RUNG);
+                    : ctl_tx_rung(&g_st.ctl, g_modem.now);
+    {   /* Say what was chosen. The host asked for "the link's rung"
+         * and cannot see which one that was -- and when a broadcast
+         * goes unheard the rung is the first thing to check, because
+         * it decides whether the peer is listening on that mode at
+         * all. No stdio in this image, so the line is assembled by
+         * hand. */
+        static const char *const MODE_NAME[3] = { "NORMAL", "ROBUST",
+                                                  "EXTREME" };
+        char msg[96], *p = msg;
+        int grp = bc_group_frames();
+        int air10 = (int)(stream_air_time_pub(g_bc_rung, BC_FRAME, grp)
+                          * 10.0 + 0.5);
+        p = bc_str(p, "broadcast: ");
+        p = bc_num(p, len);
+        p = bc_str(p, " B at rung ");
+        p = bc_num(p, g_bc_rung);
+        p = bc_str(p, " (");
+        p = bc_str(p, MODE_NAME[(int)ladder_mode(g_bc_rung)]);
+        p = bc_str(p, "), ");
+        p = bc_num(p, grp);
+        p = bc_str(p, " frame(s) per group, ");
+        p = bc_num(p, air10 / 10);
+        *p++ = '.';
+        p = bc_num(p, air10 % 10);
+        p = bc_str(p, " s each");
+        usb_modem_emit(&g_modem, UP_EVT_LOG, msg, (int)(p - msg));
+    }
 }
 
 /* build ONE group's packets and open the streaming generator for it.

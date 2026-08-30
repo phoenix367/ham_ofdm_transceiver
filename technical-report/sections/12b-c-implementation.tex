@@ -1514,28 +1514,54 @@ traffic recently holds its own transmitter for about one group's worth
 of time (12\,s at NORMAL, 35\,s at the slow modes) rather than keying
 into the gap.
 
-\subsubsection*{The rung nobody negotiates}
+\subsubsection*{The rung decides who can hear it}
 
 A broadcast has no peer to negotiate with, which makes the rung a
-choice rather than a measurement. The default is the rung the link last
-used, floored at rung~4 --- leaving it unspecified does not mean ``take
-four minutes''. But an explicit rung is honoured exactly as given, and
-that matters more than it looks: which modes a board is \emph{listening
-on} follows the negotiated rung, and the only mode an idle station is
-guaranteed to still be receiving is EXTREME
-(Section~\ref{sec:cport_radio}). A beacon meant for stations that have
-never been heard from belongs there, and the air-time cap is what makes
-it affordable --- at rung~0 a group collapses to one 42-second frame
-instead of four.
+choice rather than a measurement --- and the choice decides whether
+anyone is listening at all. Which modes a board keeps active follows
+the rung it has negotiated, and decays to EXTREME alone after a couple
+of minutes of silence (Section~\ref{sec:cport_radio}); a broadcast sent
+at a mode the intended listener has already dropped is inaudible, at
+any signal level.
 
-The measurement is the case that matters: with board~B freshly booted
-and having never exchanged a frame with~A --- listening on EXTREME
-alone --- a \texttt{bcast -r 0} from~A arrived byte-exact at
-$+16.2$\,dB, in two groups of one frame each. At rung~4 and a 122-byte
-payload (two groups per broadcast, four frames then two), a
-twelve-broadcast run delivered \textbf{24 of 24 groups}, 72 frames, and
-reported zero losses at $+24.7$\,dB; across the whole campaign 38 of 39
-groups arrived.
+The first default got this wrong, and the wire said so within two
+commands. It took \texttt{stats.last\_rung} --- what this station last
+\emph{transmitted} at --- and floored it at rung~4 on the reasoning
+that leaving the rung unspecified cannot mean ``take four minutes''.
+On a link running at EXTREME that floor turns ``this link is at
+EXTREME'' into ``broadcast at NORMAL'': the sending board keyed a
+perfectly good NORMAL group, and the receiving board, whose ladder had
+decayed to EXTREME-only listening, recorded a carrier at
+$1.1\times10^{8}$ of mean square --- full strength --- with zero
+capture drops, zero events and nothing decoded. Twice, with every
+counter on both boards healthy.
+
+The default is now \texttt{ctl\_tx\_rung()}: the rung this station
+would send the peer an ordinary frame at, which \emph{is} the peer's
+own request and therefore the one rung the peer is certainly receiving
+on. Nothing is floored --- a broadcast nobody can hear is worse than a
+slow one, and the air-time cap keeps the slow case honest by collapsing
+the group to a single frame. An explicit \texttt{-r} is still honoured
+exactly as given, which is how a beacon reaches stations that have
+never been heard from: EXTREME is the only mode an idle receiver is
+guaranteed to have kept. And because ``nothing arrived'' looks
+identical from the host whatever the cause, the board now logs the rung
+it chose:
+
+\begin{quote}\ttfamily\small
+board: broadcast: 12 B at rung 0 (EXTREME), 1 frame(s) per group,
+42.1 s each
+\end{quote}
+
+The measurements bracket both cases. A board freshly booted and having
+never exchanged a frame --- listening on EXTREME alone --- received a
+\texttt{bcast -r 0} byte-exact at $+16.2$\,dB, in two groups of one
+frame each; the same transfer over a link \emph{running} at EXTREME,
+which the floor used to break, now goes out at rung~0 and arrives. At
+rung~4 with a 122-byte payload (two groups per broadcast, four frames
+then two), a twelve-broadcast run delivered \textbf{24 of 24 groups},
+72 frames, and reported zero losses at $+24.7$\,dB; across the whole
+campaign 38 of 39 groups arrived.
 
 \subsubsection*{Pinning the one loss on the air, not the code}
 
