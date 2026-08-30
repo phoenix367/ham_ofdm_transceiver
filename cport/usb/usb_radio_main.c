@@ -63,6 +63,8 @@
 #include "rx_stream.h"
 #include "dcblock.h"
 #include "csense.h"
+#include "broadcast.h"
+#include "packets.h"
 
 void ofdm_usb_bsp_init(int rhport);
 int  ofdm_usb_bsp_supply_ready(void);
@@ -99,6 +101,27 @@ typedef struct {
      * stops that being a mystery a second time. */
     uint32_t keyups;
     uint32_t keyup_ms[4], keyup_cs[4], keyup_floor[4];
+    /* broadcast (non-ARQ) forensics. The first two-board run keyed a
+     * correct group -- the host twin decodes the SAME waveform, see
+     * `make bcrepro` -- and the receiving board reported nothing at
+     * all: no frame, no failed block, no false lock. That is three
+     * different failures (never transmitted / never heard / heard and
+     * refused) with one symptom, so each gets a counter. */
+    uint32_t bc_tx_groups, bc_tx_ms;      /* groups keyed, last key-up */
+    uint32_t bc_rx_frames, bc_rx_lost;    /* cumulative, never reset */
+    uint32_t ev_n, ev_neg;                /* rxs events: total, failures */
+    uint32_t ev_last;                     /* mode<<24 | type&0xff<<16 | typ */
+    uint32_t ev_last_ms, ev_cap_ovr;      /* when, and drops by then */
+    /* the loudest thing this receiver heard while not transmitting.
+     * A quiet wire reads ~2e4 of mean square and a peer's carrier
+     * ~2e8, so this alone separates "the peer never keyed" from
+     * "the peer keyed and we could not decode it". */
+    uint32_t cs_peak, cs_peak_ms;
+    /* the last 8 receiver events, oldest first once ev_n > 8: when,
+     * what, and where. One counter per event class is not enough to
+     * tell "never locked" from "locked and refused eight times" --
+     * and that distinction is the whole diagnosis. */
+    uint32_t ev_ring[8][3];   /* ms | mode<<28|(type&0xf)<<24|typ<<16|cap_ovr16 | start_abs */
 } beacon_t;
 volatile beacon_t g_beacon __attribute__((section(".results"), used));
 enum { ST_ENTER = 1, ST_SUPPLY, ST_ANALOG, ST_RXS, ST_TUSB, ST_LOOP,
@@ -521,6 +544,255 @@ static void burst_advance(int m, const rxs_event_t *ev)
                                     + rxs_ring_miss(g_rxs[2]));
 }
 
+/* --- broadcast: the non-ARQ train ------------------------------------
+ *
+ * Mirrors demoapp's engine, minus what a board cannot afford and a host
+ * console does better. TX: the payload arrives whole in one
+ * UP_CMD_BCAST (<= 1022 B -- the protocol frame cap; demoapp holds
+ * 64 kB because a PC can); groups of BC_GROUP frames go out one keying
+ * per group through the SAME streaming generator every other
+ * transmission uses, yielding to carrier sense between groups, so no
+ * air buffer exists at all. The hold-and-probe machinery demoapp runs
+ * (drive the ladder up before a broadcast) stays on the host side:
+ * the host sees the status stream and can probe with a message first.
+ * RX: the walk is demoapp's line for line -- descriptor BEFORE arming
+ * the group count, EOS ends the group whatever the descriptor
+ * promised, failed blocks are stepped over but bounded -- and the
+ * reassembled bytes STREAM to the host as UP_EVT_BCAST chunks. */
+#define BC_GROUP 4
+#define BC_TX_CAP 1022
+#define BC_FRAME 26
+/* How long a heard broadcast holds this transmitter. The train has
+ * gaps between groups and keying into one costs the whole group, so
+ * the hold has to outlast a gap -- which means outlasting a GROUP,
+ * whose air time is mode-dependent (9.2 s for four NORMAL frames,
+ * ~20 s for the single frame BC_GROUP_MAX_AIR_S allows at ROBUST or
+ * EXTREME). demoapp uses 12 s and only ever runs NORMAL broadcasts;
+ * the boards pick by the mode they heard it on. */
+#define BC_RX_HOLD_S 12.0
+static const double BC_RX_HOLD_MODE_S[3] = { BC_RX_HOLD_S, 35.0, 35.0 };
+static double g_bc_hold_s = BC_RX_HOLD_S;
+#define BC_MAX_MISS 4
+
+static uint8_t g_bc_src[BC_TX_CAP];
+static int g_bc_src_len, g_bc_src_off, g_bc_seq, g_bc_rung, g_bc_ptype_tx;
+static int g_bc_left[3], g_bc_miss[3];
+/* A broadcast walk holds this station's transmitter exactly as a burst
+ * walk does, so it needs the same escape: a peer that stops mid-group
+ * emits no further events, and without a deadline g_bc_left never
+ * returns to zero and the board goes permanently mute. One group's air
+ * time bounds it -- 9.2 s for four NORMAL frames, far more at EXTREME
+ * -- so the burst walk's 15 s is not enough; 45 s is BURST_FRAG's own
+ * air cap and covers a group at any rung the ladder allows. */
+#define BC_WALK_DEADLINE_MS 45000u
+static uint32_t g_bc_deadline[3];
+static int g_bc_rx_group = 4, g_bc_ptype = -1, g_bc_last_seq = -1;
+static int g_bc_frames, g_bc_lost;
+static double g_bc_last_snr;
+static uint32_t g_bc_rx_last_ms = 0;   /* 0 = never */
+
+/* UP_CMD_BCAST: one command is one broadcast. A command that arrives
+ * while another broadcast is still going REPLACES what has not been
+ * sent yet -- the group already keyed finishes (the generator holds
+ * g_bc_blocks, not this buffer), then the next group opens on the new
+ * payload with a fresh SYNC, which is exactly what a receiver needs to
+ * follow the switch. There is no queue: a broadcast nobody
+ * acknowledges has no backpressure to queue against. */
+static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
+                   int len)
+{
+    (void)ctx;
+    if (len <= 0 || len > BC_TX_CAP)
+        return;
+    memcpy(g_bc_src, data, (size_t)len);
+    g_bc_src_len = len;
+    g_bc_src_off = 0;
+    g_bc_seq = 0;
+    g_bc_ptype_tx = ptype & 0x0F;
+    /* An explicit rung is honoured exactly -- including a slow one: a
+     * broadcast meant for stations that have never been heard from
+     * belongs at EXTREME, which is the only mode every idle receiver
+     * keeps active (see follow_rung). Only the DEFAULT is floored at
+     * BURST_MIN_RUNG, because the link's last rung is 0 until the
+     * ladder has climbed and nobody means "take four minutes" by
+     * leaving the rung unspecified. */
+    g_bc_rung = (rung >= 0 && rung <= 12)
+                    ? rung
+                    : (g_st.stats.last_rung >= BURST_MIN_RUNG
+                           ? g_st.stats.last_rung : BURST_MIN_RUNG);
+}
+
+/* build ONE group's packets and open the streaming generator for it.
+ * Returns the total sample count (g_txs armed), or 0 = nothing to do. */
+/* file-scope so the linker script can place it by name (DTCM): a
+ * function-local static gets a compiler-numbered section that cannot
+ * be matched portably, and AXI is full to within ~450 B */
+static uint8_t g_bc_blocks[BC_GROUP * (36 + 8 * BC_FRAME)];
+
+/* Frames per group at this rung. One group is ONE keying, so its air
+ * time is bound by the same constants as everything else the station
+ * emits -- a four-frame group is 9.2 s at rung 4 but over a minute at
+ * EXTREME, which would break the carrier-sense floor climb and the
+ * peer's own transmit gate. Halve, never decrement: the SYNC
+ * descriptor carries log2(group), so the size must be a power of two.
+ * Never returns 0 -- one frame must always be sendable. */
+#define BC_GROUP_MAX_AIR_S 30.0
+
+static int bc_group_frames(void)
+{
+    int g = BC_GROUP;
+    while (g > 1
+           && stream_air_time_pub(g_bc_rung, BC_FRAME, g) > BC_GROUP_MAX_AIR_S)
+        g >>= 1;
+    return g;
+}
+
+static int bc_open_group(void)
+{
+    uint8_t *blocks = g_bc_blocks;
+    uint8_t payload[BC_FRAME];
+    int pkt_n = 0, nf = 0, first = 1, cap0 = BC_FRAME - 3,
+        cap = BC_FRAME - 2, grp = bc_group_frames();
+
+    if (g_bc_src_off >= g_bc_src_len)
+        return 0;
+    while (nf < grp && g_bc_src_off < g_bc_src_len) {
+        int take = first ? cap0 : cap;
+        int flags = first ? BC_SYNC : 0;
+        if (take > g_bc_src_len - g_bc_src_off)
+            take = g_bc_src_len - g_bc_src_off;
+        if (g_bc_src_off + take >= g_bc_src_len)
+            flags |= BC_EOS;
+        memset(payload, 0, sizeof(payload));
+        payload[0] = (uint8_t)(flags | (g_bc_seq & BC_SEQ_MASK));
+        payload[1] = (uint8_t)take;
+        if (first) {
+            int gc = 0, g = grp;
+            while (g > 1) { g >>= 1; gc++; }
+            payload[2] = (uint8_t)((gc << 4) | g_bc_ptype_tx);
+        }
+        memcpy(payload + (first ? 3 : 2), g_bc_src + g_bc_src_off,
+               (size_t)take);
+        pkt_n = data_encode(0, payload, BC_FRAME,
+                            blocks + (size_t)nf * (36 + 8 * BC_FRAME));
+        g_bc_src_off += take;
+        g_bc_seq++;
+        nf++;
+        first = 0;
+    }
+    {   /* pack the bit-arrays contiguously at the real pkt_n stride */
+        int i;
+        for (i = 1; i < nf; i++)
+            memmove(blocks + (size_t)i * pkt_n,
+                    blocks + (size_t)i * (36 + 8 * BC_FRAME),
+                    (size_t)pkt_n);
+    }
+    return phy_build_stream(blocks, pkt_n, nf, PKT_TYP_BCAST, g_bc_rung,
+                            BURST_STREAM_RESYNC);
+}
+
+/* one decoded (or failed) event on receiver m: the broadcast walk.
+ * Returns 1 if the event was broadcast traffic (consumed). */
+static void bc_emit_stats(void)
+{
+    uint8_t st[7];
+    int16_t q8 = (int16_t)(g_bc_last_snr * 256.0);
+    st[0] = (uint8_t)(BC_EOS | (g_bc_ptype >= 0 ? g_bc_ptype : 0x0F));
+    st[1] = (uint8_t)(g_bc_frames & 0xFF);
+    st[2] = (uint8_t)(g_bc_frames >> 8);
+    st[3] = (uint8_t)(g_bc_lost & 0xFF);
+    st[4] = (uint8_t)(g_bc_lost >> 8);
+    st[5] = (uint8_t)(q8 & 0xFF);
+    st[6] = (uint8_t)((q8 >> 8) & 0xFF);
+    usb_modem_emit(&g_modem, UP_EVT_BCAST, st, 7);
+    g_bc_frames = g_bc_lost = 0;
+    g_bc_last_seq = -1;
+}
+
+static int bc_advance(int m, const rxs_event_t *ev)
+{
+    if (ev->type == -3 && ev->hdr.typ == PKT_TYP_BCAST && g_bc_left[m] > 0) {
+        /* failed block mid-group: deterministic offsets, step over it --
+         * but a lost EOS leaves nothing to stop on, so bound the chase */
+        g_bc_left[m]--;
+        g_bc_lost++;
+        g_beacon.bc_rx_lost++;
+        g_bc_rx_last_ms = g_ms ? g_ms : 1;
+        g_bc_hold_s = BC_RX_HOLD_MODE_S[m];
+        if (++g_bc_miss[m] >= BC_MAX_MISS)
+            g_bc_left[m] = 0;
+        if (g_bc_left[m] > 0
+            && !rxs_continue_burst(g_rxs[m], BURST_STREAM_RESYNC))
+            g_bc_left[m] = 0;
+        return 1;
+    }
+    if (ev->type != 1 || ev->hdr.typ != PKT_TYP_BCAST)
+        return 0;
+    {
+        const uint8_t *b = ev->bits;
+        int plen = (ev->pkt_bits_n - 36) / 8;
+        int j, v, flags, seq, dlen, head = 2;
+        uint8_t out[1 + BC_FRAME];
+        int nb = 0;
+
+        for (j = 0, v = 0; j < 8; j++)
+            v = (v << 1) | (b[20 + j] & 1);
+        flags = v & ~BC_SEQ_MASK;
+        seq = v & BC_SEQ_MASK;
+        for (j = 0, v = 0; j < 8; j++)
+            v = (v << 1) | (b[28 + j] & 1);
+        dlen = v;
+        if (flags & BC_SYNC) {
+            int t = 0, q;
+            head = 3;
+            for (q = 0; q < 8; q++)
+                t = (t << 1) | (b[36 + q] & 1);
+            g_bc_ptype = t & 0x0F;
+            g_bc_rx_group = 1 << (t >> 4);
+            if (g_bc_rx_group < 1 || g_bc_rx_group > BURST_STREAM_MAX)
+                g_bc_rx_group = 4;
+            g_bc_left[m] = g_bc_rx_group - 1;
+            g_bc_deadline[m] = g_ms + BC_WALK_DEADLINE_MS;
+            out[nb++] = (uint8_t)(BC_SYNC | g_bc_ptype);
+            usb_modem_emit(&g_modem, UP_EVT_BCAST, out, nb);
+            nb = 0;
+        } else if (g_bc_left[m] > 0) {
+            g_bc_left[m]--;
+        }
+        if (g_bc_last_seq >= 0) {
+            int gap = (seq - g_bc_last_seq - 1) & BC_SEQ_MASK;
+            if (gap > 0 && gap < 32)
+                g_bc_lost += gap;
+        }
+        g_bc_last_seq = seq;
+        g_bc_frames++;
+        g_beacon.bc_rx_frames++;
+        g_bc_rx_last_ms = g_ms ? g_ms : 1;
+        g_bc_hold_s = BC_RX_HOLD_MODE_S[m];
+        g_bc_last_snr = ev->snr_db;
+        if (dlen > plen - head)
+            dlen = plen - head;
+        out[nb++] = 0;                      /* flags: plain data chunk */
+        for (j = 0; j < dlen; j++) {
+            int bb, val = 0;
+            for (bb = 0; bb < 8; bb++)
+                val = (val << 1) | (b[20 + 8 * (head + j) + bb] & 1);
+            out[nb++] = (uint8_t)val;
+        }
+        if (nb > 1)
+            usb_modem_emit(&g_modem, UP_EVT_BCAST, out, nb);
+        g_bc_miss[m] = 0;
+        if (flags & BC_EOS)
+            g_bc_left[m] = 0;               /* the stream ends HERE */
+        if (g_bc_left[m] > 0
+            && !rxs_continue_burst(g_rxs[m], BURST_STREAM_RESYNC))
+            g_bc_left[m] = 0;
+        if (flags & BC_EOS)
+            bc_emit_stats();
+        return 1;
+    }
+}
+
 /* --- carrier sense: src/csense.c + dcblock.h, scenario-tested on the
  * host (`make cstest`): boot latch, parked DC, 45-s busy hold,
  * frame/gap cycling, DC steps -- every measured failure replayed.
@@ -592,7 +864,7 @@ static void follow_rung(double now)
      * ends, which it always does (ack-request bit, or the
      * consecutive-failure bound). */
     for (i = 0; i < 3; i++)
-        if (g_burst_left[i] > 0)
+        if (g_burst_left[i] > 0 || g_bc_left[i] > 0)
             want |= 1 << i;
 
     if ((uint32_t)want != g_beacon.rx_active_mask)
@@ -731,9 +1003,11 @@ int main(void)
     g_st.burst_window = BURST_STREAM_MAX;
     g_st.burst_stream = 1;
     usb_modem_init(&g_modem, &g_st, UID, 0x0200,
-                   UP_CAP_LDPC | UP_CAP_EXT_FRAMES);
+                   UP_CAP_LDPC | UP_CAP_EXT_FRAMES | UP_CAP_BCAST);
     g_st.diag_cb = usb_modem_diag;
     g_st.diag_ctx = &g_modem;
+    g_modem.bcast_cb = bc_cmd;
+    g_modem.bcast_ctx = 0;
 
     tusb_init();
     NVIC_IPR[IRQ_OTG_FS] = 0x80;
@@ -812,6 +1086,29 @@ int main(void)
                     rxs_event_t ev;
                     if (!g_rxs[i] || !rxs_push(g_rxs[i], chunk, m, &ev))
                         continue;
+                    g_beacon.ev_n++;
+                    if (ev.type != 1)
+                        g_beacon.ev_neg++;
+                    g_beacon.ev_last = ((uint32_t)i << 24)
+                                       | (((uint32_t)ev.type & 0xFFu) << 16)
+                                       | (uint32_t)(ev.hdr.typ & 0xFF);
+                    g_beacon.ev_last_ms = g_ms;
+                    g_beacon.ev_cap_ovr = g_beacon.cap_overruns;
+                    {
+                        uint32_t k = (g_beacon.ev_n - 1u) & 7u;
+                        g_beacon.ev_ring[k][0] = g_ms;
+                        g_beacon.ev_ring[k][1] =
+                            ((uint32_t)i << 28)
+                            | (((uint32_t)ev.type & 0xFu) << 24)
+                            | (((uint32_t)ev.hdr.typ & 0xFFu) << 16)
+                            | (g_beacon.cap_overruns & 0xFFFFu);
+                        g_beacon.ev_ring[k][2] = (uint32_t)ev.start_abs;
+                    }
+                    /* broadcast first: BCAST frames are Data-shaped
+                     * but carry no link-control word, so they must
+                     * never reach the station's reassembler */
+                    if (bc_advance(i, &ev))
+                        continue;
                     /* every event, decoded or not, moves the burst
                      * walk on: a failed block must still be counted or
                      * the receiver steps out of phase with the sender */
@@ -839,6 +1136,17 @@ int main(void)
             slow = g_ms;
             if (g_ms <= 500u)
                 g_cap_r = g_cap_w;       /* discard the settling transient */
+            {
+                int i2;
+                for (i2 = 0; i2 < 3; i2++)
+                    if (g_bc_left[i2] > 0
+                        && (int32_t)(g_ms - g_bc_deadline[i2]) > 0)
+                        g_bc_left[i2] = 0;
+            }
+            if (!g_tx_on && g_ms > 1000u && g_cs.mean > g_beacon.cs_peak) {
+                g_beacon.cs_peak = g_cs.mean;
+                g_beacon.cs_peak_ms = g_ms;
+            }
             follow_rung(t);
             /* expire wedged walks (peer died mid-stream: no events) */
             {
@@ -859,8 +1167,42 @@ int main(void)
              * ends, which is exactly the contract: one ack, after every
              * block of the burst has been processed. */
             if (!g_tx_on && !g_txs
-                && !(g_burst_left[0] | g_burst_left[1] | g_burst_left[2])) {
-                int air = station_poll_tx(&g_st, t, cs_busy(&g_cs, g_ms),
+                && !(g_burst_left[0] | g_burst_left[1] | g_burst_left[2])
+                && !(g_bc_left[0] | g_bc_left[1] | g_bc_left[2])) {
+                int busy_now = cs_busy(&g_cs, g_ms);
+                /* a broadcast heard recently holds this transmitter: the
+                 * train has gaps between groups, and keying into one
+                 * costs the group (see BC_RX_HOLD_MODE_S) */
+                if (g_bc_rx_last_ms
+                    && (uint32_t)(g_ms - g_bc_rx_last_ms)
+                           < (uint32_t)(g_bc_hold_s * 1000.0))
+                    busy_now = 1;
+                if (!busy_now && g_bc_src_off < g_bc_src_len) {
+                    /* one GROUP per keying; the yield between groups is
+                     * this very carrier-sense gate */
+                    if (bc_open_group() > 0 && g_txs) {
+                        uint32_t ki = g_beacon.keyups & 3u;
+                        g_txf_r = g_txf_w = 0;
+                        tx_fill(0);
+                        g_cap_r = g_cap_w;
+                        /* the same key-up record the station path
+                         * keeps: a broadcast is a transmission like
+                         * any other and its carrier-sense context is
+                         * the first thing asked for when a peer hears
+                         * nothing */
+                        g_beacon.keyup_ms[ki] = g_ms;
+                        g_beacon.keyup_cs[ki] = g_cs.mean;
+                        g_beacon.keyup_floor[ki] = (uint32_t)g_cs.floor_;
+                        g_beacon.keyups++;
+                        g_tx_on = 1;
+                        g_beacon.tx_frames++;
+                        g_beacon.bc_tx_groups++;
+                        g_beacon.bc_tx_ms = g_ms;
+                    }
+                }
+                if (g_tx_on)
+                    goto station_done;
+                int air = station_poll_tx(&g_st, t, busy_now,
                                           (int16_t *)air_dummy,
                                           1 << 24);
                 if (air > 0 && g_txs) {
@@ -896,6 +1238,7 @@ int main(void)
                     g_txs = 0;
                 }
             }
+station_done:
             usb_modem_tick(&g_modem, t, t - last_status >= 0.5);
             if (t - last_status >= 0.5)
                 last_status = t;

@@ -55,7 +55,11 @@ enum {
     UP_CMD_SUBMIT  = 0x02, /* qos:u8, data[] */
     UP_CMD_CONFIG  = 0x03, /* key:u8, value:i32le */
     UP_CMD_PING    = 0x04, /* token:u32le */
-    UP_CMD_RESET   = 0x05  /* -- : re-init the station, keep the link up */
+    UP_CMD_RESET   = 0x05, /* -- : re-init the station, keep the link up */
+    UP_CMD_BCAST   = 0x06  /* ptype:u8, rung:u8 (0xFF = link's last rung),
+                            * data[] -- start a NON-ARQ broadcast. One
+                            * command is one broadcast; nothing is ever
+                            * retransmitted. */
 };
 
 /* device -> host */
@@ -66,7 +70,14 @@ enum {
     UP_EVT_DIAG    = 0x84, /* ev:u8, a..d:i32le, t_ms:u32le */
     UP_RSP_PONG    = 0x85, /* token:u32le, echoed */
     UP_EVT_LOG     = 0x86, /* utf-8 text, no terminator */
-    UP_EVT_AUDIO   = 0x87  /* int16le samples, debug tap, off by default */
+    UP_EVT_AUDIO   = 0x87, /* int16le samples, debug tap, off by default */
+    UP_EVT_BCAST   = 0x88  /* received broadcast. flags:u8 (bit7 = start,
+                            * low nibble then carries the ptype; bit6 =
+                            * EOS, payload is stats: frames_ok:u16le,
+                            * frames_lost:u16le, snr_q8:i16le), else
+                            * payload = reassembled data bytes as they
+                            * decode -- STREAMED, the host stores or
+                            * prints them; gaps are never repaired. */
 };
 
 /* UP_CMD_CONFIG keys */
@@ -95,6 +106,7 @@ typedef struct {
 #define UP_CAP_EXT_FRAMES (1u << 1)
 #define UP_CAP_BURST      (1u << 2)
 #define UP_CAP_AUDIO_TAP  (1u << 3)
+#define UP_CAP_BCAST      (1u << 4)
 
 typedef struct {
     int32_t  rung;           /* current tx rung, -1 = none yet */

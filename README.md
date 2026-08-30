@@ -39,7 +39,10 @@ the C fixed-point stack end to end in real time, with an audible mode
 (stereo output, one station's receiver per ear) and multi-part file
 transfer over the burst protocol. The same console speaks USB
 (`ofdm_console --usb`, `--list` to enumerate boards), becoming a
-terminal onto a real board's own station.
+terminal onto a real board's own station -- including `bcast`, the
+non-ARQ broadcast mode the firmware transmits and receives on its own
+(nothing is acknowledged, and a beacon sent at EXTREME reaches a board
+that has never been heard from).
 
 **Technical report:
 [technical-report/OFDM_Transceiver_Technical_Report.pdf](technical-report/OFDM_Transceiver_Technical_Report.pdf)**

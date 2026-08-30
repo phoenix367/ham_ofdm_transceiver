@@ -276,6 +276,12 @@ link-read:
 # 8/8 under every impairment (exonerating the DSP and the clocks) and
 # 0/3 at -DMAX_LLRS=1024 with frag_size 100 (convicting the overflow).
 #   ./build/burst_repro [-f frag] [-r rung] [-n blocks] [-q] [-d] [ppm]
+bcrepro: $(GEN) | $(BUILD)
+	gcc -std=c99 -O2 -Isrc -DMAX_LLRS=4416 -o $(BUILD)/bc_repro \
+	    bench/bc_repro.c src/rx_stream.c src/rx_detect.c src/rx_demod.c \
+	    src/tx.c src/fft.c src/dsp.c src/bits.c src/conv.c src/ldpc.c \
+	    src/packets.c src/link.c src/station.c src/arena.c -lm
+
 burstrepro: $(GEN) | $(BUILD)
 	gcc -std=c99 -O2 -Isrc -DMAX_LLRS=4416 -o $(BUILD)/burst_repro \
 	    bench/burst_repro.c src/rx_stream.c src/rx_detect.c src/rx_demod.c \
@@ -291,7 +297,7 @@ cstest: | $(BUILD)
 	    bench/csense_test.c src/csense.c -lm
 	$(BUILD)/csense_test
 
-robust: burstrepro cstest
+robust: burstrepro bcrepro cstest
 	@echo "=== input-abuse decode matrix (each line must say 8/8) ==="
 	@for imp in "-dc -16577" "-dc 18000" "-step" "-clip" "-hum" "-imp" \
 	            "-stuck" "-dc -16577 -step -hum -imp"; do \
@@ -299,6 +305,8 @@ robust: burstrepro cstest
 	 done
 	@echo "=== all abuse at once, bare (decode is DC-blind by design) ==="
 	@./build/burst_repro -q -dc -16577 -step -hum -imp 5 | tail -1
+	@echo "=== broadcast, the firmware's own group build + walk ==="
+	@./build/bc_repro -q -len 122 -all | tail -2 | head -1
 
 # --- sanitizers -----------------------------------------------------
 # Every suite under AddressSanitizer + UndefinedBehaviorSanitizer, and
@@ -379,7 +387,7 @@ RXMODES ?= 7
 RESYNC ?= 4
 
 USBRADIO_SRC = $(subst usb/usb_flash_main.c,usb/usb_radio_main.c,$(USBFLASH_SRC)) \
-               src/rx_stream.c src/rx_detect.c src/rx_demod.c src/csense.c
+               src/rx_stream.c src/rx_detect.c src/rx_demod.c src/csense.c src/broadcast.c
 
 radiofw: $(GEN) | $(BUILD)
 	$(FLASHCC) $(FLASHFLAGS) -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
@@ -550,4 +558,4 @@ flash-probe: test-probe
 	 $(ARDUINO_CLI) compile --fqbn esp32:esp32:esp32 -u -p $(PROBE_PORT) \
 	   $(PROBE_DIR)/esp32_rbb | tail -3
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read radiofw flash-radio-a flash-radio-b burstrepro cstest robust
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read radiofw flash-radio-a flash-radio-b burstrepro bcrepro cstest robust

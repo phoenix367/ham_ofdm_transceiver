@@ -633,6 +633,11 @@ static uint8_t g_uparts[255][USB_MSG_MAX];
 static int g_upart_len[255];
 static int g_upart_n, g_upart_sent;
 static char g_upfile[128];
+/* usb-mode broadcast reception (chunks stream in as UP_EVT_BCAST) */
+static FILE *g_ubc_file;
+static long g_ubc_written;
+static uint8_t g_ubc_text[4096];
+static int g_ubc_len, g_ubc_ptype = -1;
 
 static void usb_send_frame(uint8_t type, const void *payload, int len)
 {
@@ -801,6 +806,48 @@ static void usb_on_frame(void *ctx, uint8_t type, const uint8_t *pl, int len)
         printf("\n%s [%s] board: %.*s\n> ", tstamp(), g_name, len, pl);
         fflush(stdout);
         break;
+    case UP_EVT_BCAST:
+        if (len < 1)
+            break;
+        if (pl[0] & BC_SYNC) {
+            g_ubc_ptype = pl[0] & 0x0F;
+            if (g_ubc_ptype == BC_PT_OPAQUE && !g_ubc_file)
+                g_ubc_file = fopen(BC_RX_PATH, "wb");
+            printf("\n%s [%s] << broadcast starting (ptype %d%s)\n> ",
+                   tstamp(), g_name, g_ubc_ptype,
+                   g_ubc_ptype == BC_PT_OPAQUE ? ", storing" : "");
+        } else if (pl[0] & BC_EOS) {
+            int fo = len >= 5 ? pl[1] | (pl[2] << 8) : 0;
+            int lo = len >= 5 ? pl[3] | (pl[4] << 8) : 0;
+            double snr = len >= 7
+                ? (int16_t)(pl[5] | (pl[6] << 8)) / 256.0 : 0.0;
+            printf("\n%s [%s] << broadcast ended: %d frame(s), %d lost, "
+                   "snr %+.1f dB (gaps are NOT repaired)\n", tstamp(),
+                   g_name, fo, lo, snr);
+            if (g_ubc_file) {
+                fclose(g_ubc_file);
+                g_ubc_file = 0;
+                printf("    stored %ld bytes as %s\n", g_ubc_written,
+                       BC_RX_PATH);
+                g_ubc_written = 0;
+            } else if (g_ubc_len) {
+                printf("    \"%.*s\"\n", g_ubc_len, g_ubc_text);
+                g_ubc_len = 0;
+            }
+            printf("> ");
+        } else if (len > 1) {
+            if (g_ubc_file) {
+                fwrite(pl + 1, 1, (size_t)(len - 1), g_ubc_file);
+                g_ubc_written += len - 1;
+            } else {
+                int room = (int)sizeof(g_ubc_text) - g_ubc_len;
+                int c = len - 1 < room ? len - 1 : room;
+                memcpy(g_ubc_text + g_ubc_len, pl + 1, (size_t)c);
+                g_ubc_len += c;
+            }
+        }
+        fflush(stdout);
+        break;
     case UP_EVT_DIAG:
         if (len >= 21 && g_debug) {
             int32_t a, b, c, d;
@@ -851,6 +898,42 @@ static int usb_command(char *line)
             printf("%s [%s] >> queued %d-byte pattern (bulk)\n", tstamp(),
                    g_name, n);
         }
+    } else if (!strcmp(cmd, "bcast") && rest) {
+        uint8_t body[2 + 1022];
+        int rung = 0xFF, n;
+        /* `-r N` pins the rung. A broadcast has no peer to negotiate
+         * with, so by default it goes at the rung the link last used
+         * -- but a beacon meant for stations that have never been
+         * heard from belongs at a slow, robust one. */
+        if (rest[0] == '-' && rest[1] == 'r' && rest[2] == ' ') {
+            char *e;
+            long v = strtol(rest + 3, &e, 10);
+            if (e != rest + 3 && v >= 0 && v <= 12) {
+                rung = (int)v;
+                while (*e == ' ')
+                    e++;
+                rest = e;
+            }
+        }
+        n = (int)strlen(rest);
+        if (n > 1022) {
+            printf("bcast: %d bytes exceeds the %d-byte broadcast cap\n",
+                   n, 1022);
+        } else if (n == 0) {
+            printf("bcast: nothing to send\n");
+        } else {
+            body[0] = BC_PT_TELEMETRY;
+            body[1] = (uint8_t)rung;
+            memcpy(body + 2, rest, (size_t)n);
+            usb_send_frame(UP_CMD_BCAST, body, n + 2);
+            char rb[24];
+            if (rung == 0xFF)
+                snprintf(rb, sizeof(rb), "the link's last rung");
+            else
+                snprintf(rb, sizeof(rb), "rung %d", rung);
+            printf("%s [%s] >> broadcast queued, %d bytes at %s (non-ARQ: "
+                   "nothing will be repeated)\n", tstamp(), g_name, n, rb);
+        }
     } else if (!strcmp(cmd, "status")) {
         if (!g_ust_valid) {
             printf("no status yet -- the board pushes one every 0.5 s\n");
@@ -896,8 +979,10 @@ static int usb_command(char *line)
         printf("diag prints %s (enable the stream with 'config "
                "diag_stream 1')\n", g_debug ? "ON" : "OFF");
     } else if (!strcmp(cmd, "help")) {
-        printf("  send <text> | sendfile <path> | bulk <n> | status | "
-               "stats\n  config <key> <val> | debug | quit\n");
+        printf("  send <text> | sendfile <path> | bulk <n> | "
+               "bcast [-r <rung>] <text>\n  status | stats | "
+               "config <key> <val> | "
+               "debug | quit\n");
     } else {
         printf("unknown command '%s' -- try help\n", cmd);
     }

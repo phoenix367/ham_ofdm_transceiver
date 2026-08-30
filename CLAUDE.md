@@ -376,6 +376,46 @@ Cross-module invariants that are easy to break:
   With all three fixed: one 8-block stream acks 8 of 11 frags, the
   1200-byte file crosses byte-exact, `burst_blocks` 8 / `misses` 0, and
   the burst defaults (`burst_window`, `burst_stream`) are ON.
+- BROADCAST on the boards is a THIRD walk, not `src/broadcast.c`. That
+  file's `bc_receive` scans a whole recording, which a board never has;
+  the firmware (`usb/usb_radio_main.c`) builds one group per keying
+  (`bc_open_group`) and walks the received group with `bc_advance` over
+  the STREAMING receiver, stepping blocks with `rxs_continue_burst`
+  exactly as `burst_advance` does. Keep the invariants:
+  * BCAST frames (`PKT_TYP_BCAST`, typ 6) are Data-shaped but carry NO
+    link-control word, so `bc_advance` runs BEFORE `burst_advance` and
+    `station_on_decoded` -- one reaching the ARQ reassembler would be
+    read as a fragment.
+  * A broadcast walk holds this station's transmitter AND pins its mode
+    active (`g_bc_left`, in the poll_tx gate and in `follow_rung`), the
+    same as a burst walk -- and therefore needs the same escape hatch,
+    `BC_WALK_DEADLINE_MS`. Without it a peer that stops mid-group leaves
+    the board permanently mute; the walk only advances on events, and a
+    peer that stopped sends none.
+  * One group is ONE keying and the yield between groups IS the
+    carrier-sense gate; a receiver that heard broadcast traffic within
+    `BC_RX_HOLD_S` holds its own transmitter, because the gaps between
+    groups are not idle channel.
+  * Group size must be a power of two -- the SYNC descriptor carries
+    log2(group) -- and is capped by air time (`bc_group_frames`): four
+    26-byte frames are 9.2 s at rung 4 but over a minute at EXTREME,
+    which would break the carrier-sense time constants above.
+  * The rung is NOT negotiated (there is no peer to negotiate with). An
+    explicit `bcast -r N` is honoured as given, including a slow one --
+    EXTREME is the only mode an idle peer is guaranteed to be listening
+    on (`follow_rung`), so a beacon for strangers belongs there. The
+    default (0xFF) is the link's last rung floored at `BURST_MIN_RUNG`.
+  * A lost group is lost WHOLE: the loss is a missed preamble
+    acquisition, and every frame behind it goes with it. Measured at
+    rung 4 (4-frame groups, 9.2 s each): 24/24 groups over a
+    12-broadcast run, 38/39 across the campaign; and a `-r 0` beacon
+    reaches a board that has never exchanged a frame (EXTREME-only
+    listening) byte-exact at +16.2 dB. ARQ hides this failure rate by
+    retransmitting and broadcast cannot, which is exactly what
+    `frames_ok`/`frames_lost` in the EOS event are for. The host twin
+    of the SAME build-and-walk path is `make bcrepro` (in
+    `make robust`) -- it decodes 6/6, so a group loss is an on-air
+    acquisition miss, not a code path.
 - Every carrier-sense TIME CONSTANT must exceed the longest frame the
   station can emit, and on the boards that used to be 224 s: frag_size
   is fixed at engage, so a burst engaged at rung 10 (203-byte frags)

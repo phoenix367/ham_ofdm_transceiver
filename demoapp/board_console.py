@@ -336,6 +336,51 @@ class Console:
         self.m.submit(bytes((i & 0xFF) for i in range(n)), QOS_BULK)
         self.plain(f">> queued {n}-byte test pattern (bulk)")
 
+    def cmd_bcast(self, text):
+        # `-r N` pins the rung; without it the board picks the rung the
+        # link last used (0xFF), which for a broadcast is a guess -- there
+        # is no peer to negotiate with.
+        rung = 0xFF
+        if text.startswith("-r "):
+            part = text[3:].split(None, 1)
+            try:
+                v = int(part[0])
+            except (ValueError, IndexError):
+                v = -1
+            if 0 <= v <= 12:
+                rung = v
+                text = part[1] if len(part) > 1 else ""
+        data = text.encode("utf-8")
+        if not data:
+            self.plain("bcast: nothing to send")
+            return
+        if len(data) > 1022:
+            self.plain("bcast: over the 1022-byte broadcast cap")
+            return
+        # UP_CMD_BCAST = 0x06: ptype (0 = telemetry/text), then the rung
+        self.m.t.write(__import__("ofdm_modem").encode(
+            0x06, bytes([0, rung]) + data))
+        at = "the link's last rung" if rung == 0xFF else f"rung {rung}"
+        self.plain(f">> broadcast queued, {len(data)} bytes at {at} "
+                   f"(non-ARQ)")
+
+    def on_bcast(self, pl):
+        if not pl:
+            return
+        if pl[0] & 0x80:
+            self._bc_buf = bytearray()
+            self.say(f"<< broadcast starting (ptype {pl[0] & 0x0F})")
+        elif pl[0] & 0x40:
+            fo = int.from_bytes(pl[1:3], "little") if len(pl) >= 5 else 0
+            lo = int.from_bytes(pl[3:5], "little") if len(pl) >= 5 else 0
+            text = getattr(self, "_bc_buf", b"").decode("utf-8", "replace")
+            self.say(f"<< broadcast ended: {fo} frame(s), {lo} lost -- "
+                     f'"{text}" (gaps are NOT repaired)')
+        else:
+            if not hasattr(self, "_bc_buf"):
+                self._bc_buf = bytearray()
+            self._bc_buf += pl[1:]
+
     def cmd_status(self):
         st = self.status
         if not st:
@@ -374,6 +419,8 @@ class Console:
             self.cmd_sendfile(rest)
         elif cmd == "bulk" and rest.isdigit():
             self.cmd_bulk(int(rest))
+        elif cmd == "bcast" and rest:
+            self.cmd_bcast(rest)
         elif cmd == "config" and rest:
             k, _, v = rest.partition(" ")
             try:
@@ -389,6 +436,7 @@ class Console:
             self.cmd_stats()
         elif cmd == "help":
             self.plain("send <text> | sendfile <path> | bulk <n> | "
+                       "bcast [-r <rung>] <text> | "
                        "config <key> <val> | status | stats | quit")
         else:
             self.plain(f"unknown command '{line}' -- try help")
@@ -457,6 +505,8 @@ def main():
                         con.on_log(payload)
                     elif kind == "diag" and payload:
                         con.on_diag(payload)
+                    elif kind == "0x88":
+                        con.on_bcast(payload)
                 if select.select([sys.stdin], [], [], 0)[0]:
                     line = sys.stdin.readline()
                     if not line:

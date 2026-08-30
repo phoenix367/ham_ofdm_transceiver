@@ -35,6 +35,12 @@ typedef struct {
     int delivered_seen;      /* how much of the delivered log we have sent */
     double now;              /* protocol time, set by the caller */
     int diag_on;             /* UP_CFG_DIAG_STREAM, default 0 */
+    /* UP_CMD_BCAST lands here; the firmware owns the broadcast engine
+     * (it is not station traffic -- nothing is acknowledged). NULL =
+     * command ignored. */
+    void (*bcast_cb)(void *ctx, int ptype, int rung, const uint8_t *data,
+                     int len);
+    void *bcast_ctx;
 } usb_modem_t;
 
 void usb_modem_init(usb_modem_t *m, station_t *st, const uint8_t uid[12],
@@ -50,6 +56,12 @@ int usb_modem_poll(usb_modem_t *m, uint8_t *out, int cap);
 /* Stage whatever the station has produced since the last call: delivered
  * messages, and a status frame if `status` is nonzero. */
 void usb_modem_tick(usb_modem_t *m, double now, int status);
+
+/* Emit one frame to the host (queued behind whatever is pending).
+ * For firmware-level events that are not the station's business --
+ * broadcast reception, for instance. */
+void usb_modem_emit(usb_modem_t *m, uint8_t type, const void *payload,
+                    int len);
 
 /* Station diagnostic callback -- register with station_set_diag so the
  * event stream reaches the host. */

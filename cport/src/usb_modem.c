@@ -84,6 +84,11 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
         }
         break;
 
+    case UP_CMD_BCAST:
+        if (len >= 2 && m->bcast_cb)
+            m->bcast_cb(m->bcast_ctx, p[0], p[1], p + 2, len - 2);
+        break;
+
     case UP_CMD_RESET:
         /* Re-init the station but keep the link identity: the host's
          * handle stays valid, which is the difference between a modem
@@ -176,6 +181,15 @@ int usb_modem_poll(usb_modem_t *m, uint8_t *out, int cap)
     m->txq_head = (m->txq_head + n) % UM_TXQ;
     m->txq_len -= n;
     return n;
+}
+
+/* Firmware-level events the station knows nothing about -- a received
+ * broadcast, for one -- reach the host through the same staging ring
+ * as everything else. */
+void usb_modem_emit(usb_modem_t *m, uint8_t type, const void *payload,
+                    int len)
+{
+    emit(m, type, payload, len);
 }
 
 /* The diagnostic stream is OFF until the host asks for it, and even then

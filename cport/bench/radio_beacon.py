@@ -22,7 +22,7 @@ import sys
 
 CFG = "../tools/esp32-probe/stm32h7-rbb-dual.cfg"
 MAGIC = 0x0AD10BEE
-N_WORDS = 52
+N_WORDS = 87
 
 FIELDS = [
     "magic", "stage", "mounted", "ms", "rx_bytes", "tx_bytes", "isr_count",
@@ -39,7 +39,10 @@ FIELDS = [
     "keyup_ms0", "keyup_ms1", "keyup_ms2", "keyup_ms3",
     "keyup_cs0", "keyup_cs1", "keyup_cs2", "keyup_cs3",
     "keyup_floor0", "keyup_floor1", "keyup_floor2", "keyup_floor3",
-]
+    "bc_tx_groups", "bc_tx_ms", "bc_rx_frames", "bc_rx_lost",
+    "ev_n", "ev_neg", "ev_last", "ev_last_ms", "ev_cap_ovr",
+    "cs_peak", "cs_peak_ms",
+] + ["ev%d_%s" % (i, k) for i in range(8) for k in ("ms", "what", "start")]
 STAGES = {1: "entered", 2: "supply", 3: "analog", 4: "receivers",
           5: "tusb", 6: "loop (not mounted)", 7: "MOUNTED"}
 MODES = ["NORMAL", "ROBUST", "EXTREME"]
@@ -95,6 +98,28 @@ def show(label, d, raw):
     print("  bursts: starts %d  blocks %d  misses %d  refused %d" %
           (d["burst_starts"], d["burst_blocks"], d["burst_misses"],
            d["burst_refused"]))
+    ev = d["ev_last"]
+    print("  events: %d (%d failed)  last: mode %s type %d typ %d at %.0f s"
+          % (d["ev_n"], d["ev_neg"], MODES[(ev >> 24) & 3],
+             s32(((ev >> 16) & 0xFF) << 24) >> 24, ev & 0xFF,
+             d["ev_last_ms"] / 1000.0))
+    print("  broadcast: %d group(s) keyed (last %.0f s)  %d frame(s) heard, "
+          "%d lost" % (d["bc_tx_groups"], d["bc_tx_ms"] / 1000.0,
+                       d["bc_rx_frames"], d["bc_rx_lost"]))
+    print("  loudest thing heard: cs %d at %.0f s (quiet ~2e4, carrier ~2e8)"
+          % (d["cs_peak"], d["cs_peak_ms"] / 1000.0))
+    if d["ev_n"]:
+        print("  last events (newest last):")
+        order = sorted(range(8), key=lambda i: d["ev%d_ms" % i])
+        for i in order:
+            w = d["ev%d_what" % i]
+            if not d["ev%d_ms" % i]:
+                continue
+            ty = (w >> 24) & 0xF
+            print("    %7.1f s  %-7s type %+d typ %2d  start %d  drops %d"
+                  % (d["ev%d_ms" % i] / 1000.0, MODES[(w >> 28) & 3],
+                     ty - 16 if ty > 7 else ty, (w >> 16) & 0xFF,
+                     d["ev%d_start" % i], w & 0xFFFF))
 
     # ---- verdicts, each a measured failure signature -----------------
     bad = 0

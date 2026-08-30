@@ -52,6 +52,8 @@ SECTIONS
          * ISR, and the 960 B that put AXI 504 B over when its call
          * site became real. DTCM is where an ISR-hot ring belongs. */
         *(.bss.g_cs)
+        /* broadcast engine: src payload + one group's packet bits */
+        *(.bss.g_bc_src) *(.bss.g_bc_blocks)
         *(.dtcm_bss*)
         . = ALIGN(8); _edtcmbss = .;
     } > DTCM

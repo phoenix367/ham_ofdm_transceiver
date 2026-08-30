@@ -153,6 +153,50 @@ retransmitting; see the technical report §10.7. After the fix the
 integer chain matches float on delivery and is ahead at the lowest
 SNRs.
 
+### On the boards
+
+The firmware is a fourth path, and it had to be: `bc_receive` scans a
+whole recording and a board never holds one. `cport/usb/usb_radio_main.c`
+builds **one group per keying** and walks the received group with
+`bc_advance()` over the *streaming* receiver — the same
+`rxs_continue_burst()` stepping burst ARQ uses, with the acknowledgment
+machinery absent rather than subtracted. The host drives it over the USB
+modem protocol: `UP_CMD_BCAST` (payload type, rung, ≤1022 B) out;
+`UP_EVT_BCAST` back, streaming the payload *as it decodes* — a start
+marker carrying the payload type, then data chunks, then an EOS frame
+with `frames_ok`, `frames_lost` and the mean SNR. In the console that is
+`bcast [-r <rung>] <text>`.
+
+Three things the firmware has to get right that no host model faced:
+
+- **BCAST frames are Data-shaped but carry no link-control word**, so
+  the broadcast walk runs *before* the station's reassembler — one
+  reaching it would be read as an ARQ fragment.
+- **A walk in progress holds the transmitter and pins its mode active**
+  (a muted receiver instance stops detecting, and the walk is not
+  running the detector anyway), which means it needs a deadline. Without
+  one, a peer that stops mid-group leaves the board mute for good: the
+  walk only advances on events, and a peer that stopped sends none.
+- **One group is one keying**, so its air time is bound like everything
+  else the station emits. The group halves — `log2(group)` is what goes
+  on the wire in the SYNC descriptor — until it fits 30 s: four 26-byte
+  frames are 9.2 s at rung 4, and at EXTREME a single frame is already
+  42 s.
+
+The rung is not negotiated, because there is no peer to negotiate with.
+An explicit `-r` is honoured as given: EXTREME is the only mode an idle
+station is guaranteed to still be listening on, so a beacon meant for
+strangers belongs there. Measured on the two-board stand, a `-r 0`
+broadcast to a board that had never exchanged a frame with the sender
+(listening EXTREME only) arrived byte-exact at +16.2 dB — 2 groups of
+one 42-s frame each. At rung 4 (122-byte payload, four-frame groups):
+**24 of 24 groups** across a 12-broadcast run, 38 of 39 across every
+run of the campaign. The one loss went **whole** — a missed acquisition
+takes the frames behind it with it, which is the shape of every non-ARQ
+loss and the reason the EOS event reports what arrived. The host twin
+of the same build-and-walk path is `make bcrepro` (part of
+`make robust`).
+
 ## Transmit chain
 
 ```mermaid
