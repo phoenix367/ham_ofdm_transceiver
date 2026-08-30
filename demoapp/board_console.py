@@ -20,7 +20,10 @@ station that lives somewhere else. What it does share with app.c, byte
 for byte, is the application envelope, so a file sent from here is
 received by an app.c station (and by another board) and vice versa:
 
-    magic(1) "FILE:" basename NUL part(1) n_parts(1) data...
+    magic(1) "FILE:" basename NUL part n_parts data...
+    magic 0x01/0x02: part(1) n_parts(1); 0x03/0x04 (what we send):
+    part(2) n_parts(2) little-endian -- 255 parts capped a transfer at
+    ~58 kB over USB. Even magics are DEFLATEd whole.
 
 with magic 0x01 raw and 0x02 for a whole-file DEFLATE stream, exactly
 as documented in app.c. Compression is applied once to the whole file
@@ -55,6 +58,9 @@ from ofdm_modem import OfdmModem, VID, PID          # noqa: E402
 
 FILE_MAGIC = 0x01
 FILE_MAGIC_Z = 0x02
+FILE_MAGIC_W = 0x03
+FILE_MAGIC_WZ = 0x04
+FILE_MAGICS = (FILE_MAGIC, FILE_MAGIC_Z, FILE_MAGIC_W, FILE_MAGIC_WZ)
 FILE_TAG = b"FILE:"
 FILE_MAX_SRC = 1 << 19          # same cap app.c uses
 
@@ -170,7 +176,7 @@ class Console:
     # --- receive --------------------------------------------------
     def on_message(self, qos, data):
         self.rx_msgs += 1
-        if len(data) > 6 and data[0] in (FILE_MAGIC, FILE_MAGIC_Z) \
+        if len(data) > 6 and data[0] in FILE_MAGICS \
                 and data[1:6] == FILE_TAG:
             self.on_file_part(data)
             return
@@ -179,14 +185,20 @@ class Console:
 
     def on_file_part(self, msg):
         nul = msg.find(b"\0", 6)
-        if nul < 0 or len(msg) < nul + 3:
+        wide = msg[0] in (FILE_MAGIC_W, FILE_MAGIC_WZ)
+        meta_n = 4 if wide else 2
+        if nul < 0 or len(msg) < nul + 1 + meta_n:
             self.say("<< malformed file envelope")
             return
         name = os.path.basename(msg[6:nul].decode("utf-8", "replace")) \
             or "unnamed"
-        part, n_parts = msg[nul + 1], msg[nul + 2]
-        data = msg[nul + 3:]
-        zipped = msg[0] == FILE_MAGIC_Z
+        if wide:
+            part = int.from_bytes(msg[nul + 1:nul + 3], "little")
+            n_parts = int.from_bytes(msg[nul + 3:nul + 5], "little")
+        else:
+            part, n_parts = msg[nul + 1], msg[nul + 2]
+        data = msg[nul + 1 + meta_n:]
+        zipped = msg[0] in (FILE_MAGIC_Z, FILE_MAGIC_WZ)
 
         if part == 0:
             self.rx.close()
@@ -294,35 +306,34 @@ class Console:
             return
         base = os.path.basename(path) or "unnamed"
 
-        body, magic = src, FILE_MAGIC
+        body, magic = src, FILE_MAGIC_W
         if self.compress and src:
             z = zlib.compress(src, 9)
             if len(z) < len(src):
-                body, magic = z, FILE_MAGIC_Z
+                body, magic = z, FILE_MAGIC_WZ
 
-        head = 1 + len(FILE_TAG) + len(base.encode("utf-8")) + 1 + 2
+        head = 1 + len(FILE_TAG) + len(base.encode("utf-8")) + 1 + 4
         part_data = self.msg_max - head
         if part_data <= 0:
             self.plain(f"sendfile: name too long for a {self.msg_max}-byte"
                        " message")
             return
         n_parts = max(1, (len(body) + part_data - 1) // part_data)
-        if n_parts > 255:
+        if n_parts > 65535:
             self.plain(f"sendfile: {len(body)} bytes on air needs {n_parts}"
-                       f" parts, but the envelope allows 255"
-                       f" (max {255 * part_data} bytes on air)")
+                       " parts, but the envelope allows 65535")
             return
 
         prefix = bytes([magic]) + FILE_TAG + base.encode("utf-8") + b"\0"
         self.pending = [
-            prefix + bytes([p, n_parts])
+            prefix + p.to_bytes(2, "little") + n_parts.to_bytes(2, "little")
             + body[p * part_data:(p + 1) * part_data]
             for p in range(n_parts)
         ]
         self.pending_name = base
         self.sent_parts = 0
         ratio = f" -> {len(body)} on air, {len(src) / len(body):.2f}x" \
-            if magic == FILE_MAGIC_Z else ""
+            if magic == FILE_MAGIC_WZ else ""
         self.plain(f">> file '{base}' ({len(src)} bytes{ratio}),"
                    f" {n_parts} part(s) of <= {part_data} B, pacing against"
                    " the board's queue")

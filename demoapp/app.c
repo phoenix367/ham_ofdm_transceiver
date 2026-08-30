@@ -49,8 +49,18 @@
  * B2F does it: cport/ stays dependency-free and MCU-portable. An
  * embedded build would swap zlib for miniz or heatshrink; the wire
  * format is plain DEFLATE either way. */
-#define FILE_MAGIC 0x01
-#define FILE_MAGIC_Z 0x02
+#define FILE_MAGIC 0x01        /* part(1) n_parts(1): 255 parts */
+#define FILE_MAGIC_Z 0x02      /* the same, DEFLATEd whole */
+/* Wide envelope: part(2) n_parts(2), little-endian. The byte-sized
+ * index capped a transfer at 255 x ~230 B = 58 kB over USB, which a
+ * 68 kB PNG hit on the stand. Senders emit the wide form; receivers
+ * take both, so an old console still receives from a new one as long
+ * as the file fits its cap. */
+#define FILE_MAGIC_W 0x03
+#define FILE_MAGIC_WZ 0x04
+#define FILE_IS_MAGIC(m) ((m) >= FILE_MAGIC && (m) <= FILE_MAGIC_WZ)
+#define FILE_IS_ZIPPED(m) ((m) == FILE_MAGIC_Z || (m) == FILE_MAGIC_WZ)
+#define FILE_IS_WIDE(m) ((m) >= FILE_MAGIC_W)
 #define FILE_TAG "FILE:"
 #define FILE_PART_DATA 3000
 #define FILE_MAX_SRC (1 << 19) /* 512 KB source cap before compression */
@@ -476,15 +486,21 @@ static void store_file(const uint8_t *msg, int len, int zipped)
     const uint8_t *meta;
     int name_len, data_len, part, n_parts;
 
+    int wide = FILE_IS_WIDE(msg[0]);
     name_len = (int)strnlen(name, (size_t)(len - 1 - (int)strlen(FILE_TAG)));
     meta = (const uint8_t *)name + name_len + 1;
-    data_len = len - (int)(meta + 2 - msg);
+    data_len = len - (int)(meta + (wide ? 4 : 2) - msg);
     if (data_len < 0) {
         printf("\n%s [%s] << malformed file envelope\n> ", tstamp(), g_name);
         return;
     }
-    part = meta[0];
-    n_parts = meta[1];
+    if (wide) {
+        part = meta[0] | (meta[1] << 8);
+        n_parts = meta[2] | (meta[3] << 8);
+    } else {
+        part = meta[0];
+        n_parts = meta[1];
+    }
     /* basename only -- no path traversal from the peer */
     {
         const char *slash = strrchr(name, '/');
@@ -535,7 +551,7 @@ static void store_file(const uint8_t *msg, int len, int zipped)
     }
 
     if (g_rxfile.zipped) {
-        int rc = inflate_part(meta + 2, data_len);
+        int rc = inflate_part(meta + (wide ? 4 : 2), data_len);
         if (rc < 0) {
             printf("\n%s [%s] << file '%s': corrupt compressed stream, "
                    "transfer dropped\n> ", tstamp(), g_name, name);
@@ -546,7 +562,7 @@ static void store_file(const uint8_t *msg, int len, int zipped)
             return;
         }
     } else {
-        fwrite(meta + 2, 1, (size_t)data_len, g_rxfile.f);
+        fwrite(meta + (wide ? 4 : 2), 1, (size_t)data_len, g_rxfile.f);
         g_rxfile.out_total += data_len;
     }
     g_rxfile.total += data_len;
@@ -583,9 +599,9 @@ static void handle_delivered(int before)
         const uint8_t *m = station_delivered(&g_st, i);
         int len = g_st.delivered_len[i];
         if (len > 1 + (int)strlen(FILE_TAG)
-            && (m[0] == FILE_MAGIC || m[0] == FILE_MAGIC_Z)
+            && FILE_IS_MAGIC(m[0])
             && !memcmp(m + 1, FILE_TAG, strlen(FILE_TAG))) {
-            store_file(m, len, m[0] == FILE_MAGIC_Z);
+            store_file(m, len, FILE_IS_ZIPPED(m[0]));
         } else {
             printf("\n%s [%s] << message (%d bytes): ", tstamp(), g_name,
                    len);
@@ -629,8 +645,11 @@ static up_parser_t g_up;
 static up_status_t g_ust;
 static int g_ust_valid;
 /* outgoing file, split into ready-made messages */
-static uint8_t g_uparts[255][USB_MSG_MAX];
-static int g_upart_len[255];
+/* enough for FILE_MAX_SRC at the smallest useful part: ~600 kB static,
+ * which a host can afford and a 255-entry table could not deliver */
+#define USB_PARTS_MAX 2400
+static uint8_t g_uparts[USB_PARTS_MAX][USB_MSG_MAX];
+static int g_upart_len[USB_PARTS_MAX];
 static int g_upart_n, g_upart_sent;
 static char g_upfile[128];
 /* usb-mode broadcast reception (chunks stream in as UP_EVT_BCAST) */
@@ -723,7 +742,7 @@ static void usb_sendfile(const char *path)
         magic = FILE_MAGIC_Z;
     }
 
-    head = 1 + (int)strlen(FILE_TAG) + (int)strlen(base) + 1 + 2;
+    head = 1 + (int)strlen(FILE_TAG) + (int)strlen(base) + 1 + 4;
     part_data = USB_MSG_MAX - head;
     if (part_data <= 0) {
         printf("%s [%s] sendfile: name too long for a %d-byte message\n",
@@ -731,11 +750,12 @@ static void usb_sendfile(const char *path)
         return;
     }
     n_parts = body_len <= 0 ? 1 : (body_len + part_data - 1) / part_data;
-    if (n_parts > 255) {
+    if (n_parts > USB_PARTS_MAX) {
         printf("%s [%s] sendfile: %d bytes on air needs %d parts, cap is "
-               "255\n", tstamp(), g_name, body_len, n_parts);
+               "%d\n", tstamp(), g_name, body_len, n_parts, USB_PARTS_MAX);
         return;
     }
+    magic = magic == FILE_MAGIC_Z ? FILE_MAGIC_WZ : FILE_MAGIC_W;
     for (i = 0; i < n_parts; i++) {
         int dlen = body_len - i * part_data;
         uint8_t *env = g_uparts[i];
@@ -746,15 +766,17 @@ static void usb_sendfile(const char *path)
         env[0] = (uint8_t)magic;
         memcpy(env + 1, FILE_TAG, strlen(FILE_TAG));
         memcpy(env + 1 + strlen(FILE_TAG), base, strlen(base) + 1);
-        env[head - 2] = (uint8_t)i;
-        env[head - 1] = (uint8_t)n_parts;
+        env[head - 4] = (uint8_t)i;
+        env[head - 3] = (uint8_t)(i >> 8);
+        env[head - 2] = (uint8_t)n_parts;
+        env[head - 1] = (uint8_t)(n_parts >> 8);
         memcpy(env + head, body + (size_t)i * part_data, (size_t)dlen);
         g_upart_len[i] = head + dlen;
     }
     g_upart_n = n_parts;
     g_upart_sent = 0;
     snprintf(g_upfile, sizeof(g_upfile), "%s", base);
-    if (magic == FILE_MAGIC_Z)
+    if (magic == FILE_MAGIC_WZ)
         printf("%s [%s] queued file '%s' (%ld bytes -> %d on air, %.2fx, "
                "%d part(s), paced against the board's queue)\n", tstamp(),
                g_name, base, fsz, body_len, (double)fsz / (double)body_len,
@@ -790,9 +812,9 @@ static void usb_on_frame(void *ctx, uint8_t type, const uint8_t *pl, int len)
         /* pl[0] = qos, then the message: classify exactly as the socket
          * path's handle_delivered does, sharing store_file() */
         if (len - 1 > 1 + (int)strlen(FILE_TAG)
-            && (pl[1] == FILE_MAGIC || pl[1] == FILE_MAGIC_Z)
+            && FILE_IS_MAGIC(pl[1])
             && !memcmp(pl + 2, FILE_TAG, strlen(FILE_TAG))) {
-            store_file(pl + 1, len - 1, pl[1] == FILE_MAGIC_Z);
+            store_file(pl + 1, len - 1, FILE_IS_ZIPPED(pl[1]));
         } else {
             printf("\n%s [%s] << message (%d bytes): ", tstamp(), g_name,
                    len - 1);
@@ -1423,9 +1445,10 @@ static void cmd_sendfile(const char *path)
         }
     }
 
-    head = 1 + (int)strlen(FILE_TAG) + (int)strlen(base) + 1 + 2;
+    head = 1 + (int)strlen(FILE_TAG) + (int)strlen(base) + 1 + 4;
     n_parts = body_len <= 0 ? 1
                             : (body_len + FILE_PART_DATA - 1) / FILE_PART_DATA;
+    magic = magic == FILE_MAGIC_Z ? FILE_MAGIC_WZ : FILE_MAGIC_W;
     /* Negotiate before committing. ctl_tx_rung() decays the rung by one
      * step per STALE_S of peer silence, so a transfer started after a
      * quiet spell opens at a rung the link has not actually been tested
@@ -1463,7 +1486,7 @@ static void cmd_sendfile(const char *path)
      * refused whole rather than half submitted (see ST_POOL_SLOTS) */
     if (station_pool_free(&g_st) < q_free)
         q_free = station_pool_free(&g_st);
-    if (n_parts > 255 || n_parts > q_free) {
+    if (n_parts > 65535 || n_parts > q_free) {
         printf("%s [%s] sendfile: %s is %ld bytes (%d on air) = %d parts, "
                "but only %d queue slots free (max %d bytes now)\n", tstamp(),
                g_name, path, fsz, body_len, n_parts, q_free,
@@ -1480,8 +1503,10 @@ static void cmd_sendfile(const char *path)
             dlen = FILE_PART_DATA;
         if (dlen < 0)
             dlen = 0;
-        env[head - 2] = (uint8_t)p;
-        env[head - 1] = (uint8_t)n_parts;
+        env[head - 4] = (uint8_t)p;
+        env[head - 3] = (uint8_t)(p >> 8);
+        env[head - 2] = (uint8_t)n_parts;
+        env[head - 1] = (uint8_t)(n_parts >> 8);
         memcpy(env + head, body + (size_t)p * FILE_PART_DATA, (size_t)dlen);
         if (station_submit(&g_st, env, head + dlen, QOS_BULK) != 0) {
             printf("%s [%s] sendfile: queue full at part %d\n", tstamp(),
@@ -1489,7 +1514,7 @@ static void cmd_sendfile(const char *path)
             return;
         }
     }
-    if (magic == FILE_MAGIC_Z)
+    if (magic == FILE_MAGIC_WZ)
         printf("%s [%s] queued file '%s' (%ld bytes -> %d on air, %.2fx, "
                "%d part%s, burst-ARQ bulk)\n", tstamp(), g_name, base, fsz,
                body_len, (double)fsz / (double)body_len, n_parts,

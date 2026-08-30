@@ -9,10 +9,14 @@ asserted here directly:
     env[0]                       magic
     env[1 .. 1+len("FILE:"))     "FILE:"
     env[1+5 ..]                  basename, NUL terminated
-    env[head-2]                  part index
-    env[head-1]                  n_parts
+    env[head-4 .. head-2)        part index, little-endian
+    env[head-2 .. head)          n_parts, little-endian
     env[head ..]                 data
-    head = 1 + len("FILE:") + len(basename) + 1 + 2
+    head = 1 + len("FILE:") + len(basename) + 1 + 4
+
+That is the WIDE envelope (magic 0x03 raw / 0x04 deflated), which both
+consoles send. The byte-indexed one (0x01 / 0x02, head ... + 2) is
+still accepted on receive; a case below feeds one in.
 """
 import os
 import sys
@@ -64,16 +68,16 @@ def main(tmpdir):
     con, parts = build(tmpdir, "hello.txt", b"A" * 50, compress=False)
     env = parts[0]
     base = b"hello.txt"
-    head = 1 + len(bc.FILE_TAG) + len(base) + 1 + 2
-    check("magic is 0x01 for an uncompressed file",
-          env[0] == bc.FILE_MAGIC)
+    head = 1 + len(bc.FILE_TAG) + len(base) + 1 + 4
+    check("magic is 0x03 for an uncompressed file (wide envelope)",
+          env[0] == bc.FILE_MAGIC_W)
     check('tag is "FILE:" at offset 1',
           env[1:1 + len(bc.FILE_TAG)] == bc.FILE_TAG)
     check("basename follows the tag, NUL terminated",
           env[1 + len(bc.FILE_TAG):1 + len(bc.FILE_TAG) + len(base)] == base
           and env[1 + len(bc.FILE_TAG) + len(base)] == 0)
-    check("part index at head-2, n_parts at head-1",
-          env[head - 2] == 0 and env[head - 1] == 1)
+    check("part index at head-4 (LE16), n_parts at head-2 (LE16)",
+          env[head - 4:head - 2] == b"\0\0" and env[head - 2:head] == b"\1\0")
     check("data starts at head", env[head:] == b"A" * 50)
     check("one part for a small file", len(parts) == 1)
 
@@ -82,11 +86,11 @@ def main(tmpdir):
     con, parts = build(tmpdir, "big.bin", big, msg_max=256, compress=False)
     check("no part exceeds the board's message limit",
           all(len(p) <= 256 for p in parts))
+    off = 1 + len(bc.FILE_TAG) + len(b"big.bin") + 1
     check("every part carries the same n_parts",
-          len({p[1 + len(bc.FILE_TAG) + len(b'big.bin') + 2] for p in parts})
-          == 1)
+          len({p[off + 2:off + 4] for p in parts}) == 1)
     check("part indices are 0..n-1 in order",
-          [p[1 + len(bc.FILE_TAG) + len(b"big.bin") + 1] for p in parts]
+          [int.from_bytes(p[off:off + 2], "little") for p in parts]
           == list(range(len(parts))))
 
     # --- 3. round trip through the receive path -------------------
@@ -107,12 +111,44 @@ def main(tmpdir):
 
     # --- 4. compression is used only when it helps ----------------
     con, parts = build(tmpdir, "z.bin", b"C" * 20000, compress=True)
-    check("magic is 0x02 when DEFLATE shrinks the file",
-          parts[0][0] == bc.FILE_MAGIC_Z)
+    check("magic is 0x04 when DEFLATE shrinks the file",
+          parts[0][0] == bc.FILE_MAGIC_WZ)
     incompressible = os.urandom(2000)
     con, parts = build(tmpdir, "r.bin", incompressible, compress=True)
-    check("magic stays 0x01 when DEFLATE would not shrink it",
-          parts[0][0] == bc.FILE_MAGIC)
+    check("magic stays 0x03 when DEFLATE would not shrink it",
+          parts[0][0] == bc.FILE_MAGIC_W)
+
+    # --- 4b. more than 255 parts, which the byte index could not ---
+    # 68 kB of noise at 256-byte messages is ~290 parts: the case a PNG
+    # hit on the two-board stand ("needs 288 parts, cap is 255")
+    noise = os.urandom(68143)
+    con, parts = build(tmpdir, "big68k.bin", noise, compress=True)
+    check("a 68 kB incompressible file splits into more than 255 parts",
+          len(parts) > 255)
+    cwd = os.getcwd()
+    os.chdir(tmpdir)
+    try:
+        rx = bc.Console(FakeModem(), "R", 256, True)
+        for p in parts:
+            rx.on_file_part(p)
+        got = open("rx_big68k.bin", "rb").read()
+    finally:
+        os.chdir(cwd)
+    check(f"and round-trips byte-exact ({len(parts)} parts)", got == noise)
+
+    # --- 4c. the byte-indexed envelope is still received -----------
+    legacy = [bytes([bc.FILE_MAGIC]) + bc.FILE_TAG + b"old.bin\0"
+              + bytes([i, 3]) + bytes([i]) * 100 for i in range(3)]
+    os.chdir(tmpdir)
+    try:
+        rx = bc.Console(FakeModem(), "R", 256, True)
+        for p in legacy:
+            rx.on_file_part(p)
+        got = open("rx_old.bin", "rb").read()
+    finally:
+        os.chdir(cwd)
+    check("a legacy 0x01 envelope (part(1) n_parts(1)) still reassembles",
+          got == b"".join(bytes([i]) * 100 for i in range(3)))
 
     # --- 5. a name that leaves no room is refused, not truncated --
     m = FakeModem()

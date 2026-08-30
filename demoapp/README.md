@@ -141,8 +141,11 @@ commands are `app.c`'s: `send`, `sendfile`, `bulk`, `status`, `stats`,
 `quit`.
 
 What it shares with `app.c`, byte for byte, is the application envelope
---- `magic "FILE:" basename NUL part n_parts data`, magic `0x02` for a
-whole-file DEFLATE stream --- so a file sent from a board console is
+--- `magic "FILE:" basename NUL part n_parts data`, with `part` and
+`n_parts` as 16-bit little-endian (magic `0x03`, or `0x04` for a
+whole-file DEFLATE stream; the byte-indexed `0x01`/`0x02` form is still
+received, but its 255-part cap stopped a 68 kB PNG on the two-board
+stand) --- so a file sent from a board console is
 received by an `app.c` station and vice versa. Nothing at run time would
 report a mismatch (it would just look like a peer sending garbage), so
 `test_board_console.py` asserts the offsets directly against the ones

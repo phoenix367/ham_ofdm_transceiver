@@ -175,8 +175,12 @@ Cross-module invariants that are easy to break:
   the air-time term, and do not sample an exchange that followed a
   retransmission.
 - File transfers are DEFLATEd whole before splitting into parts
-  (`demoapp/app.c`, magic 0x02 vs 0x01) — per-part compression would
-  throw the ratio away. Compression lives in the app, not `cport/`, so
+  (`demoapp/app.c`, magic 0x04 vs 0x03; the part index and count are
+  16-bit LE — the byte-indexed 0x01/0x02 envelope is still RECEIVED
+  but its 255-part cap refused a 68 kB PNG over USB at ~230 B/part,
+  and both consoles + `test_board_console.py` moved together because
+  nothing at run time reports an envelope mismatch) — per-part
+  compression would throw the ratio away. Compression lives in the app, not `cport/`, so
   the C port stays dependency-free; an MCU build swaps zlib for
   miniz/heatshrink. Measured 2.82x on a 14 KB config file, which is
   ~1.4x fewer transmissions end to end (acks and the ladder bootstrap do
