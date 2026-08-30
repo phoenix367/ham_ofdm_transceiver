@@ -63,6 +63,8 @@
 #include "../cport/src/station.h"
 #include "../cport/src/tx.h"
 #include "../cport/src/rx_stream.h"
+#include "../cport/src/usb_proto.h"
+#include "usb_host.h"
 #include "../cport/src/packets.h"
 #include "../cport/src/broadcast.h"
 
@@ -598,6 +600,364 @@ static void handle_delivered(int before)
      * 16th message arrived -- harmless when each entry was its own
      * static array, wasteful now that they share slots. */
     station_delivered_reset(&g_st);
+}
+
+
+/* ---------------- USB modem mode ----------------
+ *
+ * `ofdm_console --usb [serial]` attaches to a BOARD instead of a
+ * virtual channel. The difference is architectural, not cosmetic: a
+ * socket device carries 12 kHz audio and this process runs the whole
+ * PHY+station stack; a board already runs that stack in firmware and
+ * speaks the message-level usb_proto (submit / message / status /
+ * diag). So USB mode is a terminal onto a station that lives on the
+ * other end of a cable -- the same commands, none of the DSP.
+ *
+ * What it shares with socket mode byte for byte is the FILE ENVELOPE
+ * (magic FILE: name NUL part n_parts data, magic 2 = whole-file
+ * DEFLATE), so files cross between any mix of consoles and boards.
+ * Two board limits are respected: messages cap at ST_MSG_MAX (256 on
+ * the boards, against this app's 4096), and with 12 pool slots a file
+ * is PACED against the q_bulk depth the board reports twice a second
+ * rather than dumped into the queue. */
+
+#define USB_MSG_MAX 256          /* the board build's ST_MSG_MAX */
+#define USB_INFLIGHT 4           /* file parts allowed in q_bulk */
+
+static usbh_t *g_usb;
+static up_parser_t g_up;
+static up_status_t g_ust;
+static int g_ust_valid;
+/* outgoing file, split into ready-made messages */
+static uint8_t g_uparts[255][USB_MSG_MAX];
+static int g_upart_len[255];
+static int g_upart_n, g_upart_sent;
+static char g_upfile[128];
+
+static void usb_send_frame(uint8_t type, const void *payload, int len)
+{
+    uint8_t out[UP_MAX_FRAME];
+    int n = up_encode(type, payload, len, out, (int)sizeof(out));
+    if (n > 0 && usbh_write(g_usb, out, n) != n)
+        printf("%s [%s] usb write failed\n", tstamp(), g_name);
+}
+
+static void usb_submit(const uint8_t *data, int len, int qos)
+{
+    uint8_t body[1 + USB_MSG_MAX];
+    if (len > USB_MSG_MAX) {
+        printf("%s [%s] message exceeds the board's %d-byte limit\n",
+               tstamp(), g_name, USB_MSG_MAX);
+        return;
+    }
+    body[0] = (uint8_t)qos;
+    memcpy(body + 1, data, (size_t)len);
+    usb_send_frame(UP_CMD_SUBMIT, body, len + 1);
+}
+
+static void usb_pump_file(void)
+{
+    if (!g_upart_n || !g_ust_valid)
+        return;
+    while (g_upart_sent < g_upart_n && g_ust.q_bulk < USB_INFLIGHT) {
+        usb_submit(g_uparts[g_upart_sent], g_upart_len[g_upart_sent],
+                   QOS_BULK);
+        g_ust.q_bulk++;          /* provisional; the next status corrects */
+        g_upart_sent++;
+    }
+    if (g_upart_sent >= g_upart_n) {
+        printf("\n%s [%s] file '%s': all %d part(s) handed to the board\n> ",
+               tstamp(), g_name, g_upfile, g_upart_n);
+        fflush(stdout);
+        g_upart_n = g_upart_sent = 0;
+    }
+}
+
+static void usb_sendfile(const char *path)
+{
+    static uint8_t src[FILE_MAX_SRC], zbuf[FILE_MAX_SRC + 4096];
+    const char *base = strrchr(path, '/');
+    const uint8_t *body;
+    FILE *f = fopen(path, "rb");
+    long fsz;
+    uLongf zlen;
+    int head, part_data, n_parts, i, magic = FILE_MAGIC, body_len;
+
+    base = base ? base + 1 : path;
+    if (g_upart_n) {
+        printf("%s [%s] sendfile: a transfer is already in progress\n",
+               tstamp(), g_name);
+        if (f)
+            fclose(f);
+        return;
+    }
+    if (!f) {
+        printf("%s [%s] sendfile: cannot open %s\n", tstamp(), g_name, path);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    fsz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsz < 0 || fsz > FILE_MAX_SRC
+        || (fsz > 0 && fread(src, 1, (size_t)fsz, f) != (size_t)fsz)) {
+        printf("%s [%s] sendfile: read failed or over the %d-byte cap\n",
+               tstamp(), g_name, FILE_MAX_SRC);
+        fclose(f);
+        return;
+    }
+    fclose(f);
+
+    body = src;
+    body_len = (int)fsz;
+    zlen = compressBound((uLong)fsz);
+    if (fsz > 0 && zlen <= sizeof(zbuf)
+        && compress2(zbuf, &zlen, src, (uLong)fsz, 9) == Z_OK
+        && (long)zlen < fsz) {
+        body = zbuf;
+        body_len = (int)zlen;
+        magic = FILE_MAGIC_Z;
+    }
+
+    head = 1 + (int)strlen(FILE_TAG) + (int)strlen(base) + 1 + 2;
+    part_data = USB_MSG_MAX - head;
+    if (part_data <= 0) {
+        printf("%s [%s] sendfile: name too long for a %d-byte message\n",
+               tstamp(), g_name, USB_MSG_MAX);
+        return;
+    }
+    n_parts = body_len <= 0 ? 1 : (body_len + part_data - 1) / part_data;
+    if (n_parts > 255) {
+        printf("%s [%s] sendfile: %d bytes on air needs %d parts, cap is "
+               "255\n", tstamp(), g_name, body_len, n_parts);
+        return;
+    }
+    for (i = 0; i < n_parts; i++) {
+        int dlen = body_len - i * part_data;
+        uint8_t *env = g_uparts[i];
+        if (dlen > part_data)
+            dlen = part_data;
+        if (dlen < 0)
+            dlen = 0;
+        env[0] = (uint8_t)magic;
+        memcpy(env + 1, FILE_TAG, strlen(FILE_TAG));
+        memcpy(env + 1 + strlen(FILE_TAG), base, strlen(base) + 1);
+        env[head - 2] = (uint8_t)i;
+        env[head - 1] = (uint8_t)n_parts;
+        memcpy(env + head, body + (size_t)i * part_data, (size_t)dlen);
+        g_upart_len[i] = head + dlen;
+    }
+    g_upart_n = n_parts;
+    g_upart_sent = 0;
+    snprintf(g_upfile, sizeof(g_upfile), "%s", base);
+    if (magic == FILE_MAGIC_Z)
+        printf("%s [%s] queued file '%s' (%ld bytes -> %d on air, %.2fx, "
+               "%d part(s), paced against the board's queue)\n", tstamp(),
+               g_name, base, fsz, body_len, (double)fsz / (double)body_len,
+               n_parts);
+    else
+        printf("%s [%s] queued file '%s' (%ld bytes, %d part(s), paced "
+               "against the board's queue)\n", tstamp(), g_name, base, fsz,
+               n_parts);
+    usb_pump_file();
+}
+
+static void usb_on_frame(void *ctx, uint8_t type, const uint8_t *pl, int len)
+{
+    (void)ctx;
+    switch (type) {
+    case UP_RSP_INFO: {
+        up_info_t inf;
+        if (up_decode_info(pl, len, &inf) == 0)
+            printf("%s [%s] modem: proto v%d fw %d.%d, %d modes @%u Hz\n",
+                   tstamp(), g_name, inf.proto_ver, inf.fw_ver >> 8,
+                   inf.fw_ver & 0xFF, inf.n_modes, inf.sample_rate);
+        break;
+    }
+    case UP_EVT_STATUS:
+        if (up_decode_status(pl, len, &g_ust) == 0) {
+            g_ust_valid = 1;
+            usb_pump_file();
+        }
+        break;
+    case UP_EVT_MESSAGE:
+        if (len < 2)
+            break;
+        /* pl[0] = qos, then the message: classify exactly as the socket
+         * path's handle_delivered does, sharing store_file() */
+        if (len - 1 > 1 + (int)strlen(FILE_TAG)
+            && (pl[1] == FILE_MAGIC || pl[1] == FILE_MAGIC_Z)
+            && !memcmp(pl + 2, FILE_TAG, strlen(FILE_TAG))) {
+            store_file(pl + 1, len - 1, pl[1] == FILE_MAGIC_Z);
+        } else {
+            printf("\n%s [%s] << message (%d bytes): ", tstamp(), g_name,
+                   len - 1);
+            fwrite(pl + 1, 1, (size_t)(len - 1 < 120 ? len - 1 : 120),
+                   stdout);
+            printf("\n> ");
+        }
+        fflush(stdout);
+        break;
+    case UP_EVT_LOG:
+        printf("\n%s [%s] board: %.*s\n> ", tstamp(), g_name, len, pl);
+        fflush(stdout);
+        break;
+    case UP_EVT_DIAG:
+        if (len >= 21 && g_debug) {
+            int32_t a, b, c, d;
+            memcpy(&a, pl + 1, 4); memcpy(&b, pl + 5, 4);
+            memcpy(&c, pl + 9, 4); memcpy(&d, pl + 13, 4);
+            printf("\n%s [%s] diag %s a=%d b=%d c=%d d=%d\n> ", tstamp(),
+                   g_name, station_diag_name(pl[0]), a, b, c, d);
+            fflush(stdout);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static const struct { const char *name; int key; } USB_CFG[] = {
+    { "rung_ceiling", 1 }, { "burst_window", 2 }, { "burst_stream", 3 },
+    { "freq_trim_mhz", 4 }, { "audio_tap", 5 }, { "anchor", 6 },
+    { "diag_stream", 7 },
+};
+
+static int usb_command(char *line)
+{
+    char *cmd = strtok(line, " \t\n");
+    char *rest = strtok(0, "\n");
+    if (!cmd)
+        return 1;
+    if (!strcmp(cmd, "quit") || !strcmp(cmd, "exit"))
+        return 0;
+    if (!strcmp(cmd, "send") && rest) {
+        usb_submit((const uint8_t *)rest, (int)strlen(rest),
+                   QOS_INTERACTIVE);
+        printf("%s [%s] >> queued %d bytes (interactive)\n", tstamp(),
+               g_name, (int)strlen(rest));
+    } else if (!strcmp(cmd, "sendfile") && rest) {
+        usb_sendfile(rest);
+    } else if (!strcmp(cmd, "bulk") && rest) {
+        int n = atoi(rest), i;
+        uint8_t pat[USB_MSG_MAX];
+        if (n < 1 || n > USB_MSG_MAX) {
+            printf("bulk: 1..%d\n", USB_MSG_MAX);
+        } else {
+            for (i = 0; i < n; i++)
+                pat[i] = (uint8_t)i;
+            usb_submit(pat, n, QOS_BULK);
+            printf("%s [%s] >> queued %d-byte pattern (bulk)\n", tstamp(),
+                   g_name, n);
+        }
+    } else if (!strcmp(cmd, "status")) {
+        if (!g_ust_valid) {
+            printf("no status yet -- the board pushes one every 0.5 s\n");
+        } else {
+            printf("%s [%s] rung %d  SNR %+.1f dB  %s%s\n", tstamp(),
+                   g_name, g_ust.rung, g_ust.snr_q8 / 256.0,
+                   g_ust.busy ? "BUSY" : "idle",
+                   g_ust.pending ? "  pending-ack" : "");
+            printf("  queues: ctl %u  inter %u  bulk %u\n", g_ust.q_ctl,
+                   g_ust.q_inter, g_ust.q_bulk);
+        }
+    } else if (!strcmp(cmd, "stats")) {
+        if (g_ust_valid)
+            printf("tx %u  rx %u  timeouts %u  retx %u\n", g_ust.tx_frames,
+                   g_ust.rx_frames, g_ust.timeouts,
+                   g_ust.retransmissions);
+        if (g_upart_n)
+            printf("sending '%s': %d/%d parts handed over\n", g_upfile,
+                   g_upart_sent, g_upart_n);
+        printf("usb resyncs %u (0 on a healthy link)\n", g_up.resyncs);
+    } else if (!strcmp(cmd, "config") && rest) {
+        char *key = strtok(rest, " \t");
+        char *val = strtok(0, " \t");
+        size_t i;
+        int found = -1;
+        for (i = 0; key && val
+                    && i < sizeof(USB_CFG) / sizeof(USB_CFG[0]); i++)
+            if (!strcmp(key, USB_CFG[i].name))
+                found = USB_CFG[i].key;
+        if (found < 0) {
+            printf("config keys: rung_ceiling burst_window burst_stream "
+                   "freq_trim_mhz audio_tap anchor diag_stream\n");
+        } else {
+            uint8_t body[5];
+            int32_t v = atoi(val);
+            body[0] = (uint8_t)found;
+            memcpy(body + 1, &v, 4);
+            usb_send_frame(UP_CMD_CONFIG, body, 5);
+            printf("%s [%s] >> config %s = %d\n", tstamp(), g_name, key, v);
+        }
+    } else if (!strcmp(cmd, "debug")) {
+        g_debug = !g_debug;
+        printf("diag prints %s (enable the stream with 'config "
+               "diag_stream 1')\n", g_debug ? "ON" : "OFF");
+    } else if (!strcmp(cmd, "help")) {
+        printf("  send <text> | sendfile <path> | bulk <n> | status | "
+               "stats\n  config <key> <val> | debug | quit\n");
+    } else {
+        printf("unknown command '%s' -- try help\n", cmd);
+    }
+    return 1;
+}
+
+static int usb_console(const char *serial)
+{
+    uint8_t buf[512];
+    char inbuf[512];
+    int inlen = 0;
+
+    g_usb = usbh_open(serial);
+    if (!g_usb)
+        return 1;
+    up_parser_init(&g_up);
+    if (usbh_stale(g_usb))
+        printf("[%s] drained %d stale bytes from a previous session\n",
+               g_name, usbh_stale(g_usb));
+    printf("[%s] attached to board %s -- the station runs ON the board; "
+           "this is a terminal onto it. 'help' for commands.\n", g_name,
+           usbh_serial(g_usb));
+    usb_send_frame(UP_CMD_INFO, 0, 0);
+    printf("> ");
+    fflush(stdout);
+
+    for (;;) {
+        fd_set rf;
+        struct timeval tv = { 0, 0 };
+        int n = usbh_read(g_usb, buf, (int)sizeof(buf), 50);
+        if (n < 0) {
+            printf("\n[%s] usb read failed -- board unplugged?\n", g_name);
+            break;
+        }
+        if (n > 0)
+            up_parser_push(&g_up, buf, n, usb_on_frame, 0);
+
+        FD_ZERO(&rf);
+        FD_SET(0, &rf);
+        if (select(1, &rf, 0, 0, &tv) > 0) {
+            ssize_t got = read(0, inbuf + inlen,
+                               sizeof(inbuf) - (size_t)inlen - 1);
+            char *nl;
+            if (got <= 0)
+                break;
+            inlen += (int)got;
+            inbuf[inlen] = 0;
+            while ((nl = strchr(inbuf, '\n')) != 0) {
+                *nl = 0;
+                if (!usb_command(inbuf)) {
+                    usbh_close(g_usb);
+                    return 0;
+                }
+                printf("> ");
+                fflush(stdout);
+                memmove(inbuf, nl + 1, strlen(nl + 1) + 1);
+                inlen = (int)strlen(inbuf);
+            }
+        }
+    }
+    usbh_close(g_usb);
+    return 0;
 }
 
 /* Queue a broadcast: one preamble+header per group of BC frames, framing
@@ -1137,8 +1497,27 @@ int main(int argc, char **argv)
     int16_t chunk[4096];
 
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <device.sock> [name]\n", argv[0]);
+        fprintf(stderr,
+                "usage: %s <device.sock> [name]     virtual channel mode\n"
+                "       %s --usb [serial] [name]    USB modem mode\n"
+                "       %s --list                   enumerate USB modems\n",
+                argv[0], argv[0], argv[0]);
         return 1;
+    }
+    if (!strcmp(argv[1], "--list"))
+        return usbh_list() > 0 ? 0 : 1;
+    if (!strcmp(argv[1], "--usb")) {
+        const char *serial = 0;
+        int ai = 2;
+        /* a 24-hex-char token is a serial; anything else is the name */
+        if (argc > ai && strlen(argv[ai]) == 24
+            && strspn(argv[ai], "0123456789abcdefABCDEF") == 24)
+            serial = argv[ai++];
+        if (argc > ai)
+            g_name = argv[ai];
+        else if (serial)
+            g_name = strdup(serial + 20);   /* last 4 of the serial */
+        return usb_console(serial);
     }
     if (argc >= 3)
         g_name = argv[2];

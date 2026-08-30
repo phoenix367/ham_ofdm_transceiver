@@ -22,7 +22,8 @@ CPORT   = ../cport
 CSRC = $(CPORT)/src/arena.c $(CPORT)/src/fft.c $(CPORT)/src/dsp.c $(CPORT)/src/bits.c \
        $(CPORT)/src/conv.c $(CPORT)/src/ldpc.c $(CPORT)/src/packets.c \
        $(CPORT)/src/tx.c $(CPORT)/src/rx_demod.c $(CPORT)/src/rx_detect.c \
-       $(CPORT)/src/rx_stream.c $(CPORT)/src/link.c $(CPORT)/src/station.c
+       $(CPORT)/src/rx_stream.c $(CPORT)/src/link.c $(CPORT)/src/station.c \
+       $(CPORT)/src/usb_proto.c usb_host.c
 
 all: $(BUILD)/ofdm_console
 
@@ -33,7 +34,8 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 $(BUILD)/ofdm_console: app.c $(CSRC) $(CPORT)/src/rom_tables.h | $(BUILD)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ app.c $(CSRC) -lm -lz
+	$(CC) $(CFLAGS) $$(pkg-config --cflags libusb-1.0) $(LDFLAGS) \
+	    -o $@ app.c $(CSRC) -lm -lz $$(pkg-config --libs libusb-1.0)
 
 clean:
 	rm -rf $(BUILD)

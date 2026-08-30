@@ -11,7 +11,7 @@ adaptation, simplex access from `cport/station.c`).
 | File | Role |
 |---|---|
 | `driver.py` | virtual channel daemon: exposes the devices, moves 12 kHz int16 audio in paced ticks, applies propagation delay + Rayleigh fading + AWGN, enforces half-duplex |
-| `app.c` → `build/ofdm_console` | the console station app |
+| `app.c` → `build/ofdm_console` | the console station app: virtual-channel mode (runs the whole stack locally) and `--usb` mode (terminal onto a board's own station) |
 | `chanctl.py` | channel configuration CLI (third device) |
 | `smoke_test.sh` | automated end-to-end test at 25× time scale |
 | `board_console.py` | the same console against a **real board**, chosen by USB serial |
@@ -89,6 +89,30 @@ Expect radio pacing: the first exchange bootstraps at EXTREME
 drives the ladder up and frames shrink to ~1 s. `--time-scale N` runs the
 whole world N× faster; the apps clock the protocol from received samples,
 so behaviour is identical at any scale.
+
+## `ofdm_console --usb`: the C console on a real board
+
+The C console speaks both transports:
+
+```bash
+./build/ofdm_console /tmp/ofdmchan/s1.sock S1   # virtual channel (unchanged)
+./build/ofdm_console --list                     # enumerate USB modems
+./build/ofdm_console --usb                      # the only attached board
+./build/ofdm_console --usb 3200470008... A      # a specific board, by serial
+```
+
+In `--usb` mode nothing of the local DSP runs: the board's firmware
+already runs the whole PHY+station stack, and the console is a terminal
+onto it over the message-level USB protocol (`usb_host.c` wraps
+libusb-1.0; the codec is the same `cport/src/usb_proto.c` the firmware
+uses). The commands match (`send`, `sendfile`, `bulk`, `status`,
+`stats`, `config`, `debug` toggles diag prints), the file envelope is
+byte-identical to socket mode --- `store_file()` is literally the same
+function --- and the board limits are respected the same way
+`board_console.py` respects them: 256-byte messages, file parts paced
+against the `q_bulk` depth the board reports. The transport keeps the
+drain-don't-reset contract: `clear_halt` on the OUT endpoint only,
+stale IN data consumed at open.
 
 ## Talking to a specific board: `board_console.py`
 

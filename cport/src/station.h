@@ -75,6 +75,7 @@
  * check FEASIBILITY.md's RAM budget before turning it up on an MCU. */
 #ifndef BURST_STREAM_MAX
 #define BURST_STREAM_MAX 8
+#endif
 
 /* No burst fragment may be SENT whose air time exceeds this, whatever
  * rung the transfer was engaged at. frag_size is fixed at engage and
@@ -88,7 +89,6 @@
  * engaged fragment (engage sizes frags FOR its rung) and sits under
  * both constants. */
 #define BURST_FRAG_MAX_AIR_S 45.0
-#endif
 #define BURST_STREAM_MIN 2     /* below this a stream saves nothing */
 /* consecutive streamed windows that deliver ~nothing before the station
  * gives up and reverts to per-frame bursts for the rest of the transfer */
