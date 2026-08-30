@@ -997,14 +997,31 @@ static int usb_command(char *line)
             printf("%s [%s] >> config %s = %d\n", tstamp(), g_name, key, v);
         }
     } else if (!strcmp(cmd, "debug")) {
-        g_debug = !g_debug;
-        printf("diag prints %s (enable the stream with 'config "
-               "diag_stream 1')\n", g_debug ? "ON" : "OFF");
+        /* `debug [on|off]`. The events come from the BOARD, whose diag
+         * stream is off by default (it would drown the command replies
+         * otherwise -- see usb_modem.c), so turning prints on without
+         * turning the stream on showed nothing and said so in a hint
+         * nobody read. One command does both now. */
+        uint8_t body[5];
+        int32_t v;
+        if (rest && !strcmp(rest, "on"))
+            g_debug = 1;
+        else if (rest && !strcmp(rest, "off"))
+            g_debug = 0;
+        else
+            g_debug = !g_debug;
+        v = g_debug;
+        body[0] = 7;                            /* UP_CFG_DIAG_STREAM */
+        memcpy(body + 1, &v, 4);
+        usb_send_frame(UP_CMD_CONFIG, body, 5);
+        printf("diag %s: the board's event stream is %s and prints are %s\n",
+               g_debug ? "ON" : "OFF", g_debug ? "on" : "off",
+               g_debug ? "on" : "off");
     } else if (!strcmp(cmd, "help")) {
         printf("  send <text> | sendfile <path> | bulk <n> | "
                "bcast [-r <rung>] <text>\n  status | stats | "
                "config <key> <val> | "
-               "debug | quit\n");
+               "debug [on|off] | quit\n");
     } else {
         printf("unknown command '%s' -- try help\n", cmd);
     }

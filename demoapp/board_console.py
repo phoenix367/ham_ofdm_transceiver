@@ -441,6 +441,17 @@ class Console:
                 self.plain(f"config: {e}  (keys: rung_ceiling, burst_window,"
                            " burst_stream, freq_trim_mhz, audio_tap, anchor,"
                            " diag_stream)")
+        elif cmd == "debug":
+            # the events come from the BOARD, whose diag stream is off
+            # by default; this is `config diag_stream` with a memorable
+            # name, the same command app.c has
+            on = {"on": 1, "off": 0}.get(rest, None)
+            if on is None:
+                on = 0 if getattr(self, "_debug", 0) else 1
+            self._debug = on
+            self.m.config("diag_stream", on)
+            self.plain(f"diag {'ON' if on else 'OFF'}: the board's event "
+                       f"stream is {'on' if on else 'off'}")
         elif cmd == "status":
             self.cmd_status()
         elif cmd == "stats":
@@ -448,7 +459,8 @@ class Console:
         elif cmd == "help":
             self.plain("send <text> | sendfile <path> | bulk <n> | "
                        "bcast [-r <rung>] <text> | "
-                       "config <key> <val> | status | stats | quit")
+                       "config <key> <val> | debug [on|off] | status | "
+                       "stats | quit")
         else:
             self.plain(f"unknown command '{line}' -- try help")
         return True
