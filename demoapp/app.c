@@ -1036,18 +1036,22 @@ static int usb_command(char *line)
             printf("sending '%s': %d/%d parts handed over\n", g_upfile,
                    g_upart_sent, g_upart_n);
         printf("usb resyncs %u (0 on a healthy link)\n", g_up.resyncs);
-    } else if (!strcmp(cmd, "config") && rest) {
-        char *key = strtok(rest, " \t");
-        char *val = strtok(0, " \t");
+    } else if (!strcmp(cmd, "config")) {
+        char *key = rest ? strtok(rest, " \t") : 0;
+        char *val = key ? strtok(0, " \t") : 0;
         size_t i;
         int found = -1;
         for (i = 0; key && val
                     && i < sizeof(USB_CFG) / sizeof(USB_CFG[0]); i++)
             if (!strcmp(key, USB_CFG[i].name))
                 found = USB_CFG[i].key;
-        if (found < 0) {
+        if (!key) {
+            /* no arguments: ask the board -- the settings live there,
+             * and a cache here would lie after a reattach */
+            usb_send_frame(UP_CMD_CONFIG, 0, 0);
+        } else if (found < 0) {
             printf("config keys: rung_ceiling burst_window burst_stream "
-                   "freq_trim_mhz audio_tap anchor diag_stream\n");
+                   "freq_trim_mhz audio_tap anchor diag_stream win_max\n");
         } else {
             uint8_t body[5];
             int32_t v = atoi(val);
@@ -1080,7 +1084,7 @@ static int usb_command(char *line)
     } else if (!strcmp(cmd, "help")) {
         printf("  send <text> | sendfile <path> | bulk <n> | "
                "bcast [-r <rung>] <text>\n  status | stats | "
-               "config <key> <val> | "
+               "config [<key> <val>] | "
                "debug [on|off] | quit\n");
     } else {
         printf("unknown command '%s' -- try help\n", cmd);

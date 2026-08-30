@@ -469,6 +469,9 @@ class Console:
             self.cmd_bulk(int(rest))
         elif cmd == "bcast" and rest:
             self.cmd_bcast(rest)
+        elif cmd == "config" and not rest:
+            # no arguments: ask the board (the settings live there)
+            self.m.t.write(__import__("ofdm_modem").encode(0x03))
         elif cmd == "config" and rest:
             k, _, v = rest.partition(" ")
             try:
@@ -496,7 +499,7 @@ class Console:
         elif cmd == "help":
             self.plain("send <text> | sendfile <path> | bulk <n> | "
                        "bcast [-r <rung>] <text> | "
-                       "config <key> <val> | debug [on|off] | status | "
+                       "config [<key> <val>] | debug [on|off] | status | "
                        "stats | quit")
         else:
             self.plain(f"unknown command '{line}' -- try help")

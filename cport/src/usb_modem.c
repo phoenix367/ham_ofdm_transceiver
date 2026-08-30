@@ -30,6 +30,31 @@ static void emit(usb_modem_t *m, uint8_t type, const void *p, int len)
         txq_push(m, f, n);
 }
 
+/* stdio-free string assembly for the config dump (see the query) */
+static char *um_str(char *q, const char *z)
+{
+    while (*z)
+        *q++ = *z++;
+    return q;
+}
+
+static char *um_num(char *q, int v)
+{
+    char t[12];
+    int n = 0;
+    if (v < 0) {
+        *q++ = '-';
+        v = -v;
+    }
+    do {
+        t[n++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    while (n-- > 0)
+        *q++ = t[n];
+    return q;
+}
+
 static int32_t get_i32(const uint8_t *p)
 {
     return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8)
@@ -71,7 +96,32 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
         break;
 
     case UP_CMD_CONFIG:
-        if (len >= 5) {
+        if (len == 0) {
+            /* An empty CONFIG is a QUERY: the settings live on the
+             * board, so only the board can answer `config` with no
+             * arguments. One human-readable line over the log event --
+             * every console already prints those. Assembled by hand:
+             * this image carries no stdio, and snprintf here dragged
+             * newlib's syscall stubs behind it (the link broke on
+             * _isatty; station_diag_format's snprintf never linked
+             * because only consoles call it). */
+            char msg[160], *q = msg;
+            q = um_str(q, "config: rung_ceiling ");
+            q = um_num(q, m->st->my_max_rung);
+            q = um_str(q, "  win_max ");
+            q = um_num(q, m->st->my_win_max);
+            q = um_str(q, "  burst_window ");
+            q = um_num(q, m->st->burst_window);
+            q = um_str(q, "  burst_stream ");
+            q = um_num(q, m->st->burst_stream);
+            q = um_str(q, "  anchor ");
+            q = um_num(q, m->st->afc_anchor);
+            q = um_str(q, "  diag_stream ");
+            q = um_num(q, m->diag_on);
+            q = um_str(q, "  freq_trim_hz ");
+            q = um_num(q, (int)station_freq_trim_total(m->st));
+            emit(m, UP_EVT_LOG, msg, (int)(q - msg));
+        } else if (len >= 5) {
             int32_t v = get_i32(p + 1);
             switch (p[0]) {
             case UP_CFG_RUNG_CEILING:
