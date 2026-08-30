@@ -17,7 +17,12 @@ front end, not the decoder.
 original reproduction gap and the fade-loss analysis point the same
 way: at the edge, frames are lost to detection and timing, not to
 decoding.  HARQ helps only in the noise-limited regime for exactly
-this reason --- a sync-level loss leaves no LLRs to combine.
+this reason --- a sync-level loss leaves no LLRs to combine.  The
+two-board stand made the same point at the \emph{other} end of the
+SNR range: broadcast, which cannot retransmit, lost one group in 39 on
+a wire reporting $+24.7$\,dB --- a missed acquisition with 25\,dB of
+margin, invisible to every acknowledged mode because ARQ had been
+quietly repairing it (Section~\ref{sec:cport_bcast}).
 
 \paragraph{Physics caps EXTREME.}  The $64\times$ mode's 0.69\,s
 coherent integration assumes a channel coherent over that window

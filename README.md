@@ -48,8 +48,8 @@ that has never been heard from).
 [technical-report/OFDM_Transceiver_Technical_Report.pdf](technical-report/OFDM_Transceiver_Technical_Report.pdf)**
 (100+ pages, committed; from the article reproduction through the C
 port, on-target measurement on silicon, the modem as a USB device, the
-two-board audio stand, streamed-burst debugging, receiver hardening and
-the SNR calibration — plus the measured transmit spectrum, drive-level
+two-board audio stand, streamed-burst debugging, receiver hardening,
+the SNR calibration and broadcast on the boards — plus the measured transmit spectrum, drive-level
 sweep and off-air decode from a HackRF One + tinySA Ultra) — rebuild with `make` inside
 [technical-report/](technical-report/README.md).
 

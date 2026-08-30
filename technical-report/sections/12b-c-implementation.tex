@@ -1447,6 +1447,123 @@ ladder now climbs $0 \to 11$ in a \emph{single} exchange where it
 previously stepped for minutes. The staleness decay's conservative
 re-probe after long silence remains, by design.
 
+\subsection{Broadcast on the Boards}
+\label{sec:cport_bcast}
+
+Broadcast (Section~\ref{sec:broadcast}) is delivery without
+acknowledgment: a streamed burst with the ARQ machinery subtracted,
+plus a SYNC frame at the head of every group so a receiver that was not
+there at the start can join. Both models implement it as a
+\emph{recording} walk --- \texttt{bc\_receive()} takes a slice of audio
+and scans it for groups --- and that is exactly what a board cannot do.
+The firmware never holds a recording: samples arrive 256 at a time out
+of a capture FIFO and leave through a streaming receiver that emits one
+event per decoded (or failed) block.
+
+So the boards needed a fourth path. \texttt{usb\_radio\_main.c} builds
+one group per keying and walks the received group with
+\texttt{bc\_advance()} over that streaming receiver --- the same
+\texttt{rxs\_continue\_burst()} stepping burst ARQ uses
+(Section~\ref{sec:cport_burstdebug}), with the acknowledgment machinery
+absent rather than removed. Figure~\ref{fig:bcastboards} traces one
+broadcast across the wire. Three properties had to be right that no
+host model ever faced.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth]{images/bcast_boards.png}
+    \caption{One broadcast between the two boards. The transmitter
+             keys one group at a time; the receiver locks a single
+             preamble per group, reads the descriptor from the SYNC
+             frame and then \emph{steps} the remaining blocks without
+             detecting again --- holding its own transmitter while it
+             does. Nothing is acknowledged, so the EOS frame's
+             statistics are the entire feedback path.}
+    \label{fig:bcastboards}
+\end{figure}
+
+\paragraph{The dispatch order is load-bearing.} A BCAST frame is
+Data-shaped --- same header, same CRC, same block geometry --- but its
+reserved field is not a link-control word. \texttt{bc\_advance()}
+therefore runs \emph{before} \texttt{burst\_advance()} and the
+station's reassembler; a broadcast frame reaching the latter would be
+read as an ARQ fragment with a garbage sequence number and a garbage
+acknowledgment request.
+
+\paragraph{A walk that holds the transmitter must be able to expire.}
+While the walk runs, the receiver is not running its detector at all
+--- it is stepping to known block boundaries --- so the walk pins its
+receiver instance active (muting one stops detection, and unmuting
+rearms the search rather than resuming it) and gates the station's
+key-up, for the reason Section~\ref{sec:cport_burstdebug} measured:
+answering over a peer's live stream costs the rest of it. That leaves
+the failure the burst walk already had to solve. The walk advances only
+on events, and a peer that stops mid-group produces none: without a
+deadline the board stays mute for good. With one --- 45\,s, a group's
+air-time cap plus margin --- it recovers on its own.
+
+\paragraph{One group is one keying.} Its air time is therefore bound
+like everything else the station emits, and for the same reason the
+224-second frames of Section~\ref{sec:cport_harden} were fatal. The
+group size \emph{halves} --- $\log_2(\text{group})$ is what travels in
+the SYNC descriptor, so it must stay a power of two --- until the group
+fits 30\,s: four 26-byte frames are 9.2\,s at rung~4, while at EXTREME
+a single frame is already 42\,s. The yield between groups is the
+carrier-sense gate itself, and a station that has heard broadcast
+traffic recently holds its own transmitter for about one group's worth
+of time (12\,s at NORMAL, 35\,s at the slow modes) rather than keying
+into the gap.
+
+\subsubsection*{The rung nobody negotiates}
+
+A broadcast has no peer to negotiate with, which makes the rung a
+choice rather than a measurement. The default is the rung the link last
+used, floored at rung~4 --- leaving it unspecified does not mean ``take
+four minutes''. But an explicit rung is honoured exactly as given, and
+that matters more than it looks: which modes a board is \emph{listening
+on} follows the negotiated rung, and the only mode an idle station is
+guaranteed to still be receiving is EXTREME
+(Section~\ref{sec:cport_radio}). A beacon meant for stations that have
+never been heard from belongs there, and the air-time cap is what makes
+it affordable --- at rung~0 a group collapses to one 42-second frame
+instead of four.
+
+The measurement is the case that matters: with board~B freshly booted
+and having never exchanged a frame with~A --- listening on EXTREME
+alone --- a \texttt{bcast -r 0} from~A arrived byte-exact at
+$+16.2$\,dB, in two groups of one frame each. At rung~4 and a 122-byte
+payload (two groups per broadcast, four frames then two), a
+twelve-broadcast run delivered \textbf{24 of 24 groups}, 72 frames, and
+reported zero losses at $+24.7$\,dB; across the whole campaign 38 of 39
+groups arrived.
+
+\subsubsection*{Pinning the one loss on the air, not the code}
+
+The single missing group is worth the paragraph, because a whole group
+vanishing looks exactly like a defect. It went \emph{whole}: not one
+frame of it decoded, including the SYNC block that follows the
+preamble. The host bench that answered the question builds the same
+group with the \emph{same} firmware code and walks it with the same
+\texttt{bc\_advance()} logic through the real streaming receiver
+(\texttt{make bcrepro}, now part of the \texttt{make robust} gate); it
+decodes 6/6 frames at rung~4 and 2/2 at rung~0, under the wire's
+requantization, so the build-and-walk path was exonerated in seconds
+rather than in seven-minute board cycles.
+
+That left the air, and the beacon was extended to say so: an eight-deep
+event ring recording every receiver event with its mode, type, packet
+type, capture drops and position, and the loudest mean-square the
+receiver heard while not transmitting. At the lost group the receiver
+had heard a full-strength carrier ($1.15\times10^{8}$, against
+$\sim$$2\times10^{4}$ for a quiet wire) with \emph{zero} capture-FIFO
+drops, and had produced no event at all --- a missed acquisition, which
+takes every frame behind it with it. That is the shape of every non-ARQ
+loss, and it is the failure rate ARQ has been hiding all along by
+retransmitting (Section~\ref{sec:cfo_unwrap} measured the same
+thing from the other side, at $\sim$8\% of acquisitions before the
+lag-$N$ unwrap fix). Broadcast cannot retransmit, which is precisely
+why the EOS event reports what arrived.
+
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}
 

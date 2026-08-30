@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant A as Board A — transmitter
+    participant B as Board B — receiver
+    participant H as Console B
+    Note over A: UP_CMD_BCAST: ptype, rung, 122 B.<br/>ONE GROUP PER KEYING — the group halves<br/>(log2 goes on the wire) until its air time<br/>fits 30 s: 4 frames = 9.2 s at rung 4,<br/>1 frame = 42 s at EXTREME
+    rect rgb(232,244,255)
+    A->>B: group 1 — [preamble][header][f0 SYNC][f1][f2][f3]
+    Note over B: ONE preamble locked. f0 gives SYNC<br/>+ descriptor: group 4, payload type
+    B->>H: UP_EVT_BCAST start
+    Note over B: bc_advance runs BEFORE the reassembler:<br/>a BCAST frame has no link-control word.<br/>f1..f3 are STEPPED, not detected
+    B->>H: data chunks, as they decode
+    Note over B: the walk HOLDS B's transmitter and pins<br/>its mode active — with a 45 s deadline: a peer<br/>that stops mid-group sends no more events
+    end
+    Note over A,B: the gap IS A's carrier-sense gate.<br/>B holds for one group's air time (12 s NORMAL,<br/>35 s slow) rather than keying into it
+    rect rgb(238,247,238)
+    A->>B: group 2 — fresh preamble, fresh SYNC
+    Note over B: a receiver that missed the start joins HERE.<br/>the last frame carries EOS
+    B->>H: UP_EVT_BCAST EOS — frames_ok, lost, mean SNR
+    end
+    Note over A,H: nothing is acknowledged: a lost group is lost WHOLE.<br/>rung 4, measured: 24 of 24 groups over 12 broadcasts
