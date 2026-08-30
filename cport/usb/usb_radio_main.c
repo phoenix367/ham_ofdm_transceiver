@@ -231,7 +231,19 @@ static void tim6_isr(void)
          * over the top of the peer's still-running stream. Caught by
          * the key-up recorder: cs=0 at every key-up, when a quiet wire
          * (the peer's DAC holds mid-rail) reads ~2e4. */
-        note_busy_isr(v);
+        /* Carrier sense gets the SAME warm-up discard as the capture
+         * path; skipping that cost five minutes of mute per boot. The
+         * ADC's settling samples put a near-zero mean into the floor,
+         * which latched at its 25.0 clamp (a demoapp-scale number),
+         * and the real quiet wire -- ~6.6e4 of mean-square, mostly the
+         * mid-rail DC -- then read as "busy" against 9x25 FOREVER.
+         * Only the CS_REBASE_S timer cleared it, so both boards' first
+         * key-ups landed at ms=300031 and ms=300029: the rebase window
+         * to the millisecond, and a collision, both stations going
+         * deaf-mute together at boot. At the old 60 s rebase the same
+         * latch-up existed but freed before anyone could see it. */
+        if (g_ms > 500u)
+            note_busy_isr(v);
         if ((uint32_t)(w - g_cap_r) < CAP_N)
             g_cap[w & (CAP_N - 1)] = v, g_cap_w = w + 1;
         else
@@ -522,7 +534,22 @@ static void burst_advance(int m, const rxs_event_t *ev)
  * tearing. */
 #define BUSY_WIN 480
 #define BUSY_RATIO_SQ 9.0
-#define CS_REBASE_S 60.0
+/* The rebase window must exceed the LONGEST FRAME THIS STATION CAN
+ * EMIT, not demoapp's. 60 s was copied from there with its own
+ * justification ("> the 38 s longest frame") -- but demoapp's QoS caps
+ * keep frames under 38 s, and this station has no such cap on burst
+ * fragments: frag_size is fixed at engage, so a transfer engaged at
+ * rung 10 with 203-byte frags that collapses to rung 0 sends 203-byte
+ * EXTREME frames of ~224 s of air. Measured on the 8 kB stress
+ * transfer: at t+60 s of one such frame the peer's floor re-baselined
+ * ONTO the signal, declared the channel idle, and keyed over the rest
+ * -- key-up recorded with cs = 3.0e8 -- which timed the frame out,
+ * kept the rung at 0, and kept every following frame 224 s long. A
+ * death spiral with both boards perfectly healthy. 300 s clears the
+ * worst case (a 255-byte EXT frame at EXTREME, ~280 s) with margin;
+ * the cost is only how long a genuine noise-floor step takes to
+ * re-baseline. */
+#define CS_REBASE_S 300.0
 static int16_t g_bring[BUSY_WIN];
 static int g_bpos;
 static int64_t g_bacc;
@@ -545,6 +572,19 @@ static int channel_busy(double now)
     double p = (double)g_cs_mean;
     static uint32_t climb_ms;
     int busy;
+    /* The warm-up gate must cover the CONSUMER, not just the ISR feed.
+     * Gating only the feed left g_cs_mean at 0 through warm-up, and
+     * this function -- called every millisecond from boot -- read that
+     * zero and snapped the floor to its 25.0 clamp; the real quiet
+     * wire then read "busy" against 9x25 forever, and the station sat
+     * mute until CS_REBASE_S. Measured twice, to the millisecond:
+     * first key-ups at ms=300031/300029 (rebase 300), and again at
+     * t+300 after the feed-only guard. Until the ring holds real
+     * samples, report idle and leave the floor alone: a station that
+     * transmits blind for its first second is demoapp's behaviour
+     * too. */
+    if (g_ms < 1000u)
+        return 0;
     if (p < g_floor) {
         g_floor = p;
     } else if ((uint32_t)(g_ms - climb_ms) >= 40u) {

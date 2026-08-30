@@ -75,6 +75,19 @@
  * check FEASIBILITY.md's RAM budget before turning it up on an MCU. */
 #ifndef BURST_STREAM_MAX
 #define BURST_STREAM_MAX 8
+
+/* No burst fragment may be SENT whose air time exceeds this, whatever
+ * rung the transfer was engaged at. frag_size is fixed at engage and
+ * uniform per transfer, so a transfer engaged at rung 10 with 203-byte
+ * frags that collapses to rung 0 would otherwise emit 224-second
+ * frames -- which violate every carrier-sense time constant at once
+ * (the peer's noise floor climbs through the busy threshold after
+ * ~176 s of continuous signal, and the rebase fires at 300 s), so the
+ * peer keys over the frame and the link death-spirals. Measured on the
+ * two-board 8 kB stress transfer. 45 s clears every legitimately
+ * engaged fragment (engage sizes frags FOR its rung) and sits under
+ * both constants. */
+#define BURST_FRAG_MAX_AIR_S 45.0
 #endif
 #define BURST_STREAM_MIN 2     /* below this a stream saves nothing */
 /* consecutive streamed windows that deliver ~nothing before the station
@@ -355,6 +368,9 @@ enum {
                            d=air-time term ms */
     ST_EV_BURST_WIN,    /* window chosen at engage: a=ceiling b=used
                            c=fragments d=burst air time, s */
+    ST_EV_BURST_REFRAG, /* frag air time over cap at the CURRENT rung:
+                         * burst disengaged, legacy path carries the
+                         * message. a=frag_size b=rung c=nfrags */
 };
 void station_set_diag(station_t *st,
                       void (*cb)(void *ctx, int ev, int a, int b, int c,

@@ -361,6 +361,35 @@ Cross-module invariants that are easy to break:
   With all three fixed: one 8-block stream acks 8 of 11 frags, the
   1200-byte file crosses byte-exact, `burst_blocks` 8 / `misses` 0, and
   the burst defaults (`burst_window`, `burst_stream`) are ON.
+- Every carrier-sense TIME CONSTANT must exceed the longest frame the
+  station can emit, and on the boards that used to be 224 s: frag_size
+  is fixed at engage, so a burst engaged at rung 10 (203-byte frags)
+  that collapsed to rung 0 sent 224-s EXTREME frames. Those violate the
+  60-s rebase AND the floor climb (which crosses the 9x busy threshold
+  after ~176 s of continuous signal) -- the peer then keys over the
+  frame, and the link death-spirals with both boards healthy. Fixes,
+  all three: CS_REBASE_S 300 on the boards; poll_tx DISENGAGES a burst
+  whose next fragment would exceed BURST_FRAG_MAX_AIR_S (45 s) at the
+  CURRENT rung (diag ST_EV_BURST_REFRAG; cur_bulk falls to the legacy
+  air-capped path and burst re-engages when the ladder recovers); and
+  burst_send_stream refuses a stream over BURST_WIN_MAX_AIR_S at the
+  current rung.
+- Carrier sense needs a WARM-UP GATE on both the producer and the
+  consumer. Gating only the ISR feed leaves g_cs_mean at 0 through
+  warm-up, and channel_busy() -- called every 1 ms from boot -- reads
+  that zero and snaps the floor to its 25.0 clamp; the real quiet wire
+  then reads busy forever. Measured to the millisecond, twice: both
+  boards' first-ever key-ups at ms=300031/300029 = CS_REBASE_S exactly.
+  channel_busy() returns idle and leaves the floor alone until
+  g_ms >= 1000.
+- A FLATLINED ADC reads as permanent carrier: a disconnected DAC->ADC
+  wire floats at some DC (measured 0.81 V, sigma 27 counts), cs sits at
+  DC^2 (2.7e8 for 16.4k counts), and busy latches until a rebase. The
+  diagnostic signature is cs nearly CONSTANT (+-0.1%) across seconds --
+  real OFDM varies far more -- and the raw capture ring (g_cap over
+  JTAG) settles it in one read: stdev ~27 = no wire, stdev ~11000 =
+  signal. The two-board stand's wires are breadboard-flaky; check them
+  before chasing firmware.
 - The CS floor's climb rate is defined PER 40 ms WINDOW (demoapp's
   cadence), not per call: `channel_busy()` runs at 1 kHz on the boards
   vs ~25 Hz in demoapp, and multiplying per call raised the floor 40x

@@ -65,7 +65,8 @@ QOS_CONTROL, QOS_INTERACTIVE, QOS_BULK = 0, 1, 2
 # counters when a transfer misbehaves.
 DIAG = ["TX", "RX", "TIMEOUT", "RUNG", "BURST_ENGAGE", "BURST_FRAG",
         "BURST_ACKTX", "BURST_ACKRX", "BURST_PROBE", "BURST_DONE",
-        "BURST_STREAM", "BURST_SRX", "BURST_SOFF", "RTO", "BURST_WIN"]
+        "BURST_STREAM", "BURST_SRX", "BURST_SOFF", "RTO", "BURST_WIN",
+        "BURST_REFRAG"]
 SOFF = {1: "BUILD (the PHY refused)", 2: "NOACK (peer did not follow)",
         3: "TIMEOUT (windows kept timing out)"}
 QOS_NAME = {0: "ctl", 1: "inter", 2: "bulk"}

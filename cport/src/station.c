@@ -229,7 +229,7 @@ const char *station_diag_name(int ev)
         "TX", "RX", "TIMEOUT", "RUNG", "BURST_ENGAGE", "BURST_FRAG",
         "BURST_ACKTX", "BURST_ACKRX", "BURST_PROBE", "BURST_DONE",
         "BURST_STREAM", "BURST_SRX", "BURST_SOFF", "RTO",
-        "BURST_WIN",
+        "BURST_WIN", "BURST_REFRAG",
     };
     return ev >= 0 && ev < (int)(sizeof(names) / sizeof(names[0]))
                ? names[ev]
@@ -537,6 +537,12 @@ static int burst_send_stream(station_t *st, int rung_idx, int16_t *out,
     }
     if (count < BURST_STREAM_MIN)
         return 0;
+    /* same collapse hazard as the per-frame path: a stream of stale-
+     * sized blocks at a collapsed rung is even longer than one frag.
+     * Refusing here falls back to one frame, which the frag-path air
+     * check then vets. */
+    if (stream_air_time(rung_idx, fs, count) > BURST_WIN_MAX_AIR_S)
+        return 0;
 
     lc.seq = st->btx.id;
     lc.ack = st->last_rx_seq >= 0 ? st->last_rx_seq : 0;
@@ -768,6 +774,22 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
         int flen, ack_req;
         if (idx < 0) { /* window exhausted; wait for the ack */
             st->btx.window_left = 0;
+        } else if (estimate_air_time(rung_idx, BURST_SUBHDR
+                       + (idx == st->btx.n - 1 ? st->btx.last_len
+                                               : st->btx.frag_size))
+                   > BURST_FRAG_MAX_AIR_S) {
+            /* The rung has collapsed under a transfer engaged higher up,
+             * and this fragment's air time now violates the carrier-
+             * sense constants (see BURST_FRAG_MAX_AIR_S). Disengage:
+             * cur_bulk stays active, so the legacy stop-and-wait path
+             * below -- whose payloads ARE air-time capped -- carries the
+             * message until the ladder recovers, and burst re-engages
+             * with frag_size sized for the rung the link actually has.
+             * This transfer's ack bitmap is forfeit; a rung collapse is
+             * rare and correctness on the air beats resend savings. */
+            diag(st, ST_EV_BURST_REFRAG, st->btx.frag_size, rung_idx,
+                 st->btx.n, 0, t);
+            st->btx.active = 0;
         } else {
             flen = idx == st->btx.n - 1 ? st->btx.last_len
                                         : st->btx.frag_size;
