@@ -45,6 +45,10 @@ typedef struct {
      * attached, which is more than the cable being plugged in: the
      * console announces itself with UP_CMD_INFO. Clear it on unmount. */
     uint32_t host_cmds;
+    /* free bytes in the firmware's broadcast source buffer, published
+     * by the owner of that buffer; reported in the status frame so a
+     * host can pace a chunked broadcastfile against it */
+    uint16_t bcast_free;
 } usb_modem_t;
 
 void usb_modem_init(usb_modem_t *m, station_t *st, const uint8_t uid[12],

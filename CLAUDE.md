@@ -478,6 +478,18 @@ Cross-module invariants that are easy to break:
     to keep active, so a beacon for strangers belongs there. bc_cmd
     logs the rung it chose (UP_EVT_LOG) precisely because "nothing
     arrived" cannot distinguish the two cases from the host.
+  * BROADCASTFILE streams the file from the host in CHUNKS: bit 7 of
+    UP_CMD_BCAST's ptype byte = more follows, bit 6 = continuation of
+    the broadcast in flight (both clear = today's one-shot bcast, so
+    old consoles keep working). The board's source buffer is 8 kB in
+    DTCM, the host paces against `bc_free` in the status frame, and
+    two rules keep the wire format honest: the EOS flag is only
+    emitted once the host has said the stream is complete
+    (`g_bc_complete`), and while chunks are still arriving only FULL
+    groups are keyed -- a starved tail group would otherwise go out
+    without EOS and the receiver's walk would never see the end. Raw
+    bytes, ptype OPAQUE, same convention as socket-mode broadcastfile:
+    every receiver stores rx_broadcast.bin.
   * A lost group is lost WHOLE: the loss is a missed preamble
     acquisition, and every frame behind it goes with it. Measured at
     rung 4 (4-frame groups, 9.2 s each): 24/24 groups over a

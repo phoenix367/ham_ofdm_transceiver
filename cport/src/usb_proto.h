@@ -135,6 +135,8 @@ typedef struct {
     uint8_t  peer_win_max;
     uint8_t  peer_max_rung1; /* peer's declared rung ceiling + 1; 0 =
                               * unspecified (an older record) */
+    uint16_t bc_free;        /* free bytes in the broadcast source
+                              * buffer (chunked broadcastfile pacing) */
 } up_status_t;
 
 /* --- encoding ------------------------------------------------------- */

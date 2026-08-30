@@ -562,7 +562,12 @@ static void burst_advance(int m, const rxs_event_t *ev)
  * promised, failed blocks are stepped over but bounded -- and the
  * reassembled bytes STREAM to the host as UP_EVT_BCAST chunks. */
 #define BC_GROUP 4
-#define BC_TX_CAP 1022
+/* Source buffer. 1022 was "one USB command" and capped a broadcast at
+ * a chat message; a FILE streams from the host in chunks (bit 7 of the
+ * ptype byte = more follows, bit 6 = continuation of the same
+ * broadcast), paced against bc_free in the status frame, so the buffer
+ * only has to cover the air time of a few groups. DTCM has the room. */
+#define BC_TX_CAP 8192
 #define BC_FRAME 26
 /* How long a heard broadcast holds this transmitter. The train has
  * gaps between groups and keying into one costs the whole group, so
@@ -578,6 +583,7 @@ static double g_bc_hold_s = BC_RX_HOLD_S;
 
 static uint8_t g_bc_src[BC_TX_CAP];
 static int g_bc_src_len, g_bc_src_off, g_bc_seq, g_bc_rung, g_bc_ptype_tx;
+static int g_bc_complete = 1;  /* no more chunks coming from the host */
 static int g_bc_left[3], g_bc_miss[3];
 /* A broadcast walk holds this station's transmitter exactly as a burst
  * walk does, so it needs the same escape: a peer that stops mid-group
@@ -630,13 +636,44 @@ static char *bc_str(char *p, const char *s)
 static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
                    int len)
 {
+    int more = (ptype & 0x80) != 0;   /* further chunks will follow */
+    int cont = (ptype & 0x40) != 0;   /* continuation, not a new start */
     (void)ctx;
     if (len <= 0 || len > BC_TX_CAP)
         return;
+    if (cont) {
+        if (g_bc_src_len == 0)
+            return;   /* no broadcast in flight: a stray continuation
+                       * (host bug, or a chunk after an overflow drop)
+                       * must not seed a new one with garbage */
+        /* Append to the broadcast in flight. Compact first if the sent
+         * prefix has left room at the front; a chunk that still does
+         * not fit is a pacing failure on the host side -- drop the
+         * whole broadcast rather than corrupt its byte stream. */
+        if (g_bc_src_len + len > BC_TX_CAP && g_bc_src_off > 0) {
+            memmove(g_bc_src, g_bc_src + g_bc_src_off,
+                    (size_t)(g_bc_src_len - g_bc_src_off));
+            g_bc_src_len -= g_bc_src_off;
+            g_bc_src_off = 0;
+        }
+        if (g_bc_src_len + len > BC_TX_CAP) {
+            g_bc_src_len = g_bc_src_off = 0;
+            g_bc_complete = 1;
+            usb_modem_emit(&g_modem, UP_EVT_LOG,
+                           "broadcast: chunk overran the source buffer"
+                           " -- dropped (host pacing bug)", 68);
+            return;
+        }
+        memcpy(g_bc_src + g_bc_src_len, data, (size_t)len);
+        g_bc_src_len += len;
+        g_bc_complete = !more;
+        return;
+    }
     memcpy(g_bc_src, data, (size_t)len);
     g_bc_src_len = len;
     g_bc_src_off = 0;
     g_bc_seq = 0;
+    g_bc_complete = !more;
     g_bc_ptype_tx = ptype & 0x0F;
     /* An explicit rung is honoured exactly, including a slow one: a
      * broadcast meant for stations that have never been heard from
@@ -726,7 +763,7 @@ static int bc_open_group(void)
         int flags = first ? BC_SYNC : 0;
         if (take > g_bc_src_len - g_bc_src_off)
             take = g_bc_src_len - g_bc_src_off;
-        if (g_bc_src_off + take >= g_bc_src_len)
+        if (g_bc_complete && g_bc_src_off + take >= g_bc_src_len)
             flags |= BC_EOS;
         memset(payload, 0, sizeof(payload));
         payload[0] = (uint8_t)(flags | (g_bc_seq & BC_SEQ_MASK));
@@ -1287,6 +1324,8 @@ int main(void)
                 g_beacon.cs_peak = g_cs.mean;
                 g_beacon.cs_peak_ms = g_ms;
             }
+            g_modem.bcast_free =
+                (uint16_t)(BC_TX_CAP - (g_bc_src_len - g_bc_src_off));
             follow_rung(t);
             /* the cable being plugged in is not a host: the console
              * announces itself with a command, and an unplug takes the
@@ -1328,7 +1367,14 @@ int main(void)
                     && (uint32_t)(g_ms - g_bc_rx_last_ms)
                            < (uint32_t)(g_bc_hold_s * 1000.0))
                     busy_now = 1;
-                if (!busy_now && g_bc_src_off < g_bc_src_len) {
+                if (!busy_now && g_bc_src_off < g_bc_src_len
+                    /* while chunks are still arriving, only key a FULL
+                     * group -- a starved tail group would go out
+                     * without EOS and the true last frame must carry
+                     * it */
+                    && (g_bc_complete
+                        || g_bc_src_len - g_bc_src_off
+                               >= BC_GROUP * (BC_FRAME - 2))) {
                     /* one GROUP per keying; the yield between groups is
                      * this very carrier-sense gate */
                     if (bc_open_group() > 0 && g_txs) {

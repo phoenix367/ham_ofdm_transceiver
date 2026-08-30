@@ -664,6 +664,50 @@ static uint8_t g_uparts[USB_PARTS_MAX][USB_MSG_CAP];
 static int g_upart_len[USB_PARTS_MAX];
 static int g_upart_n, g_upart_sent;
 static char g_upfile[128];
+/* usb-mode broadcastfile: the file streams to the BOARD in chunks
+ * (bit 7 of the ptype byte = more follows, bit 6 = continuation),
+ * paced against the bc_free the status frame reports -- the board's
+ * source buffer is 8 kB, not a file. Raw bytes, ptype OPAQUE, exactly
+ * the socket-mode broadcastfile convention, so the receiver stores
+ * rx_broadcast.bin whichever path carried it. */
+#define UBCF_CHUNK 1024
+static void usb_send_frame(uint8_t type, const void *payload, int len);
+static uint8_t g_ubcf[65536];
+static int g_ubcf_len, g_ubcf_off = -1, g_ubcf_rung;
+
+static void usb_pump_bcfile(void)
+{
+    if (g_ubcf_off < 0 || g_ubcf_off >= g_ubcf_len)
+        return;
+    while (g_ust_valid && g_ust.bc_free >= 2 * UBCF_CHUNK
+           && g_ubcf_off < g_ubcf_len) {
+        uint8_t body[2 + UBCF_CHUNK];
+        int n = g_ubcf_len - g_ubcf_off;
+        int more;
+        if (n > UBCF_CHUNK)
+            n = UBCF_CHUNK;
+        more = g_ubcf_off + n < g_ubcf_len;
+        body[0] = (uint8_t)(0x0F | (more ? 0x80 : 0)
+                            | (g_ubcf_off ? 0x40 : 0));
+        body[1] = (uint8_t)g_ubcf_rung;
+        memcpy(body + 2, g_ubcf + g_ubcf_off, (size_t)n);
+        usb_send_frame(UP_CMD_BCAST, body, n + 2);
+        g_ubcf_off += n;
+        g_ust.bc_free = (uint16_t)(g_ust.bc_free - n); /* until the next
+                                                        * status frame */
+        if (!more) {
+            printf("%s [%s] broadcastfile: all %d bytes handed to the "
+                   "board (no delivery guarantee)\n", tstamp(), g_name,
+                   g_ubcf_len);
+            g_ubcf_off = -1;
+            break;   /* -1 < len keeps the while alive without this:
+                      * measured, three completion prints and a 19 kB
+                      * received file from a 1 kB source -- the loop
+                      * re-sent overlapping chunks with off = -1 */
+        }
+    }
+}
+
 /* usb-mode broadcast reception (chunks stream in as UP_EVT_BCAST) */
 static FILE *g_ubc_file;
 static long g_ubc_written;
@@ -841,6 +885,7 @@ static void usb_on_frame(void *ctx, uint8_t type, const uint8_t *pl, int len)
         if (up_decode_status(pl, len, &g_ust) == 0) {
             g_ust_valid = 1;
             usb_pump_file();
+            usb_pump_bcfile();
         }
         break;
     case UP_EVT_MESSAGE:
@@ -956,6 +1001,47 @@ static int usb_command(char *line)
             usb_submit(pat, n, QOS_BULK);
             printf("%s [%s] >> queued %d-byte pattern (bulk)\n", tstamp(),
                    g_name, n);
+        }
+    } else if (!strcmp(cmd, "bcastfile") && rest) {
+        FILE *f;
+        long sz;
+        int rung = 0xFF;
+        if (rest[0] == '-' && rest[1] == 'r' && rest[2] == ' ') {
+            char *e;
+            long v = strtol(rest + 3, &e, 10);
+            if (e != rest + 3 && v >= 0 && v <= 12) {
+                rung = (int)v;
+                while (*e == ' ')
+                    e++;
+                rest = e;
+            }
+        }
+        if (g_ubcf_off >= 0 && g_ubcf_off < g_ubcf_len) {
+            printf("bcastfile: a broadcast is already streaming to the "
+                   "board\n");
+        } else if (!(f = fopen(rest, "rb"))) {
+            printf("bcastfile: cannot open %s\n", rest);
+        } else {
+            fseek(f, 0, SEEK_END);
+            sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (sz <= 0 || sz > (long)sizeof(g_ubcf)) {
+                printf("bcastfile: %s is %ld bytes, cap is %zu\n", rest,
+                       sz, sizeof(g_ubcf));
+                fclose(f);
+            } else if (fread(g_ubcf, 1, (size_t)sz, f) != (size_t)sz) {
+                printf("bcastfile: read error\n");
+                fclose(f);
+            } else {
+                fclose(f);
+                g_ubcf_len = (int)sz;
+                g_ubcf_off = 0;
+                g_ubcf_rung = rung;
+                printf("%s [%s] broadcasting %s (%ld bytes, raw, no "
+                       "delivery guarantee)\n", tstamp(), g_name, rest,
+                       sz);
+                usb_pump_bcfile();
+            }
         }
     } else if (!strcmp(cmd, "bcast") && rest) {
         uint8_t body[2 + 1022];
@@ -1083,7 +1169,8 @@ static int usb_command(char *line)
                g_debug ? "on" : "off");
     } else if (!strcmp(cmd, "help")) {
         printf("  send <text> | sendfile <path> | bulk <n> | "
-               "bcast [-r <rung>] <text>\n  status | stats | "
+               "bcast [-r <rung>] <text> | bcastfile [-r <rung>] "
+               "<path>\n  status | stats | "
                "config [<key> <val>] | "
                "debug [on|off] | quit\n");
     } else {

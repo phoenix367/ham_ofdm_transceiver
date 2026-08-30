@@ -268,6 +268,7 @@ class Console:
 
     def on_status(self, st):
         self.status = st
+        self.pump_bcfile()
         # once the handshake has run, the PEER's message limit applies
         # to what we split files into
         own = self.own_msg_max
@@ -404,17 +405,78 @@ class Console:
             return
         if pl[0] & 0x80:
             self._bc_buf = bytearray()
-            self.say(f"<< broadcast starting (ptype {pl[0] & 0x0F})")
+            self._bc_ptype = pl[0] & 0x0F
+            self.say(f"<< broadcast starting (ptype {self._bc_ptype}"
+                     f"{', storing' if self._bc_ptype == 15 else ''})")
         elif pl[0] & 0x40:
             fo = int.from_bytes(pl[1:3], "little") if len(pl) >= 5 else 0
             lo = int.from_bytes(pl[3:5], "little") if len(pl) >= 5 else 0
-            text = getattr(self, "_bc_buf", b"").decode("utf-8", "replace")
-            self.say(f"<< broadcast ended: {fo} frame(s), {lo} lost -- "
-                     f'"{text}" (gaps are NOT repaired)')
+            buf = getattr(self, "_bc_buf", b"")
+            if getattr(self, "_bc_ptype", 0) == 15:   # opaque: a file
+                with open("rx_broadcast.bin", "wb") as f:
+                    f.write(buf)
+                self.say(f"<< broadcast ended: {fo} frame(s), {lo} lost -- "
+                         f"stored {len(buf)} bytes as rx_broadcast.bin "
+                         "(gaps are NOT repaired)")
+            else:
+                text = buf.decode("utf-8", "replace")
+                self.say(f"<< broadcast ended: {fo} frame(s), {lo} lost -- "
+                         f'"{text}" (gaps are NOT repaired)')
         else:
             if not hasattr(self, "_bc_buf"):
                 self._bc_buf = bytearray()
             self._bc_buf += pl[1:]
+
+    def cmd_bcastfile(self, rest):
+        rung = 0xFF
+        if rest.startswith("-r "):
+            part = rest[3:].split(None, 1)
+            try:
+                v = int(part[0])
+            except (ValueError, IndexError):
+                v = -1
+            if 0 <= v <= 12:
+                rung = v
+                rest = part[1] if len(part) > 1 else ""
+        try:
+            with open(rest, "rb") as f:
+                data = f.read(65537)
+        except OSError as e:                          # noqa: BLE001
+            self.plain(f"bcastfile: cannot open {rest}: {e}")
+            return
+        if not data or len(data) > 65536:
+            self.plain("bcastfile: empty, or over the 64 kB cap")
+            return
+        self._ubcf = data
+        self._ubcf_off = 0
+        self._ubcf_rung = rung
+        self.plain(f">> broadcasting {rest} ({len(data)} bytes, raw, "
+                   "no delivery guarantee)")
+        self.pump_bcfile()
+
+    def pump_bcfile(self):
+        # chunk toward the board against the bc_free it reports; bit 7
+        # of the ptype byte = more follows, bit 6 = continuation
+        CHUNK = 1024
+        off = getattr(self, "_ubcf_off", -1)
+        if off < 0:
+            return
+        free = (self.status or {}).get("bc_free", 0)
+        enc = __import__("ofdm_modem").encode
+        while off < len(self._ubcf) and free >= 2 * CHUNK:
+            n = min(CHUNK, len(self._ubcf) - off)
+            more = off + n < len(self._ubcf)
+            head = 0x0F | (0x80 if more else 0) | (0x40 if off else 0)
+            self.m.t.write(enc(0x06, bytes([head, self._ubcf_rung])
+                               + self._ubcf[off:off + n]))
+            off += n
+            free -= n
+            if not more:
+                self.plain(f"broadcastfile: all {len(self._ubcf)} bytes "
+                           "handed to the board")
+                off = -1
+                break
+        self._ubcf_off = off
 
     def cmd_status(self):
         st = self.status
@@ -469,6 +531,8 @@ class Console:
             self.cmd_bulk(int(rest))
         elif cmd == "bcast" and rest:
             self.cmd_bcast(rest)
+        elif cmd == "bcastfile" and rest:
+            self.cmd_bcastfile(rest)
         elif cmd == "config" and not rest:
             # no arguments: ask the board (the settings live there)
             self.m.t.write(__import__("ofdm_modem").encode(0x03))
@@ -499,6 +563,7 @@ class Console:
         elif cmd == "help":
             self.plain("send <text> | sendfile <path> | bulk <n> | "
                        "bcast [-r <rung>] <text> | "
+                       "bcastfile [-r <rung>] <path> | "
                        "config [<key> <val>] | debug [on|off] | status | "
                        "stats | quit")
         else:
