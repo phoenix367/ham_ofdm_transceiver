@@ -1,0 +1,15 @@
+sequenceDiagram
+    participant A as Station A (has bulk to send)
+    participant B as Station B (a stranger)
+    Note over A: nothing known about B. Before this exchange existed,<br/>streaming was learned from a window that came back<br/>one-eighth acked, and the fragment size from A's OWN limits
+    rect rgb(232,244,255)
+    A->>B: CAPS — flags 7, control rung: ver, stream ext ldpc burst bcast,<br/>msg_max 2048, window 8, pool, fw
+    Note over B: stores A's record. streaming is now DECLARED —<br/>a "no" is never probed, a "yes" keeps the NOACK fallback<br/>(a fade can forge that signature)
+    B->>A: CAPS + CAP_ACK — B's own record
+    Note over A: holds B's record and knows B holds A's
+    A->>B: first burst window — its ack field covers B's seq:<br/>the third leg. B now knows A holds B's record
+    end
+    rect rgb(255,236,236)
+    Note over A,B: an OLDER peer reads flags 7 as a no-data frame and stays silent.<br/>the probe's timeout is FORGIVEN — silence is a fact about the peer,<br/>not the channel — and after 2 tries the old defaults apply
+    end
+    Note over A,B: window capped by B's declared ceiling, parts split against<br/>B's msg_max, streaming on only if B said so. Handshake cost — one<br/>second on the stand — paid once per peer, re-asked after 15 min

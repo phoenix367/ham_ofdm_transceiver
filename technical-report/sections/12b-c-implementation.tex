@@ -1590,6 +1590,124 @@ thing from the other side, at $\sim$8\% of acquisitions before the
 lag-$N$ unwrap fix). Broadcast cannot retransmit, which is precisely
 why the EOS event reports what arrived.
 
+\subsection{The Capability Handshake, and 2\,kB Messages}
+\label{sec:cport_caps}
+
+The last structural inefficiency the two-board stand exposed was not a
+defect but a shape. A 68\,kB file went out as 290 console parts, each
+part one 256-byte station message, each message two burst fragments ---
+so the link paid one acknowledgment per 260 bytes and reached about
+50\,B/s at rung~12, on a wire whose raw rate is $\sim$1\,kbit/s. The
+cap was \texttt{ST\_MSG\_MAX}: a message is one pool slot, and a
+two-fragment transfer can never fill the eight-fragment window the
+streaming machinery was built for. And underneath that sat a protocol
+habit worth retiring: everything a station knew about its peer, it had
+learned \emph{by failing at it}. Streaming capability was inferred from
+a window that came back one-eighth acked
+(Section~\ref{sec:burstwin}), then re-probed every eight transfers in
+case the verdict was a forged fade; the fragment size was chosen from
+the sender's own limits; and \texttt{sendfile} opened with a bare
+\texttt{LINK} frame whose only job was to make the ladder move.
+
+The handshake (Figure~\ref{fig:capsseq}) makes the peer's abilities
+declared instead of discovered. A ten-byte record --- version,
+capability bits (\texttt{stream ext ldpc burst bcast}), message size,
+window ceiling, pool slots, firmware version --- rides a Data frame
+whose link-control flags are 7, the third combination impossible in
+the legacy protocol (the burst frames took the other two). Three legs:
+the initiator sends its record when it has bulk traffic and knows
+nothing about the peer; the peer stores it and answers with its own
+record plus an acknowledgment bit; the initiator's next frame carries
+an ack of that sequence number, which is the third leg --- the peer
+now knows its record arrived. On the stand the whole exchange costs
+one second at the control rung:
+
+\begin{quote}\ttfamily\small
+23:05:23 [A] . caps sent: stream ext ldpc burst bcast  msg 2048 B, window 8\\
+23:05:24 [A] . caps received: stream ext ldpc burst bcast  msg 2048 B, window 8
+\end{quote}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.82\textwidth]{images/caps_seq.png}
+    \caption{The three-leg capability handshake. The record rides the
+             third impossible flag combination, so an older peer reads
+             it as a no-data frame and simply does not answer --- which
+             is itself the answer, and is forgiven rather than charged
+             to the rate controller.}
+    \label{fig:capsseq}
+\end{figure}
+
+Three properties carried the design:
+
+\paragraph{Silence is a fact about the peer, not the channel.} An
+older firmware reads flags~7 as a no-data frame and never answers, so
+the probe's timeout is \emph{forgiven} by the rate controller ---
+charging it would walk \texttt{consecutive\_losses} toward the hard
+rung-0 fallback for talking to an old radio --- and after two
+unanswered tries the peer is marked legacy and today's defaults apply,
+re-asked after five minutes. This is measured in the test suite: the
+legacy-peer case completes its transfer on the defaults with the
+ladder untouched.
+
+\paragraph{A declaration outranks every inference.} A peer that says
+it cannot stream is never streamed to --- the retry counter is set to a
+value no clean exchange can reset, where the old NOACK verdict was
+deliberately re-probed. A peer that says it \emph{can} keeps the NOACK
+fallback anyway, because a deep fade can still forge the
+one-fragment-acked signature and the channel remains entitled to its
+opinion. And the declared streaming bit comes from the operator's
+\texttt{burst\_stream} knob, \emph{not} from the PHY's
+\texttt{receive\_burst} hook: the streaming receivers (demoapp and the
+firmware) leave that hook NULL by design and walk streams through
+\texttt{rxs\_continue\_burst}, and the first version --- which masked
+the bit on the hook --- sent the smoke test from 5 frames to 29,
+every window transmitted per-frame against a peer that streams
+perfectly well.
+
+\paragraph{The record's numbers are the receiver's, not the
+sender's.} The window is capped at engage by the peer's declared
+ceiling, and the consoles split files against the smaller of the two
+message limits: the board reports its own \texttt{ST\_MSG\_MAX} in the
+USB INFO reply and the peer's record in every status frame.
+
+With the peer's limit known, the boards' limit could grow to meet it:
+\texttt{ST\_MSG\_MAX} is 2048 on the radio firmware (the station
+moved wholesale to DTCM for the 21\,kB the pool grew ---
+Section~\ref{sec:cport_memory}'s placement rules made that a two-line
+change), and one USB frame now carries one whole message. The same
+68\,kB file became 34 parts of eleven fragments, each part one
+streamed window:
+
+\begin{center}
+\begin{tabular}{lcc}
+\hline
+ & before & after \\
+\hline
+shape & 290 parts $\times$ 2 fragments & 34 parts $\times$ 8-fragment windows \\
+acknowledgments & one per 260\,B & one per $\sim$1.6\,kB \\
+transfer time & $\sim$25\,min & \textbf{13.0\,min, byte-exact} \\
+\hline
+\end{tabular}
+\end{center}
+
+The first full-size run also handed over one more calibration. Thirteen
+of 34 windows timed out --- every one a forgiven first miss, so nothing
+broke --- and the diagnostic stream showed why: after a 13.4-second
+streamed window the receiver answers only after its end-of-stream
+commit, which arrives as one $\sim$2.5\,s \texttt{rxs\_push}
+(Section~\ref{sec:cport_radio} measured the stall) plus carrier
+release. The reply timer's RFC-6298 smoothing had learned the
+\emph{common} overhead --- 70\,ms, from the short exchanges --- and a
+bimodal distribution is exactly what exponential smoothing cannot
+hold. The stall is physics, not latency to learn, so it gets a fixed
+allowance: a reply awaited after a streamed window adds
+\texttt{RTO\_STREAM\_COMMIT\_S} (5\,s) to the budget, and streamed
+exchanges no longer feed the estimator at all. The re-run: 4 timeouts
+instead of 13, zero retransmissions, and the same 780-second
+transfer time --- the allowance only lengthens waits for acks that are
+late anyway.
+
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}
 

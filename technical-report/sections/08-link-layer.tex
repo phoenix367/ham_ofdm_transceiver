@@ -176,6 +176,12 @@ verdict to one wasted window per retry period while a genuinely
 incapable peer costs two windows per period instead of two per
 transfer.
 
+On the C stack this probing later became the fallback rather than the
+mechanism: a three-leg capability handshake
+(Section~\ref{sec:cport_caps}) lets a peer \emph{declare} streaming,
+window ceiling and message size before the first window flies, and the
+NOACK inference above remains only as the channel's veto.
+
 \subsection{The Reply Timer}
 \label{sec:rto}
 
