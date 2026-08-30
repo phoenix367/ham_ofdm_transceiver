@@ -6,7 +6,8 @@
  * code: this stand's boards are STM32H743VIT6 in LQFP100 (read from
  * SYSCFG_PKGR, 0x0), where port H is bonded out as PH0/PH1 only --
  * both taken by the 25 MHz crystal -- so anything on PH2..PH15 is a
- * pin that does not exist. PA0 is free here: the firmware uses PA4
+ * pin that does not exist. PA1 is the LED (found by blinking it); PA0
+ * is unconnected. Both are free of the firmware's other uses: PA4
  * (DAC out), PA6 (ADC in), PA11/PA12 (USB) and PA13-PA15 + PB3 (JTAG,
  * and driving those kills the probe).
  *
@@ -26,7 +27,12 @@
 #define LED_RCC_BIT 0               /* RCC_AHB4ENR: GPIOA = bit 0 */
 #endif
 #ifndef LED_PIN
-#define LED_PIN 0                   /* PA0 */
+#define LED_PIN 1                   /* PA1 -- MEASURED (make run-led): PA0
+                                     * floats and lights nothing. The
+                                     * first flashed build defaulted to
+                                     * 0 while the bench was run with
+                                     * LED_PIN=1: the state machine ran
+                                     * perfectly on a pin with no LED. */
 #endif
 #ifndef LED_ACTIVE_LOW
 #define LED_ACTIVE_LOW 0            /* 1 = the LED is wired to VDD */
