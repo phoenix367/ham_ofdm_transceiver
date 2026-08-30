@@ -101,7 +101,17 @@ DIAG_FMT = [
                        f"{d} s air",
     lambda a, b, c, d: f"frag {a} B exceeds the air cap at rung {b} "
                        f"({c} frags) -> disengage, legacy path",
+    lambda a, b, c, d: (f"caps: no answer after {b} tries -- peer assumed "
+                        "legacy, defaults apply" if a == 3 else
+                        f"caps {('sent', 'sent (reply)', 'received')[a]}: "
+                        f"{CAPS_NAMES(b)} msg {c} B, window {d}"),
 ]
+
+
+def CAPS_NAMES(f):
+    return "".join(n + " " for bit, n in ((1, "stream"), (2, "ext"),
+                                          (4, "ldpc"), (8, "burst"),
+                                          (16, "bcast")) if f & bit)
 QOS_NAME = {0: "ctl", 1: "inter", 2: "bulk"}
 
 BOARD_MSG_MAX = 256             # cport ST_MSG_MAX default
@@ -156,6 +166,7 @@ class Console:
         self.m = modem
         self.name = name
         self.msg_max = msg_max
+        self.own_msg_max = msg_max
         self.compress = compress
         self.rx = RxFile()
         self.status = None
@@ -257,6 +268,12 @@ class Console:
 
     def on_status(self, st):
         self.status = st
+        # once the handshake has run, the PEER's message limit applies
+        # to what we split files into
+        own = self.own_msg_max
+        peer = st.get("peer_msg_max", 0) if st.get("peer_state", 0) >= 2 \
+            else 0
+        self.msg_max = min(own, peer) if peer else own
         self.pump_file(st)
 
     # --- transmit -------------------------------------------------
@@ -403,6 +420,17 @@ class Console:
                    f"{'  pending-ack' if st['pending'] else ''}")
         self.plain(f"queues: ctl {q[0]}  inter {q[1]}  bulk {q[2]}"
                    f"  (board holds {BOARD_QUEUE} per queue)")
+        ps = st.get("peer_state", 0)
+        if ps >= 2:
+            self.plain(f"peer: {CAPS_NAMES(st['peer_caps'])}messages up to "
+                       f"{st['peer_msg_max']} B, window {st['peer_win_max']}"
+                       + (" (handshake complete)" if ps == 3
+                          else " (awaiting our confirmation)"))
+        else:
+            self.plain("peer: " + ("did not answer the capability probe -- "
+                                   "legacy defaults" if ps == 1 else
+                                   "capabilities unknown (asked on the "
+                                   "first bulk transfer)"))
 
     def cmd_stats(self):
         st = self.status or {}
@@ -502,7 +530,10 @@ def main():
         # first 4, not last 4: the UID tail is the wafer/lot ID and is
         # identical for chips from one wafer (both boards end ...3436)
         name = args.name or serial[:4]
-        con = Console(modem, name, args.msg_max, not args.no_compress)
+        # the board's limit comes from INFO; --msg-max only overrides it
+        msg_max = args.msg_max if args.msg_max != BOARD_MSG_MAX \
+            else (info or {}).get("msg_max", BOARD_MSG_MAX)
+        con = Console(modem, name, msg_max, not args.no_compress)
         stale = getattr(modem.t, "stale", 0)
         if stale:
             con.plain(f"drained {stale} stale bytes from a previous session")

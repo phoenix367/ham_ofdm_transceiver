@@ -51,7 +51,11 @@ static void rto_sample(station_t *st, double overhead)
         st->rto_srtt = (1.0 - RTO_ALPHA) * st->rto_srtt + RTO_ALPHA * overhead;
     }
     st->rto_backoff = 1.0;
-    st->peer_stream_ok = 1; /* optimistic until a bitmap says otherwise */
+    /* optimistic until a bitmap says otherwise -- unless the peer has
+     * DECLARED it cannot stream (retry -1), which no clean exchange
+     * can overturn */
+    if (st->peer_stream_retry != -1)
+        st->peer_stream_ok = 1;
 }
 
 double estimate_air_time(int rung_idx, int payload_len)
@@ -205,7 +209,12 @@ void station_init(station_t *st, const station_phy_t *phy, uint64_t seed)
     st->rng = seed ? seed : 1;
     st->diag_last_rung = -1;
     st->rto_backoff = 1.0;
-    st->peer_stream_ok = 1; /* optimistic until a bitmap says otherwise */
+    st->peer_stream_ok = 1;
+    /* what we declare: everything the link layer implements. The
+     * firmware ORs in CAP_BCAST; a test masks bits out to play an older
+     * peer. */
+    st->my_caps = CAP_STREAM | CAP_EXT | CAP_LDPC | CAP_BURST;
+    st->caps_next_t = 0.0; /* optimistic until a bitmap says otherwise */
 }
 
 static void diag(station_t *st, int ev, int a, int b, int c, int d,
@@ -230,7 +239,7 @@ const char *station_diag_name(int ev)
         "TX", "RX", "TIMEOUT", "RUNG", "BURST_ENGAGE", "BURST_FRAG",
         "BURST_ACKTX", "BURST_ACKRX", "BURST_PROBE", "BURST_DONE",
         "BURST_STREAM", "BURST_SRX", "BURST_SOFF", "RTO",
-        "BURST_WIN", "BURST_REFRAG",
+        "BURST_WIN", "BURST_REFRAG", "CAPS",
     };
     return ev >= 0 && ev < (int)(sizeof(names) / sizeof(names[0]))
                ? names[ev]
@@ -247,7 +256,7 @@ static const char *diag_flags_name(int f)
     case FLAG_PRIO_STREAM: return "stream";
     case FLAG_PRIO_STREAM | FLAG_LAST_FRAGMENT: return "stream+last";
     case FLAG_BURST_DATA: return "burst-data";
-    case FLAG_BURST_DATA | FLAG_LAST_FRAGMENT: return "burst+last";
+    case FLAG_CAPS: return "caps";
     default: return "?";
     }
 }
@@ -336,6 +345,19 @@ void station_diag_format(int ev, int a, int b, int c, int d,
     case ST_EV_BURST_REFRAG:
         snprintf(out, (size_t)cap, "frag %d B exceeds the air cap at "
                  "rung %d (%d frags) -> disengage, legacy path", a, b, c);
+        break;
+    case ST_EV_CAPS:
+        if (a == 3)
+            snprintf(out, (size_t)cap, "caps: no answer after %d tries -- "
+                     "peer assumed legacy, defaults apply", b);
+        else
+            snprintf(out, (size_t)cap, "caps %s: %s%s%s%s%s msg %d B, "
+                     "window %d", a == 2 ? "received" : a == 1 ? "sent (reply)"
+                                                                : "sent",
+                     (b & CAP_STREAM) ? "stream " : "",
+                     (b & CAP_EXT) ? "ext " : "", (b & CAP_LDPC) ? "ldpc " : "",
+                     (b & CAP_BURST) ? "burst " : "",
+                     (b & CAP_BCAST) ? "bcast " : "", c, d);
         break;
     default:
         snprintf(out, (size_t)cap, "%s a=%d b=%d c=%d d=%d",
@@ -478,6 +500,82 @@ static int burst_win_air_cap(int rung_idx, int payload_len, int want)
 }
 
 /* engage burst mode for the current/next bulk message if eligible */
+/* ---- capability handshake ---- */
+
+static void caps_encode(const station_t *st, int ack, uint8_t *p)
+{
+    int f = (st->my_caps | (ack ? CAP_ACK : 0)) & 0xFF;
+    /* Streaming is declared from the operator knob, NOT from the PHY
+     * hooks: a streaming receiver (demoapp, the firmware) leaves
+     * phy.receive_burst NULL by design and walks streams through
+     * rxs_continue_burst instead -- the first version masked on the
+     * hook and the smoke test promptly ran 29 frames instead of 5,
+     * every window sent per-frame against a peer that streams fine. */
+    if (!st->burst_stream)
+        f &= ~CAP_STREAM;
+    p[0] = CAPS_VER;
+    p[1] = (uint8_t)f;
+    p[2] = (uint8_t)(ST_MSG_MAX & 0xFF);
+    p[3] = (uint8_t)(ST_MSG_MAX >> 8);
+    p[4] = (uint8_t)BURST_STREAM_MAX;
+    p[5] = (uint8_t)ST_POOL_SLOTS;
+    p[6] = (uint8_t)(st->fw_ver & 0xFF);
+    p[7] = (uint8_t)(st->fw_ver >> 8);
+    p[8] = (uint8_t)BURST_MAX_FRAGS;
+    p[9] = 0;
+}
+
+static int caps_decode(const uint8_t *pkt_bits, int pkt_n, st_caps_t *c)
+{
+    int plen = (pkt_n - 36) / 8, j;
+    uint8_t p[CAPS_LEN];
+    if (plen < CAPS_LEN)
+        return -1;
+    for (j = 0; j < CAPS_LEN; j++) {
+        int v = 0, b;
+        for (b = 0; b < 8; b++)
+            v = (v << 1) | (pkt_bits[20 + 8 * j + b] & 1);
+        p[j] = (uint8_t)v;
+    }
+    if (p[0] != CAPS_VER)
+        return -1;
+    c->flags = p[1] & ~CAP_ACK;       /* the ACK bit is the leg, not a cap */
+    c->msg_max = p[2] | (p[3] << 8);
+    c->win_max = p[4];
+    c->pool_slots = p[5];
+    c->fw_ver = p[6] | (p[7] << 8);
+    c->max_frags = p[8];
+    return 0;
+}
+
+/* Is it time to ask? Only when there is bulk to carry (a chat message
+ * gains nothing from knowing the peer's window) and nothing else is in
+ * flight, and never twice within the pacing interval. */
+static int caps_probe_wanted(station_t *st, double t)
+{
+    if (st->peer.valid && t - st->peer.t < CAPS_STALE_S)
+        return 0;
+    if (st->peer.legacy) {
+        if (t < st->caps_next_t)
+            return 0;
+        st->peer.legacy = 0;          /* re-probe: firmware may have changed */
+        st->caps_tries = 0;
+    }
+    if (!(st->qcount[QOS_BULK] || st->cur_bulk.active))
+        return 0;
+    if (st->btx.active || st->pending.active || st->caps_inflight)
+        return 0;
+    if (t < st->caps_next_t)
+        return 0;
+    if (st->caps_tries >= CAPS_TRIES) {
+        st->peer.legacy = 1;
+        st->caps_next_t = t + CAPS_RETRY_S;
+        diag(st, ST_EV_CAPS, 3, st->caps_tries, 0, 0, t);
+        return 0;
+    }
+    return 1;
+}
+
 static int burst_try_engage(station_t *st, int rung_idx)
 {
     int n;
@@ -508,6 +606,8 @@ static int burst_try_engage(station_t *st, int rung_idx)
         int w = st->burst_window;
         if (w > BURST_STREAM_MAX)
             w = BURST_STREAM_MAX;
+        if (st->peer.valid && st->peer.win_max > 0 && w > st->peer.win_max)
+            w = st->peer.win_max;
         if (w > n)
             w = n;
         st->btx.win = burst_win_air_cap(rung_idx, st->btx.frag_size, w);
@@ -787,7 +887,15 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
          * consecutive_losses toward the >=4 hard rung-0 -- the observed
          * "rung 0 right after sendfile". The probe still goes out; only
          * a repeated miss counts as a real loss. */
-        if (st->btx.active && st->btx.miss == 0) {
+        if (st->caps_inflight) {
+            /* an older peer never answers a CAPS frame at all; that is
+             * information about the peer, not about the channel */
+            st->caps_inflight = 0;
+            st->caps_tries++;
+            st->caps_next_t = t + 2.0;
+            diag(st, ST_EV_TIMEOUT, st->ctl.consecutive_losses,
+                 st->last_tx_rung, 1, 0, t);
+        } else if (st->btx.active && st->btx.miss == 0) {
             st->btx.miss = 1;
             diag(st, ST_EV_TIMEOUT, st->ctl.consecutive_losses,
                  st->last_tx_rung, 1, 0, t);
@@ -863,6 +971,45 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
         st->last_tx_rung = rung_idx;
         st->reply_due = 0;
         st->expects_reply = 0;
+        return n;
+    }
+
+    /* capability handshake: leg 2 when owed, leg 1 when bulk is waiting
+     * and the peer is a stranger. Control rung: it must get through. */
+    if (!st->caps_disabled
+        && (st->caps_reply_due || caps_probe_wanted(st, t))) {
+        int reply = st->caps_reply_due;
+        caps_encode(st, reply, payload);
+        st->seq = (st->seq + 1) & 3;
+        lc.seq = st->seq;
+        lc.ack = st->last_rx_seq >= 0 ? st->last_rx_seq : 0;
+        lc.req_rung = ctl_rx_request(&st->ctl, t);
+        lc.snr_db = ctl_filtered_snr(&st->ctl, t);
+        lc.freq_corr_hz = 0.0;
+        lc.flags = FLAG_CAPS;
+        pkt_n = data_encode(lc_pack(&lc), payload, CAPS_LEN, pkt_bits);
+        rung_idx = ctl_tx_rung_for_class(&st->ctl, t, QOS_CONTROL);
+        n = st->phy.build(st->phy.ctx, pkt_bits, pkt_n, PKT_TYP_DATA,
+                          rung_idx, out, out_cap);
+        if (n <= 0)
+            return 0;
+        st->caps_reply_due = 0;
+        st->caps_sent = 1;
+        st->caps_inflight = 1;
+        st->caps_seq = lc.seq;
+        if (!reply)
+            st->caps_next_t = t + 2.0;
+        diag_rung(st, rung_idx, t);
+        diag(st, ST_EV_CAPS, reply ? 1 : 0, payload[1] & ~CAP_ACK,
+             ST_MSG_MAX, BURST_STREAM_MAX, t);
+        diag(st, ST_EV_TX, rung_idx, PKT_TYP_DATA, lc.flags, CAPS_LEN, t);
+        st->stats.tx_frames++;
+        st->stats.last_rung = rung_idx;
+        st->last_tx_rung = rung_idx;
+        st->reply_due = 0;
+        st->expects_reply = 1;
+        st->reply_rung_guess = ctl_rx_request(&st->ctl, t);
+        st->reply_len_guess = CAPS_LEN;
         return n;
     }
 
@@ -1023,6 +1170,18 @@ void station_on_tx_end(station_t *st, double t)
     st->tx_end_t = t;
     if (st->expects_reply) {
         double slack = rto_slack(st);
+        /* A reply that follows a STREAMED window is answered only after
+         * the peer's end-of-stream commit -- measured at up to ~2.5 s
+         * in one rxs_push on the boards -- plus its carrier-sense
+         * release. That overhead is bimodal (~70 ms after short frames,
+         * seconds after a full window), and RFC-6298 smoothing tracks
+         * the common case: on the 68 kB stand run the learned budget
+         * fell to 1.2 s and 13 of 34 windows timed out on acks that
+         * arrived ~5 s later, each costing a forgiven miss and a probe.
+         * The stall is physics, not latency to learn, so it gets a
+         * fixed allowance instead of poisoning the estimator. */
+        if (st->btx.active && st->btx.streamed_n > 0)
+            slack += RTO_STREAM_COMMIT_S;
         st->rto_air_est = estimate_air_time(st->reply_rung_guess,
                                             st->reply_len_guess > 0
                                                 ? st->reply_len_guess : 1);
@@ -1150,7 +1309,7 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
      * particular transmission, so it updates nothing (and leaves the
      * backoff in place until a clean exchange clears it). */
     if (st->rto_pending) {
-        if (!st->rto_ambiguous)
+        if (!st->rto_ambiguous && !(st->btx.active && st->btx.streamed_n > 0))
             rto_sample(st, (t - st->tx_end_t) - st->rto_air_est);
         st->rto_ambiguous = 0;
         st->rto_pending = 0;
@@ -1172,6 +1331,41 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
             st->afc_total_hz = nt;
             st->stats.afc_trims++;
         }
+    }
+
+    st->caps_inflight = 0;            /* whatever came, it is an answer */
+    if (st->caps_sent && lc.ack == st->caps_seq && !st->caps_confirmed) {
+        st->caps_confirmed = 1;       /* leg 3: they hold our record */
+    }
+
+    /* capability record: store it, answer it once, and let it decide
+     * what we will try against this peer */
+    if (lc.flags == FLAG_CAPS && !st->caps_disabled) {
+        st_caps_t c;
+        memset(&c, 0, sizeof(c));
+        if (caps_decode(pkt_bits, pkt_n, &c) == 0) {
+            c.valid = 1;
+            c.t = t;
+            st->peer = c;
+            st->caps_tries = 0;
+            if (c.flags & CAP_STREAM) {
+                st->peer_stream_ok = 1;
+                st->peer_stream_retry = 0;
+            } else {
+                /* declared, not inferred: never probe for it */
+                st->peer_stream_ok = 0;
+                st->peer_stream_retry = -1;
+            }
+            if (pkt_bits[20 + 8 + 0] & 1)      /* p[1] bit 7 = CAP_ACK */
+                st->caps_confirmed = 1;
+            else
+                st->caps_reply_due = 1;
+            diag(st, ST_EV_CAPS, 2, c.flags & ~CAP_ACK, c.msg_max,
+                 c.win_max, t);
+        }
+        st->last_rx_seq = lc.seq;
+        st->reply_due = 1;            /* a CAPS frame is always answered */
+        return 0;
     }
 
     /* burst ACK: bitmap of received fragments for transfer lc.ack */

@@ -100,9 +100,12 @@ def decode_info(p):
     ver, nmodes, fw = p[0], p[1], struct.unpack_from("<H", p, 2)[0]
     uid = p[4:16]
     caps, rate = struct.unpack_from("<II", p, 16)
+    # msg_max: the station's ST_MSG_MAX; an older firmware omits it
+    msg_max = struct.unpack_from("<H", p, 24)[0] if len(p) >= 26 else 256
     return {"proto_ver": ver, "n_modes": nmodes,
             "fw": f"{fw >> 8}.{fw & 0xFF}",
-            "serial": uid.hex().upper(), "caps": caps, "sample_rate": rate}
+            "serial": uid.hex().upper(), "caps": caps, "sample_rate": rate,
+            "msg_max": msg_max or 256}
 
 
 def decode_status(p):
@@ -110,10 +113,19 @@ def decode_status(p):
         return None
     rung, snr_q8, tx, rx, to, rt = struct.unpack_from("<iiIIII", p, 0)
     qc, qi, qb = struct.unpack_from("<HHH", p, 24)
-    return {"rung": rung, "snr_db": snr_q8 / 256.0, "tx": tx, "rx": rx,
-            "timeouts": to, "retransmissions": rt,
-            "queues": (qc, qi, qb), "busy": bool(p[30]),
-            "pending": bool(p[31])}
+    d = {"rung": rung, "snr_db": snr_q8 / 256.0, "tx": tx, "rx": rx,
+         "timeouts": to, "retransmissions": rt,
+         "queues": (qc, qi, qb), "busy": bool(p[30]),
+         "pending": bool(p[31]),
+         # the peer's declared capabilities (capability handshake):
+         # peer_state 0 unknown, 1 legacy, 2 held, 3 held + confirmed
+         "peer_state": 0, "peer_caps": 0, "peer_msg_max": 0,
+         "peer_win_max": 0}
+    if len(p) >= 40:
+        d["peer_state"], d["peer_caps"] = p[32], p[33]
+        d["peer_msg_max"] = struct.unpack_from("<H", p, 34)[0]
+        d["peer_win_max"] = p[36]
+    return d
 
 
 class _PipeTransport:

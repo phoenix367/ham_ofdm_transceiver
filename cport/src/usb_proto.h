@@ -44,8 +44,12 @@
 #define UP_HDR_LEN 5   /* sync0 sync1 type len_lo len_hi */
 /* One decoded message plus its sub-header; also the largest thing the
  * link layer will hand up in one piece. */
+/* One frame must carry one station message plus its qos byte, and the
+ * boards now hold 2 kB messages (a 256-byte message was 2 fragments,
+ * so a transfer paid one acknowledgment per 260 bytes -- ~50 B/s at
+ * rung 12 where the raw rate is ~1 kbit/s). */
 #ifndef UP_MAX_PAYLOAD
-#define UP_MAX_PAYLOAD 1024
+#define UP_MAX_PAYLOAD 2064
 #endif
 #define UP_MAX_FRAME (UP_HDR_LEN + UP_MAX_PAYLOAD)
 
@@ -100,6 +104,9 @@ typedef struct {
     uint8_t  uid[12];        /* STM32 96-bit unique ID, as read */
     uint32_t caps;           /* UP_CAP_* */
     uint32_t sample_rate;    /* 12000 */
+    uint16_t msg_max;        /* the station's ST_MSG_MAX: the largest
+                              * message SUBMIT accepts (0 from an older
+                              * firmware: assume 256) */
 } up_info_t;
 
 #define UP_CAP_LDPC       (1u << 0)
@@ -115,6 +122,13 @@ typedef struct {
     uint16_t q_ctl, q_inter, q_bulk;  /* queue depths */
     uint8_t  busy;           /* carrier sense */
     uint8_t  pending;        /* a frame awaiting acknowledgement */
+    /* what the PEER declared in the capability handshake (station.h
+     * FLAG_CAPS). peer_state: 0 unknown, 1 legacy (never answered),
+     * 2 record held, 3 record held and ours confirmed. Absent from an
+     * older firmware's status frame; decoders default it to 0. */
+    uint8_t  peer_state, peer_caps;
+    uint16_t peer_msg_max;
+    uint8_t  peer_win_max;
 } up_status_t;
 
 /* --- encoding ------------------------------------------------------- */

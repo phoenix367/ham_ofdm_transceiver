@@ -42,7 +42,9 @@ transfer over the burst protocol. The same console speaks USB
 terminal onto a real board's own station -- including `bcast`, the
 non-ARQ broadcast mode the firmware transmits and receives on its own
 (nothing is acknowledged, and a beacon sent at EXTREME reaches a board
-that has never been heard from).
+that has never been heard from). Stations open a bulk transfer with a
+three-leg capability handshake, so streaming, window and message size
+are declared by the peer rather than discovered by failing at them.
 
 **Technical report:
 [technical-report/OFDM_Transceiver_Technical_Report.pdf](technical-report/OFDM_Transceiver_Technical_Report.pdf)**

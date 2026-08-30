@@ -55,6 +55,41 @@
  * impossible in the legacy protocol become the two burst frame types */
 #define FLAG_BURST_DATA (FLAG_NO_DATA | FLAG_PRIO_STREAM)   /* 6 */
 #define FLAG_BURST_ACK (FLAG_NO_DATA | FLAG_LAST_FRAGMENT)  /* 3 */
+/* Capability handshake. A third impossible flag combination carries a
+ * 10-byte record of what a station can do, so the peer's abilities are
+ * DECLARED instead of discovered by failing at them (streaming used to
+ * be learned from a window that came back one-eighth acked, and the
+ * fragment size guessed from OUR limits rather than the receiver's).
+ *
+ *   A -> B  CAPS            when A has bulk to send and knows nothing
+ *   B -> A  CAPS | CAP_ACK  B stores A's record, answers with its own
+ *   A -> B  (any frame)     A's ack of B's seq is the third leg: B now
+ *                           knows A holds B's record
+ *
+ * An older peer reads flags 7 as no-data (it ignores the payload and
+ * does not reply), so the probe is FORGIVEN by the rate controller and
+ * after CAPS_TRIES the peer is assumed legacy and today's defaults
+ * apply -- the fallback property streaming already relied on. */
+#define FLAG_CAPS (FLAG_NO_DATA | FLAG_LAST_FRAGMENT | FLAG_PRIO_STREAM) /* 7 */
+#define CAPS_VER 1
+#define CAPS_LEN 10          /* ver flags msg_max(2) win pool fw(2) frags rsv */
+#define CAP_STREAM (1 << 0)  /* can follow streamed burst windows */
+#define CAP_EXT    (1 << 1)  /* EXT_DATA frames (255-byte payloads) */
+#define CAP_LDPC   (1 << 2)
+#define CAP_BURST  (1 << 3)  /* selective-repeat bursts at all */
+#define CAP_BCAST  (1 << 4)  /* receives broadcasts (firmware sets it) */
+#define CAP_ACK    (1 << 7)  /* this record answers yours */
+#define CAPS_TRIES 2         /* unanswered probes before "legacy peer" */
+#define CAPS_RETRY_S 300.0   /* ...and how long that verdict holds */
+#define CAPS_STALE_S 900.0   /* a record older than this is re-asked */
+
+typedef struct {
+    int valid;      /* a record has been received */
+    int legacy;     /* probes went unanswered: assume nothing */
+    int flags, msg_max, win_max, pool_slots, fw_ver, max_frags;
+    double t;       /* when the record arrived */
+} st_caps_t;
+
 #define BURST_FRAG_SIZE 25   /* minimum fragment size (low rungs) */
 #define BURST_SUBHDR 3       /* [streamed<<7|frag_idx][ack_req<<7|total][frag_size] */
 #define BURST_MAX_FRAGS 127
@@ -93,6 +128,12 @@
 /* consecutive streamed windows that deliver ~nothing before the station
  * gives up and reverts to per-frame bursts for the rest of the transfer */
 #define BURST_STREAM_STRIKES 2
+/* Reply-timer allowance after a streamed window: the peer commits the
+ * whole stream in one rxs_push (~2.5 s measured) and then waits out
+ * carrier sense before its bitmap -- a stall, not a latency the RFC-6298
+ * estimator should learn (13/34 windows timed out at the learned 1.2 s
+ * budget on the 68 kB stand run; the acks arrived ~5 s later). */
+#define RTO_STREAM_COMMIT_S 5.0
 
 /* One acknowledgment covers a whole window, so a single transmission
  * must never outlast a plausible fade -- everything in it is exposed
@@ -202,6 +243,18 @@ typedef struct {
     /* peer capability, remembered across transfers (see
      * PEER_STREAM_RETRY): 1 = believed able to follow streamed bursts */
     int peer_stream_ok, peer_stream_retry;
+    /* capability handshake (see FLAG_CAPS) */
+    st_caps_t peer;        /* what the peer declared */
+    int my_caps;           /* what we declare (CAP_*, set by the caller) */
+    int caps_reply_due;    /* leg 2 owed */
+    int caps_sent;         /* our record has gone out at least once */
+    int caps_confirmed;    /* the peer acked the frame that carried it */
+    int caps_inflight;     /* a CAPS frame awaits its reply (forgiven) */
+    int caps_tries, caps_seq;
+    int fw_ver;            /* advertised in the record; caller sets */
+    int caps_disabled;     /* test knob: behave like a peer that predates
+                            * the handshake (ignore CAPS, never send) */
+    double caps_next_t;    /* not before: retry pacing, legacy re-probe */
     struct {
         int active, id, n, last_len, window_left, cursor;
         int frag_size; /* uniform per transfer */
@@ -371,6 +424,9 @@ enum {
     ST_EV_BURST_REFRAG, /* frag air time over cap at the CURRENT rung:
                          * burst disengaged, legacy path carries the
                          * message. a=frag_size b=rung c=nfrags */
+    ST_EV_CAPS,         /* a=0 sent b=1 sent as reply 2=received
+                         * 3=peer assumed legacy; b=flags c=msg_max
+                         * d=win_max */
 };
 void station_set_diag(station_t *st,
                       void (*cb)(void *ctx, int ev, int a, int b, int c,

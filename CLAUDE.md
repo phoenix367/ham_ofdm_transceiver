@@ -154,6 +154,31 @@ Cross-module invariants that are easy to break:
   burst's last block, "set AND not the first block of this stream"
   (the first carries it too, for peers that cannot stream), plus a
   consecutive-failure bound for when that last block is itself lost.
+- The CAPABILITY HANDSHAKE (`station.c` `FLAG_CAPS` = flags 7, the third
+  impossible combination) declares what a peer can do instead of
+  discovering it by failing. Invariants: the record goes out only when
+  BULK is waiting and nothing is in flight (`caps_probe_wanted`); an
+  unanswered probe is FORGIVEN by the rate controller (`caps_inflight`
+  in the timeout path) -- silence is a fact about an older peer, not the
+  channel -- and after `CAPS_TRIES` the peer is `legacy` and the old
+  defaults apply; a declared "no stream" sets `peer_stream_retry = -1`,
+  which `rto_sample`'s optimistic reset and the engage re-probe both
+  respect (do not reset it to 0 anywhere). `CAP_STREAM` is advertised
+  from the `burst_stream` KNOB, never from `phy.receive_burst`: the
+  streaming receivers (demoapp, firmware) leave that hook NULL by
+  design and the first version masked on it -- smoke test went 5 -> 29
+  frames, every window per-frame against a peer that streams fine.
+  Unit tests that drive one station by hand set `caps_disabled` (they
+  expect the first frame to be theirs, not a probe). The Python
+  `station.py` does NOT mirror this (it never mirrored burst ARQ
+  either); `test_link.c` `test_caps` is the twin.
+- The radio boards hold 2 kB messages (`-DST_MSG_MAX=2048` in radiofw)
+  and `g_st` lives in DTCM (`stm32h743_flash.ld`) because the pool grew
+  21 kB. `UP_MAX_PAYLOAD` is 2064 so one message crosses USB in one
+  frame; the modem's delivered-message buffers are static (a 2 kB
+  message twice over is not for the stack). The consoles take the
+  board's `msg_max` from INFO and the peer's from STATUS and split
+  files against the smaller -- never hardcode 256 again.
 - `ST_SOFF_NOACK` is the ONLY streaming failure that is a peer property,
   and the only one remembered across transfers (`peer_stream_ok`,
   re-probed after `PEER_STREAM_RETRY`). `ST_SOFF_TIMEOUT`/`ST_SOFF_BUILD`

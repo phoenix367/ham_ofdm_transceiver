@@ -102,6 +102,55 @@ Key rules: carrier sense before keying; the listen window is sized from the
 random backoff breaks the symmetry of two stations keying together; a
 station replies only to frames that carried data — no ack-of-ack loops.
 
+## Capability handshake
+
+`station.c` (`FLAG_CAPS`). Before this, what the peer could do was
+discovered by failing at it: streaming was learned from a window that
+came back one-eighth acked (`ST_SOFF_NOACK`, then re-probed every
+`PEER_STREAM_RETRY` transfers), the fragment size was sized from *our*
+limits, and `sendfile` fired a bare `LINK` frame just to wake the ladder.
+The record makes it explicit, and it rides on the third impossible
+flag combination — `NO_DATA|LAST|PRIO` = 7 — the same trick that gave
+the burst frames their types, so an older peer reads it as a no-data
+frame and simply does not answer.
+
+```
+A -> B   CAPS             A has bulk to send and knows nothing about B
+B -> A   CAPS | CAP_ACK   B stores A's record and answers with its own
+A -> B   (any frame)      its ack of B's seq is the third leg: B now
+                          knows A holds B's record
+```
+
+Ten bytes: version, capability bits (`stream ext ldpc burst bcast`),
+`msg_max`, `win_max`, pool slots, firmware version, max fragments. It
+goes out at the control rung, and only when there is bulk to carry — a
+chat message gains nothing from the peer's window size. Three things
+the record decides:
+
+- **streaming is declared, not inferred**: a peer that says no is never
+  streamed to (`peer_stream_retry = -1`, which no clean exchange can
+  overturn); a peer that says yes keeps the `NOACK` fallback, because a
+  fade can still forge that signature;
+- **the window is capped by the peer's `win_max`** at engage;
+- **the message size is the peer's**: the boards report their own
+  `ST_MSG_MAX` in the USB INFO reply and the peer's in STATUS, and the
+  consoles split files against the smaller.
+
+An unanswered probe is *forgiven* by the rate controller — silence
+from an older firmware is a fact about the peer, not the channel — and
+after `CAPS_TRIES` the peer is marked legacy and today's defaults
+apply, re-asked after `CAPS_RETRY_S`. A record older than
+`CAPS_STALE_S` is re-asked too. The declared streaming bit comes from
+the operator's `burst_stream` knob, **not** from the PHY hooks: a
+streaming receiver leaves `receive_burst` NULL by design.
+
+Why it mattered on the boards: at `ST_MSG_MAX` 256 a console part was
+two fragments, so a transfer paid one acknowledgment per 260 bytes —
+~50 B/s at rung 12 against a raw ~1 kbit/s, and every ack one more
+exposure to the acquisition-miss rate. The boards now hold 2 kB
+messages (the station moved to DTCM to make room), which is an
+8-fragment window per part.
+
 ## AFC frequency netting
 
 The receiver measures the peer's carrier offset on every frame and requests

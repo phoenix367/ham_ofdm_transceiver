@@ -52,14 +52,15 @@ int up_encode(uint8_t type, const void *payload, int len,
 
 int up_encode_info(const up_info_t *info, uint8_t *out, int out_cap)
 {
-    uint8_t p[24];
+    uint8_t p[26];
     p[0] = info->proto_ver;
     p[1] = info->n_modes;
     put_u16(p + 2, info->fw_ver);
     memcpy(p + 4, info->uid, 12);
     put_u32(p + 16, info->caps);
     put_u32(p + 20, info->sample_rate);
-    return up_encode(UP_RSP_INFO, p, 24, out, out_cap);
+    put_u16(p + 24, info->msg_max);
+    return up_encode(UP_RSP_INFO, p, 26, out, out_cap);
 }
 
 int up_encode_status(const up_status_t *st, uint8_t *out, int out_cap)
@@ -76,11 +77,16 @@ int up_encode_status(const up_status_t *st, uint8_t *out, int out_cap)
     put_u16(p + 28, st->q_bulk);
     /* busy/pending ride in the two spare bits of nothing -- append */
     {
-        uint8_t q[32];
+        uint8_t q[40];
         memcpy(q, p, 30);
         q[30] = st->busy;
         q[31] = st->pending;
-        return up_encode(UP_EVT_STATUS, q, 32, out, out_cap);
+        q[32] = st->peer_state;
+        q[33] = st->peer_caps;
+        put_u16(q + 34, st->peer_msg_max);
+        q[36] = st->peer_win_max;
+        q[37] = q[38] = q[39] = 0;
+        return up_encode(UP_EVT_STATUS, q, 40, out, out_cap);
     }
 }
 
@@ -178,6 +184,7 @@ int up_decode_info(const uint8_t *payload, int len, up_info_t *out)
     memcpy(out->uid, payload + 4, 12);
     out->caps = get_u32(payload + 16);
     out->sample_rate = get_u32(payload + 20);
+    out->msg_max = len >= 26 ? get_u16(payload + 24) : 0;
     return 0;
 }
 
@@ -196,5 +203,14 @@ int up_decode_status(const uint8_t *payload, int len, up_status_t *out)
     out->q_bulk = get_u16(payload + 28);
     out->busy = payload[30];
     out->pending = payload[31];
+    if (len >= 40) {
+        out->peer_state = payload[32];
+        out->peer_caps = payload[33];
+        out->peer_msg_max = get_u16(payload + 34);
+        out->peer_win_max = payload[36];
+    } else {
+        out->peer_state = out->peer_caps = out->peer_win_max = 0;
+        out->peer_msg_max = 0;
+    }
     return 0;
 }

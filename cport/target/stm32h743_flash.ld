@@ -52,6 +52,10 @@ SECTIONS
          * ISR, and the 960 B that put AXI 504 B over when its call
          * site became real. DTCM is where an ISR-hot ring belongs. */
         *(.bss.g_cs)
+        /* the station itself (~42 kB at ST_MSG_MAX 2048): the message
+         * pool grew 21 kB for 2 kB messages, which AXI could not take
+         * and DTCM can. Everything in it is CPU-only. */
+        *(.bss.g_st)
         /* broadcast engine: src payload + one group's packet bits */
         *(.bss.g_bc_src) *(.bss.g_bc_blocks)
         *(.dtcm_bss*)

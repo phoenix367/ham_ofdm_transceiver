@@ -117,6 +117,12 @@ void usb_modem_init(usb_modem_t *m, station_t *st, const uint8_t uid[12],
         memcpy(m->info.uid, uid, 12);
     m->info.caps = caps;
     m->info.sample_rate = 12000;
+    m->info.msg_max = ST_MSG_MAX;
+    /* what the station declares to its PEER over the air: the link
+     * layer's own abilities plus broadcast if this build has it */
+    st->fw_ver = fw_ver;
+    if (caps & UP_CAP_BCAST)
+        st->my_caps |= CAP_BCAST;
 }
 
 void usb_modem_rx(usb_modem_t *m, const uint8_t *data, int n)
@@ -133,9 +139,10 @@ void usb_modem_tick(usb_modem_t *m, double now, int status)
         const uint8_t *msg = station_delivered(m->st, m->delivered_seen);
         int len = m->st->delivered_len[m->delivered_seen];
         m->delivered_seen++;
-        if (msg && len > 0 && len <= 512) {
-            uint8_t body[1 + 512];
-            uint8_t out[UP_HDR_LEN + 1 + 512];
+        if (msg && len > 0 && len <= ST_MSG_MAX) {
+            /* static: a 2 kB message twice over is not for the stack */
+            static uint8_t body[1 + ST_MSG_MAX];
+            static uint8_t out[UP_HDR_LEN + 1 + ST_MSG_MAX];
             int n;
             body[0] = 2;                    /* qos: bulk */
             memcpy(body + 1, msg, (size_t)len);
@@ -154,7 +161,7 @@ void usb_modem_tick(usb_modem_t *m, double now, int status)
 
     if (status) {
         up_status_t s;
-        uint8_t out[UP_HDR_LEN + 32];
+        uint8_t out[UP_HDR_LEN + 40];
         int n;
         memset(&s, 0, sizeof(s));
         s.rung = m->st->stats.last_rung;
@@ -168,6 +175,12 @@ void usb_modem_tick(usb_modem_t *m, double now, int status)
         s.q_inter = (uint16_t)m->st->qcount[1];
         s.q_bulk = (uint16_t)m->st->qcount[2];
         s.pending = (uint8_t)(m->st->pending.active ? 1 : 0);
+        s.peer_state = (uint8_t)(m->st->peer.valid
+                                     ? (m->st->caps_confirmed ? 3 : 2)
+                                     : (m->st->peer.legacy ? 1 : 0));
+        s.peer_caps = (uint8_t)m->st->peer.flags;
+        s.peer_msg_max = (uint16_t)m->st->peer.msg_max;
+        s.peer_win_max = (uint8_t)m->st->peer.win_max;
         n = up_encode_status(&s, out, (int)sizeof(out));
         if (n > 0)
             txq_push(m, out, n);

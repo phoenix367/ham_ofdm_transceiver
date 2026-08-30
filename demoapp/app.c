@@ -637,7 +637,14 @@ static void handle_delivered(int before)
  * is PACED against the q_bulk depth the board reports twice a second
  * rather than dumped into the queue. */
 
-#define USB_MSG_MAX 256          /* the board build's ST_MSG_MAX */
+/* The board tells us its ST_MSG_MAX in the INFO reply (2048 on the
+ * radio firmware now, 256 before -- and 256 is what an older firmware
+ * that does not report one gets). Once the capability handshake has
+ * run, the PEER's limit applies too: a part the receiver cannot hold
+ * is refused there, not here. */
+#define USB_MSG_CAP 2048         /* buffer size: the largest we handle */
+static int g_umsg_max = 256;     /* this board's, from INFO */
+static int usb_msg_max(void);
 #define USB_INFLIGHT 4           /* file parts allowed in q_bulk */
 
 static usbh_t *g_usb;
@@ -648,7 +655,7 @@ static int g_ust_valid;
 /* enough for FILE_MAX_SRC at the smallest useful part: ~600 kB static,
  * which a host can afford and a 255-entry table could not deliver */
 #define USB_PARTS_MAX 2400
-static uint8_t g_uparts[USB_PARTS_MAX][USB_MSG_MAX];
+static uint8_t g_uparts[USB_PARTS_MAX][USB_MSG_CAP];
 static int g_upart_len[USB_PARTS_MAX];
 static int g_upart_n, g_upart_sent;
 static char g_upfile[128];
@@ -657,6 +664,15 @@ static FILE *g_ubc_file;
 static long g_ubc_written;
 static uint8_t g_ubc_text[4096];
 static int g_ubc_len, g_ubc_ptype = -1;
+
+static int usb_msg_max(void)
+{
+    int m = g_umsg_max;
+    if (g_ust_valid && g_ust.peer_state >= 2 && g_ust.peer_msg_max > 0
+        && (int)g_ust.peer_msg_max < m)
+        m = g_ust.peer_msg_max;
+    return m > USB_MSG_CAP ? USB_MSG_CAP : m;
+}
 
 static void usb_send_frame(uint8_t type, const void *payload, int len)
 {
@@ -668,10 +684,10 @@ static void usb_send_frame(uint8_t type, const void *payload, int len)
 
 static void usb_submit(const uint8_t *data, int len, int qos)
 {
-    uint8_t body[1 + USB_MSG_MAX];
-    if (len > USB_MSG_MAX) {
+    static uint8_t body[1 + USB_MSG_CAP];
+    if (len > usb_msg_max()) {
         printf("%s [%s] message exceeds the board's %d-byte limit\n",
-               tstamp(), g_name, USB_MSG_MAX);
+               tstamp(), g_name, usb_msg_max());
         return;
     }
     body[0] = (uint8_t)qos;
@@ -743,10 +759,10 @@ static void usb_sendfile(const char *path)
     }
 
     head = 1 + (int)strlen(FILE_TAG) + (int)strlen(base) + 1 + 4;
-    part_data = USB_MSG_MAX - head;
+    part_data = usb_msg_max() - head;
     if (part_data <= 0) {
         printf("%s [%s] sendfile: name too long for a %d-byte message\n",
-               tstamp(), g_name, USB_MSG_MAX);
+               tstamp(), g_name, usb_msg_max());
         return;
     }
     n_parts = body_len <= 0 ? 1 : (body_len + part_data - 1) / part_data;
@@ -794,10 +810,13 @@ static void usb_on_frame(void *ctx, uint8_t type, const uint8_t *pl, int len)
     switch (type) {
     case UP_RSP_INFO: {
         up_info_t inf;
-        if (up_decode_info(pl, len, &inf) == 0)
-            printf("%s [%s] modem: proto v%d fw %d.%d, %d modes @%u Hz\n",
-                   tstamp(), g_name, inf.proto_ver, inf.fw_ver >> 8,
-                   inf.fw_ver & 0xFF, inf.n_modes, inf.sample_rate);
+        if (up_decode_info(pl, len, &inf) == 0) {
+            g_umsg_max = inf.msg_max ? inf.msg_max : 256;
+            printf("%s [%s] modem: proto v%d fw %d.%d, %d modes @%u Hz, "
+                   "messages up to %d B\n", tstamp(), g_name,
+                   inf.proto_ver, inf.fw_ver >> 8, inf.fw_ver & 0xFF,
+                   inf.n_modes, inf.sample_rate, g_umsg_max);
+        }
         break;
     }
     case UP_EVT_STATUS:
@@ -910,9 +929,9 @@ static int usb_command(char *line)
         usb_sendfile(rest);
     } else if (!strcmp(cmd, "bulk") && rest) {
         int n = atoi(rest), i;
-        uint8_t pat[USB_MSG_MAX];
-        if (n < 1 || n > USB_MSG_MAX) {
-            printf("bulk: 1..%d\n", USB_MSG_MAX);
+        static uint8_t pat[USB_MSG_CAP];
+        if (n < 1 || n > usb_msg_max()) {
+            printf("bulk: 1..%d\n", usb_msg_max());
         } else {
             for (i = 0; i < n; i++)
                 pat[i] = (uint8_t)i;
@@ -966,6 +985,23 @@ static int usb_command(char *line)
                    g_ust.pending ? "  pending-ack" : "");
             printf("  queues: ctl %u  inter %u  bulk %u\n", g_ust.q_ctl,
                    g_ust.q_inter, g_ust.q_bulk);
+            if (g_ust.peer_state >= 2)
+                printf("  peer: %s%s%s%s%smessages up to %u B, window %u"
+                       "%s\n",
+                       (g_ust.peer_caps & 1) ? "stream " : "",
+                       (g_ust.peer_caps & 2) ? "ext " : "",
+                       (g_ust.peer_caps & 4) ? "ldpc " : "",
+                       (g_ust.peer_caps & 8) ? "burst " : "",
+                       (g_ust.peer_caps & 16) ? "bcast " : "",
+                       g_ust.peer_msg_max, g_ust.peer_win_max,
+                       g_ust.peer_state == 3 ? " (handshake complete)"
+                                             : " (awaiting our confirmation)");
+            else
+                printf("  peer: %s\n", g_ust.peer_state == 1
+                       ? "did not answer the capability probe -- legacy "
+                         "defaults"
+                       : "capabilities unknown (asked on the first "
+                         "bulk transfer)");
         }
     } else if (!strcmp(cmd, "stats")) {
         if (g_ust_valid)

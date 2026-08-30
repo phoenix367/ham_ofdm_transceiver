@@ -101,6 +101,7 @@ static void test_burst_forgiveness(void)
     int sent = 0, guard;
 
     station_init(&C, &phy, 3);
+    C.caps_disabled = 1;              /* not what this test is about */
     C.burst_window = 8;
 
     /* prime the controller: peer reports +6 dB and requests rung 11 */
@@ -595,6 +596,89 @@ static void test_burst_stream(void)
            fallback);
 }
 
+/* ---------------- capability handshake ---------------- */
+
+/* run one 250-byte bulk transfer A -> B with the given caps masks and
+ * report what each side learned */
+static void caps_case(int a_caps, int b_caps, int b_answers,
+                      station_t *A, station_t *B, int *frames_out)
+{
+    station_phy_t pa = { 0, phy_build, phy_receive, phy_build_burst,
+                         phy_receive_burst };
+    station_phy_t pb = pa;
+    static uint8_t big[250];
+    lc_word_t lc;
+    double t = 100.0;
+    int k;
+
+    for (k = 0; k < 250; k++)
+        big[k] = (uint8_t)(k * 31 + 5);
+    station_init(A, &pa, 4242);
+    station_init(B, &pb, 2424);
+    A->burst_window = B->burst_window = 8;
+    A->burst_stream = B->burst_stream = 1;
+    A->my_caps = a_caps;
+    B->my_caps = b_caps;
+    B->fw_ver = 0x0201;
+    B->caps_disabled = !b_answers;    /* a peer from before the handshake */
+
+    memset(&lc, 0, sizeof(lc));
+    lc.flags = FLAG_NO_DATA;
+    lc.req_rung = 5;
+    lc.snr_db = -4.0;
+    ctl_on_rx_frame(&A->ctl, -4.0, &lc, t);
+    ctl_on_rx_frame(&B->ctl, -4.0, &lc, t);
+
+    station_submit(A, big, 250, QOS_BULK);
+    *frames_out = pump(A, B, &t, 3000.0, 0);
+    check("caps: the transfer completes",
+          B->delivered_n >= 1 && B->delivered_len[0] == 250
+          && memcmp(station_delivered(B, 0), big, 250) == 0);
+}
+
+static void test_caps(void)
+{
+    static station_t A, B;
+    int frames, plain, all = CAP_STREAM | CAP_EXT | CAP_LDPC | CAP_BURST;
+
+    /* both modern: three legs, both sides hold the other's record */
+    caps_case(all, all, 1, &A, &B, &frames);
+    check("caps: A holds B's record", A.peer.valid && A.peer.flags == all
+          && A.peer.msg_max == ST_MSG_MAX && A.peer.win_max == BURST_STREAM_MAX
+          && A.peer.fw_ver == 0x0201);
+    check("caps: B holds A's record", B.peer.valid && B.peer.flags == all);
+    check("caps: both sides confirmed (third leg)",
+          A.caps_confirmed && B.caps_confirmed);
+    check("caps: neither side thinks the other is legacy",
+          !A.peer.legacy && !B.peer.legacy);
+    check("caps: a probe is not a loss for the ladder",
+          A.ctl.consecutive_losses == 0);
+    printf("  caps: %d frames on air, A tx %d, B tx %d\n", frames,
+           A.stats.tx_frames, B.stats.tx_frames);
+    plain = frames;
+
+    /* B declares no streaming: A must never try it, and never strike out */
+    caps_case(all, all & ~CAP_STREAM, 1, &A, &B, &frames);
+    check("caps: a peer that declares no streaming is never streamed to",
+          A.peer.valid && !(A.peer.flags & CAP_STREAM)
+          && A.peer_stream_ok == 0 && A.peer_stream_retry == -1
+          && A.btx.streamed_n == 0);
+    printf("  caps (no-stream peer): %d frames\n", frames);
+
+    /* B predates the handshake: it never answers. A must give up after
+     * CAPS_TRIES without charging the ladder, then run on the defaults
+     * -- the transfer still completes, streamed (B does decode
+     * streams, it just cannot say so). */
+    caps_case(all, all, 0, &A, &B, &frames);
+    check("caps: a legacy peer is detected after the probes go unanswered",
+          !A.peer.valid && A.peer.legacy && A.caps_tries >= CAPS_TRIES);
+    check("caps: the unanswered probes cost the ladder nothing",
+          A.ctl.consecutive_losses == 0);
+    check("caps: the legacy peer never sent a record", !B.caps_sent);
+    printf("  caps (legacy peer): %d frames vs %d with the handshake\n",
+           frames, plain);
+}
+
 /* ---------------- adaptive reply timer ---------------- */
 
 /* Drive exchanges whose peer always answers a known interval after the
@@ -614,6 +698,7 @@ static void test_rto(void)
     const double OVERHEAD = 0.4;
 
     station_init(&C, &phy, 9);
+    C.caps_disabled = 1;              /* not what this test is about */
     memset(&lc, 0, sizeof(lc));
     lc.flags = FLAG_NO_DATA;
     lc.req_rung = 11;
@@ -697,6 +782,7 @@ static void test_burst_window(void)
     /* a transfer shorter than the ceiling gets a window sized to it, so
      * it costs exactly one acknowledgment */
     station_init(&C, &phy, 77);
+    C.caps_disabled = 1;              /* not what this test is about */
     C.burst_window = 8;
     memset(&lc, 0, sizeof(lc));
     lc.flags = FLAG_NO_DATA;
@@ -716,6 +802,7 @@ static void test_burst_window(void)
 
     /* a transfer with more fragments than the ceiling is capped by it */
     station_init(&C, &phy, 78);
+    C.caps_disabled = 1;
     C.burst_window = 4;
     memset(&lc, 0, sizeof(lc));
     lc.flags = FLAG_NO_DATA;
@@ -847,6 +934,7 @@ int main(void)
     test_ext_frame();
     test_session();
     test_burst_stream();
+    test_caps();
     test_rto();
     test_burst_window();
     test_peer_stream_memory();
