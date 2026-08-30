@@ -22,7 +22,7 @@ import sys
 
 CFG = "../tools/esp32-probe/stm32h7-rbb-dual.cfg"
 MAGIC = 0x0AD10BEE
-N_WORDS = 87
+N_WORDS = 88
 
 FIELDS = [
     "magic", "stage", "mounted", "ms", "rx_bytes", "tx_bytes", "isr_count",
@@ -42,10 +42,13 @@ FIELDS = [
     "bc_tx_groups", "bc_tx_ms", "bc_rx_frames", "bc_rx_lost",
     "ev_n", "ev_neg", "ev_last", "ev_last_ms", "ev_cap_ovr",
     "cs_peak", "cs_peak_ms",
-] + ["ev%d_%s" % (i, k) for i in range(8) for k in ("ms", "what", "start")]
+] + ["ev%d_%s" % (i, k) for i in range(8) for k in ("ms", "what", "start")] \
+  + ["led"]
 STAGES = {1: "entered", 2: "supply", 3: "analog", 4: "receivers",
           5: "tusb", 6: "loop (not mounted)", 7: "MOUNTED"}
 MODES = ["NORMAL", "ROBUST", "EXTREME"]
+LED_STATES = {0: "dark (no host attached)", 1: "solid (host attached, idle)",
+              2: "2 Hz (receiving)", 3: "10 Hz (transmitting)"}
 
 
 def s32(v):
@@ -108,6 +111,7 @@ def show(label, d, raw):
                        d["bc_rx_frames"], d["bc_rx_lost"]))
     print("  loudest thing heard: cs %d at %.0f s (quiet ~2e4, carrier ~2e8)"
           % (d["cs_peak"], d["cs_peak_ms"] / 1000.0))
+    print("  LED (PA1): %s" % LED_STATES.get(d["led"], d["led"]))
     if d["ev_n"]:
         print("  last events (newest last):")
         order = sorted(range(8), key=lambda i: d["ev%d_ms" % i])

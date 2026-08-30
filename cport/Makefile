@@ -213,6 +213,40 @@ analogfw: $(GEN) | $(BUILD)
 	    -o $(BUILD)/analog_loop.elf
 	@$(QEMUSIZE) -A $(BUILD)/analog_loop.elf | grep -E '^\.(text|bss|d2_bss|dtcm_bss|results)'
 
+# LED probe: is the board LED on the pin we think it is? A RAM image
+# (the flashed firmware is untouched; `make reset` brings it back), so
+# it can be tried on a working stand without risking anything. Pin is a
+# macro: make ledtest LED_PIN=1 LED_PORT_BASE=0x58020400 for PB1.
+LED_PIN ?= 0
+LED_BOARD ?= stmA
+
+ledtest: | $(BUILD)
+	$(QEMUCC) -std=c99 -O2 -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 \
+	    -mfloat-abi=hard -ffunction-sections -fdata-sections \
+	    -Isrc -Itarget -DLED_PIN=$(LED_PIN) $(LED_DEFS) -nostartfiles \
+	    -T target/stm32h743_usb.ld -Wl,--gc-sections \
+	    target/start.c bench/led_test.c -o $(BUILD)/led_test.elf
+	@$(QEMUSIZE) $(BUILD)/led_test.elf | tail -1
+
+# load it and leave it BLINKING (no bkpt: the point is to be looked at),
+# then read the beacon twice to prove the phases are advancing.
+run-led: ledtest
+	@echo "resetting $(LED_BOARD) and loading the blink sketch..."; \
+	 $(OCD2) -c init -c "targets $(LED_BOARD).cpu0" -c halt \
+	   -c "mww 0xE000ED0C 0x05FA0004" -c exit >/dev/null 2>&1; \
+	 sleep 3; \
+	 $(OCD2) -c init -c "targets $(LED_BOARD).cpu0" -c halt \
+	   -c "load_image $(BUILD)/led_test.elf" -c "reg sp 0x20020000" \
+	   -c "reg pc 0x00000000" -c resume -c exit $(OCD_QUIET) \
+	   | grep -aE 'downloaded|Error'; \
+	 echo "running -- reading the beacon (12 words) twice, 6 s apart"; \
+	 $(OCD2) -c init -c "targets $(LED_BOARD).cpu0" \
+	   -c "mdw 0x20000000 12" -c exit 2>&1 | grep -a '^0x2000'; \
+	 sleep 6; \
+	 $(OCD2) -c init -c "targets $(LED_BOARD).cpu0" \
+	   -c "mdw 0x20000000 12" -c exit 2>&1 | grep -a '^0x2000'; \
+	 echo "the flash image is untouched: 'make reset' restores the radio"
+
 # Two boards linked by audio: board A DAC1_OUT1 (PA4) -> wire -> board B
 # ADC1 ch3 (PA6), plus a ground wire. One image, role chosen over JTAG.
 LINK_SRC = target/start.c target/vectors.c bench/analog_link.c \
@@ -558,4 +592,4 @@ flash-probe: test-probe
 	 $(ARDUINO_CLI) compile --fqbn esp32:esp32:esp32 -u -p $(PROBE_PORT) \
 	   $(PROBE_DIR)/esp32_rbb | tail -3
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read radiofw flash-radio-a flash-radio-b burstrepro bcrepro cstest robust
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read radiofw flash-radio-a flash-radio-b burstrepro bcrepro cstest robust ledtest run-led

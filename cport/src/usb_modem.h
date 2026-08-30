@@ -41,6 +41,10 @@ typedef struct {
     void (*bcast_cb)(void *ctx, int ptype, int rung, const uint8_t *data,
                      int len);
     void *bcast_ctx;
+    /* commands received from the host. Non-zero means a host PROGRAM has
+     * attached, which is more than the cable being plugged in: the
+     * console announces itself with UP_CMD_INFO. Clear it on unmount. */
+    uint32_t host_cmds;
 } usb_modem_t;
 
 void usb_modem_init(usb_modem_t *m, station_t *st, const uint8_t uid[12],

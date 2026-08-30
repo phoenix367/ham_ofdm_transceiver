@@ -42,6 +42,8 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
     uint8_t buf[UP_HDR_LEN + 32];
     int n;
 
+    m->host_cmds++;
+
     switch (type) {
     case UP_CMD_INFO:
         n = up_encode_info(&m->info, buf, (int)sizeof(buf));

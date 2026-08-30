@@ -65,6 +65,7 @@
 #include "csense.h"
 #include "broadcast.h"
 #include "packets.h"
+#include "led.h"
 
 void ofdm_usb_bsp_init(int rhport);
 int  ofdm_usb_bsp_supply_ready(void);
@@ -122,6 +123,7 @@ typedef struct {
      * tell "never locked" from "locked and refused eight times" --
      * and that distinction is the whole diagnosis. */
     uint32_t ev_ring[8][3];   /* ms | mode<<28|(type&0xf)<<24|typ<<16|cap_ovr16 | start_abs */
+    uint32_t led;             /* 0 dark, 1 host, 2 receiving, 3 transmitting */
 } beacon_t;
 volatile beacon_t g_beacon __attribute__((section(".results"), used));
 enum { ST_ENTER = 1, ST_SUPPLY, ST_ANALOG, ST_RXS, ST_TUSB, ST_LOOP,
@@ -862,6 +864,71 @@ static int bc_advance(int m, const rxs_event_t *ev)
  * g_cs itself is declared beside g_dcb at the top: the ISR uses both. */
 
 
+/* --- the board LED (PA1) ---------------------------------------------
+ *
+ * One pin says what the station is doing, and the priority is what
+ * matters most from across the room -- who is keying:
+ *
+ *   transmitting   10 Hz    our carrier is on the wire
+ *   receiving       2 Hz    a burst/broadcast walk is live, carrier
+ *                           sense reads busy, or a frame decoded in
+ *                           the last half second
+ *   host attached  solid    a console has spoken to the modem
+ *   otherwise        off    powered and running, but nobody is home
+ *
+ * The blink phase is derived from g_ms rather than kept in a counter,
+ * so a state change takes effect on the next millisecond and nothing
+ * can drift. Carrier sense is NOT polled for this: cs_busy() carries
+ * the floor tracker with it and is deliberately called once per
+ * millisecond from one place only (see the tx gate), so the LED reads
+ * that call's verdict rather than adding a second caller.
+ *
+ * PA1 was found with `make run-led` (bench/led_test.c). It is the pin
+ * this board holds high against an internal pull-down; PA0, the
+ * obvious first guess, floats and is connected to nothing. If the
+ * solid states come out dark, the LED is wired to VDD: build with
+ * -DLED_ACTIVE_LOW=1. */
+enum { LED_ST_OFF = 0, LED_ST_HOST, LED_ST_RX, LED_ST_TX };
+
+static int g_cs_busy_seen;     /* last verdict from the tx gate's call */
+static uint32_t g_led_rx_ms;   /* g_ms of the last decoded frame */
+static int g_host_seen;        /* a host program has talked to us */
+
+static void led_tick(void)
+{
+    uint32_t half;
+    int st;
+
+    if (g_tx_on) {
+        st = LED_ST_TX;
+    } else if ((g_burst_left[0] | g_burst_left[1] | g_burst_left[2]
+                | g_bc_left[0] | g_bc_left[1] | g_bc_left[2]) != 0
+               || g_cs_busy_seen
+               || (g_led_rx_ms
+                   && (uint32_t)(g_ms - g_led_rx_ms) < 500u)) {
+        st = LED_ST_RX;
+    } else {
+        st = g_host_seen ? LED_ST_HOST : LED_ST_OFF;
+    }
+    g_beacon.led = (uint32_t)st;
+
+    switch (st) {
+    case LED_ST_TX:
+        half = 50u;                      /* 10 Hz */
+        break;
+    case LED_ST_RX:
+        half = 250u;                     /* 2 Hz */
+        break;
+    case LED_ST_HOST:
+        led_set(1);
+        return;
+    default:
+        led_set(0);
+        return;
+    }
+    led_set((int)((g_ms / half) & 1u));
+}
+
 /* --- receivers, one per mode over the shared raw ring ----------------
  *
  * Which modes to listen for is a CPU BUDGET, not a free choice. Each
@@ -964,6 +1031,8 @@ int main(void)
 
     g_beacon.stage = ST_ANALOG;
     RCC_AHB4ENR |= (1u << 0);         /* GPIOA: PA4/PA6 stay analog */
+    led_init();                       /* PA1, same port, dark until a
+                                       * host attaches */
     dac_init();
     dcblock_init(&g_dcb);
     cs_init(&g_cs);
@@ -1179,6 +1248,7 @@ int main(void)
                     if (ev.type != 1)
                         continue;
                     g_beacon.rx_decodes++;
+                    g_led_rx_ms = g_ms ? g_ms : 1;
                     g_beacon.last_snr_q8 = (int32_t)(ev.snr_db * 256.0);
                     g_last_rx_mode = i;      /* the index IS the mode */
                     g_last_rx_t = t;
@@ -1211,6 +1281,16 @@ int main(void)
                 g_beacon.cs_peak_ms = g_ms;
             }
             follow_rung(t);
+            /* the cable being plugged in is not a host: the console
+             * announces itself with a command, and an unplug takes the
+             * indication back down */
+            if (!tud_mounted()) {
+                g_host_seen = 0;
+                g_modem.host_cmds = 0;
+            } else if (g_modem.host_cmds) {
+                g_host_seen = 1;
+            }
+            led_tick();
             /* expire wedged walks (peer died mid-stream: no events) */
             {
                 int i2;
@@ -1233,6 +1313,7 @@ int main(void)
                 && !(g_burst_left[0] | g_burst_left[1] | g_burst_left[2])
                 && !(g_bc_left[0] | g_bc_left[1] | g_bc_left[2])) {
                 int busy_now = cs_busy(&g_cs, g_ms);
+                g_cs_busy_seen = busy_now;   /* the LED reads this call */
                 /* a broadcast heard recently holds this transmitter: the
                  * train has gaps between groups, and keying into one
                  * costs the group (see BC_RX_HOLD_MODE_S) */

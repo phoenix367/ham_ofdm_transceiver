@@ -426,6 +426,27 @@ Cross-module invariants that are easy to break:
     of the SAME build-and-walk path is `make bcrepro` (in
     `make robust`) -- it decodes 6/6, so a group loss is an on-air
     acquisition miss, not a code path.
+- The board LED is on **PA1**, and the pin was found by measurement,
+  not by reading a schematic for a different board: these are
+  STM32H743VI in **LQFP100** (`SYSCFG_PKGR` @0x58000524 reads PKG=0 on
+  both), where port H is bonded out as PH0/PH1 only -- both taken by
+  the 25 MHz crystal -- so PH2..PH15 do not exist and writing their
+  MODER/ODR bits drives nothing. PA0, the obvious first guess, floats
+  (input probe: follows an internal pull both ways); PA1 reads HIGH
+  against an internal pull-down, which is the board holding it. The
+  finder is `make run-led` (`bench/led_test.c`, RAM-resident so flash
+  is untouched; `LED_PIN=` / `LED_DEFS=-DLED_PORT_BASE=` to try
+  another pin), and it blinks a four-phase pattern rather than a plain
+  blink because a plain blink cannot be told from a power LED.
+  `src/led.h` is the shared one-pin driver. Firmware states, highest
+  priority first: 10 Hz transmitting, 2 Hz receiving (a walk is live,
+  carrier sense reads busy, or a frame decoded within 500 ms), solid
+  when a host program has attached (a COMMAND from the host, not the
+  cable being plugged in), dark otherwise. `led_tick()` reads the
+  carrier-sense verdict the transmit gate already computed
+  (`g_cs_busy_seen`) -- do NOT add a second `cs_busy()` caller: that
+  function carries the floor tracker, whose climb is defined per 40 ms
+  window and per CALL SITE (see the 40x-too-fast climb above).
 - Every carrier-sense TIME CONSTANT must exceed the longest frame the
   station can emit, and on the boards that used to be 224 s: frag_size
   is fixed at engage, so a burst engaged at rung 10 (203-byte frags)
