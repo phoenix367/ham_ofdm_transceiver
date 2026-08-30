@@ -74,6 +74,10 @@ typedef struct {
     int32_t  last_rung, last_snr_q8;
     uint32_t loops, rx_samples, push_ms_max;
     uint32_t rx_active_mask, my_req, follow_changes;
+    uint32_t burst_starts, burst_blocks, burst_misses;
+    uint32_t burst_refused, ring_miss;
+    uint32_t tx_short, tx_last_pulled, tx_last_total;
+    int32_t  last_miss_type, last_miss_bits;
 } beacon_t;
 volatile beacon_t g_beacon __attribute__((section(".results"), used));
 enum { ST_ENTER = 1, ST_SUPPLY, ST_ANALOG, ST_RXS, ST_TUSB, ST_LOOP,
@@ -316,33 +320,175 @@ static int phy_recv_unused(void *c, const int16_t *s, int n, uint8_t *bits,
     return -1;                        /* decoded through rxs_push instead */
 }
 
+/* Pull from the live generator into the DAC FIFO until it is within
+ * `slack` samples of full, or the generator is exhausted (which clears
+ * g_txs). ONE implementation on purpose: this arithmetic was written
+ * twice and the second copy was wrong -- it passed
+ *     TXF_N - (w - r) - (w & (TXF_N-1))
+ * as the capacity, which with r = 0 is TXF_N - 2w: it double-counts the
+ * write index against the free space and reaches zero once the FIFO is
+ * half full. txs_pull then returned 0, the caller read that as "frame
+ * finished" and dropped the generator, and the board transmitted a
+ * TRUNCATED frame. It hid at EXTREME, where the first pull fills the
+ * whole FIFO and the loop breaks before the second iteration, and for
+ * frames shorter than the FIFO, where the generator really was
+ * exhausted -- so the link bootstrapped happily, climbed to a rung
+ * whose frames are longer than the FIFO but pulled in small pieces, and
+ * then stopped being decodable at all. */
+static void tx_fill(uint32_t slack)
+{
+    while (g_txs && (uint32_t)(g_txf_w - g_txf_r) + slack < TXF_N) {
+        int wi = (int)(g_txf_w & (TXF_N - 1));
+        int room = (int)(TXF_N - (g_txf_w - g_txf_r));
+        int lin = (int)TXF_N - wi;      /* contiguous, to the wrap */
+        int got;
+        if (room > lin)
+            room = lin;
+        if (room <= 0)
+            break;
+        got = txs_pull(g_txs, g_txf + wi, room);
+        if (got <= 0) {
+            g_txs = 0;                  /* generator exhausted */
+            break;
+        }
+        g_txf_w += (uint32_t)got;
+        g_tx_pulled += got;
+    }
+}
+
+static rxs_t *g_rxs[3];   /* declared here: burst_advance() needs it */
+
+/* --- streamed bursts -------------------------------------------------
+ *
+ * phy.receive_burst stays NULL, and not for want of trying: the station
+ * only ever reaches it through phy.receive(), the FRAME-AT-ONCE entry
+ * point that is handed a whole recording. This firmware never has one
+ * -- it decodes as samples arrive -- and buffering a burst would be the
+ * 912 kB problem that phy.build already refuses. The streaming receiver
+ * has its own continuation instead: after a block whose packet says
+ * more follow, rxs_continue_burst() takes the next block from the
+ * deterministic offset after this one rather than hunting for a
+ * preamble. Same arrangement demoapp uses.
+ *
+ * The continuation MUST know where to stop. While stepping through
+ * blocks the receiver is not running the preamble detector, so chasing
+ * blocks that were never sent makes it deaf for one block-time each --
+ * measured in demoapp as a ~12 s hole that ate the peer's next burst
+ * and produced an endless retransmit loop. The stop signal is the
+ * ack-request bit on the burst's last block, tested as "set AND not the
+ * first block of this stream" because the first block carries it too
+ * (for peers that cannot stream at all). A consecutive-failure bound
+ * covers the case where that last block is itself the one that did not
+ * decode. */
+static int g_burst_left[3], g_burst_miss[3];
+
+static int frame_is_streamed(const uint8_t *bits, int nbits, int *ack_req)
+{
+    lc_word_t lc;
+    uint32_t reserved = 0;
+    int i, v = 0;
+
+    if ((nbits - 36) / 8 < BURST_SUBHDR)
+        return 0;
+    for (i = 0; i < 20; i++)
+        reserved = (reserved << 1) | (bits[i] & 1);
+    lc_unpack(reserved, &lc);
+    if (lc.flags != FLAG_BURST_DATA)
+        return 0;
+    for (i = 0; i < 8; i++)
+        v = (v << 1) | (bits[20 + i] & 1);
+    if (ack_req)                      /* sub-header byte 1, bit 7 */
+        *ack_req = bits[20 + 8] & 1;
+    return (v & BURST_SUB_STREAMED) != 0;
+}
+
+/* One decoded block (or one that failed) on receiver m. Returns with
+ * g_burst_left[m] set to however many blocks are still expected. */
+static void burst_advance(int m, const rxs_event_t *ev)
+{
+    int ackreq = 0, streamed;
+
+    streamed = ev->type == 1
+               && frame_is_streamed(ev->bits, ev->pkt_bits_n, &ackreq);
+    if (streamed && g_burst_left[m] == 0) {
+        g_burst_left[m] = BURST_STREAM_MAX - 1;
+        g_burst_miss[m] = 0;
+        g_beacon.burst_starts++;
+    } else if (streamed) {
+        g_burst_miss[m] = 0;
+        g_beacon.burst_blocks++;
+        if (ackreq)
+            g_burst_left[m] = 0;      /* the last block: burst complete */
+        else
+            g_burst_left[m]--;
+    } else if (g_burst_left[m] > 0) {
+        /* a block we could not decode: keep going, so one bad block does
+         * not cost the tail -- but not forever */
+        g_beacon.burst_misses++;
+        /* what KIND of miss: a failed decode (type != 1) or a decode
+         * that did not look like a streamed block (type 1, not
+         * streamed)? The two want different fixes. */
+        g_beacon.last_miss_type = ev->type;
+        g_beacon.last_miss_bits = ev->type == 1 ? ev->pkt_bits_n : -1;
+        if (++g_burst_miss[m] >= 2)
+            g_burst_left[m] = 0;
+        else
+            g_burst_left[m]--;
+    }
+    if (g_burst_left[m] > 0
+        && !rxs_continue_burst(g_rxs[m], BURST_STREAM_RESYNC)) {
+        g_beacon.burst_refused++;   /* the decoder would not arm */
+        g_burst_left[m] = 0;
+    }
+    g_beacon.ring_miss = (uint32_t)(rxs_ring_miss(g_rxs[0])
+                                    + rxs_ring_miss(g_rxs[1])
+                                    + rxs_ring_miss(g_rxs[2]));
+}
+
 /* --- carrier sense --------------------------------------------------- */
-/* Same shape as demoapp: a 40 ms power window against a floor that drops
- * instantly and climbs slowly, plus the rebase that stops a step rise in
- * the noise floor from freezing carrier sense at BUSY (measured there at
- * 82 s of dead air after a -37 dB step). CS_REBASE_S must stay above the
- * longest frame, 38 s at EXTREME. */
+/* Same shape as demoapp -- a 40 ms power window against a floor that
+ * drops instantly and climbs slowly, plus the rebase that stops a step
+ * rise in the noise floor from freezing carrier sense at BUSY (measured
+ * there at 82 s of dead air after a -37 dB step); CS_REBASE_S must stay
+ * above the longest frame, 38 s at EXTREME.
+ *
+ * MEASURED IN THE ISR, not on the decoder's feed. demoapp accumulates
+ * over the samples it pushes into the receiver, which is the same thing
+ * there because it pushes in real time. Here it is not: a single
+ * rxs_push can block for 2.4 s while it commits a frame, so the pushed
+ * stream runs seconds behind the air. Carrier sense computed on it
+ * reports the channel as it was, not as it is -- and this station
+ * therefore keyed up in the middle of a peer's streamed burst, dropped
+ * its own capture FIFO at key-up, and lost the rest of the burst.
+ * Measured: 8 transmissions during one transfer, every streamed burst
+ * abandoned after two blocks (burst_starts 2, burst_blocks 0).
+ *
+ * The ISR keeps the ring and an int64 accumulator and publishes the
+ * mean as one 32-bit store, which the main loop can read without
+ * tearing. */
 #define BUSY_WIN 480
 #define BUSY_RATIO_SQ 9.0
 #define CS_REBASE_S 60.0
 static int16_t g_bring[BUSY_WIN];
 static int g_bpos;
-static double g_bacc, g_floor = 1e9, g_busy_since = -1.0;
+static int64_t g_bacc;
+static volatile uint32_t g_cs_mean;      /* published by the ISR */
+static double g_floor = 1e9, g_busy_since = -1.0;
 
-static void note_busy(const int16_t *s, int n)
+/* called from the 12 kHz tick, one live sample at a time */
+static inline void note_busy_isr(int16_t v)
 {
-    int i;
-    for (i = 0; i < n; i++) {
-        int16_t old = g_bring[g_bpos];
-        g_bring[g_bpos] = s[i];
-        g_bacc += (double)s[i] * s[i] - (double)old * old;
-        g_bpos = (g_bpos + 1) % BUSY_WIN;
-    }
+    int16_t old = g_bring[g_bpos];
+    g_bacc += (int64_t)v * v - (int64_t)old * old;
+    g_bring[g_bpos] = v;
+    if (++g_bpos >= BUSY_WIN)
+        g_bpos = 0;
+    g_cs_mean = (uint32_t)(g_bacc / BUSY_WIN);
 }
 
 static int channel_busy(double now)
 {
-    double p = g_bacc / BUSY_WIN;
+    double p = (double)g_cs_mean;
     int busy;
     if (p < g_floor)
         g_floor = p;
@@ -383,7 +529,6 @@ static int channel_busy(double now)
  * stops being evidence of anything. Above the ladder's own staleness
  * decay, so the request has already fallen back to EXTREME by then. */
 #define RX_MODE_STALE_S 120.0
-static rxs_t *g_rxs[3];
 
 /* Listen where the peer is actually going to transmit.
  *
@@ -423,6 +568,14 @@ static void follow_rung(double now)
     want |= 1 << (int)ladder_mode(req);
     if (g_last_rx_mode >= 0 && now - g_last_rx_t < RX_MODE_STALE_S)
         want |= 1 << g_last_rx_mode;
+    /* A receiver walking a burst is not running the preamble detector,
+     * and muting rearms the search -- so muting one mid-burst would
+     * throw away the rest of the transfer. Hold it until the walk
+     * ends, which it always does (ack-request bit, or the
+     * consecutive-failure bound). */
+    for (i = 0; i < 3; i++)
+        if (g_burst_left[i] > 0)
+            want |= 1 << i;
 
     if ((uint32_t)want != g_beacon.rx_active_mask)
         g_beacon.follow_changes++;
@@ -482,12 +635,70 @@ int main(void)
     phy.build = phy_build;
     phy.receive = phy_recv_unused;
     phy.build_burst = phy_build_burst;
-    /* receive_burst stays NULL: the station then uses per-frame bursts,
-     * which is also where it falls back to when a stream stops
-     * delivering, so this is a supported configuration rather than a
-     * hole. Streamed reception needs rxs_continue_burst driven from the
-     * link layer's marker, as demoapp does. */
+    /* receive_burst stays NULL BY DESIGN, not for want of an
+     * implementation: the station only reaches it from phy.receive(),
+     * the frame-at-once path that is handed a whole recording, and this
+     * firmware never has one. Streamed reception is done where it
+     * belongs for a streaming receiver -- burst_advance() above. */
     station_init(&g_st, &phy, 0x5EEDu);
+    /* Streamed windows need BOTH of these, and setting only the second
+     * gets you nothing: burst ARQ itself is gated on burst_window >= 2
+     * (station.c), and a station left at the default runs legacy
+     * stop-and-wait, so burst_stream never comes into play. Measured
+     * with burst_stream alone: a 6-part file crossed the wire correctly
+     * in 68 per-frame transmissions with burst_starts still 0.
+     *
+     * The host can still turn streaming off with UP_CFG_BURST_STREAM or
+     * resize the window with UP_CFG_BURST_WINDOW, and the station falls
+     * back by itself if a peer turns out not to follow a stream
+     * (ST_SOFF_NOACK). */
+    /* Both of these stay at the station's defaults -- stop-and-wait, no
+     * streaming -- and that is a MEASURED choice, not an oversight.
+     *
+     * Selective-repeat windows with a bitmap ack: ON. Streaming a whole
+     * window behind ONE preamble: OFF, and measured rather than
+     * assumed. The transmit half works -- BURST_STREAM reports 8 blocks
+     * in one 116448-sample transmission and tx_short confirms every
+     * promised sample reached the DAC -- and the receiver detects the
+     * stream marker and arms the continuation (burst_starts 2,
+     * burst_refused 0). But every continued block then fails to decode
+     * (burst_blocks 0, all misses type -3), with the samples present
+     * (ring_miss 0) and no capture overrun. Ruled out by measurement:
+     * truncated transmit, ring overwrite, arming refusal, the resync
+     * step-over (identical with BURST_STREAM_RESYNC 0), and the rung
+     * floor (the stream ran at rung 6, NORMAL, above BURST_MIN_RUNG).
+     *
+     * The one thing this stand has that demoapp does not is two
+     * INDEPENDENT sample clocks, and rxs_continue_burst says in its own
+     * comment that it does not re-lock on the resync ZC, being "benign
+     * ... because an open-loop NORMAL stream was measured to hold far
+     * longer than any burst lasts" -- measured where both ends share
+     * one clock. That is consistent with what is seen but is NOT
+     * demonstrated here, so it is written down as the open question,
+     * not as the answer.
+     *
+     * Left off because the cost is real: the station spends two windows
+     * failing, takes the timeouts, and drags the rung down before
+     * ST_SOFF_TIMEOUT puts it back on per-frame bursts -- which deliver
+     * the file byte-exact. `config burst_stream 1` from the console
+     * turns it on for further work.
+     *
+     * The WINDOW went back to the default for a separate and more
+     * serious reason. burst_window = 8 works while the rung holds, and
+     * acked 8 of 11 fragments in one bitmap. But frag_size is fixed at
+     * engage and uniform for the whole transfer, so when the rung
+     * collapses mid-transfer the station keeps sending fragments sized
+     * for the rung it engaged at: measured, one transmission of
+     * 2693120 samples -- 224 SECONDS of air -- after a window engaged
+     * at rung 12 and the link fell back to EXTREME. Nothing recovers
+     * from that inside a transfer: the peer cannot reply for four
+     * minutes, timers expire, and the transfer stalls having delivered
+     * one part. Without the window the same file crossed byte-exact.
+     *
+     * So the shipped default is the configuration that was measured to
+     * work end to end, and `config burst_window 8` / `config
+     * burst_stream 1` are there for the work that follows. */
+    g_st.burst_stream = 0;
     usb_modem_init(&g_modem, &g_st, UID, 0x0200,
                    UP_CAP_LDPC | UP_CAP_EXT_FRAMES);
     g_st.diag_cb = usb_modem_diag;
@@ -514,28 +725,22 @@ int main(void)
 
         /* ---- transmit: keep the DAC FIFO fed ---- */
         if (g_txs) {
-            while ((uint32_t)(g_txf_w - g_txf_r) < TXF_N - 256) {
-                int room = (int)(TXF_N - (g_txf_w - g_txf_r));
-                int wi = (int)(g_txf_w & (TXF_N - 1));
-                int lin = (int)TXF_N - wi;      /* to the wrap only */
-                int got;
-                if (room > lin)
-                    room = lin;
-                if (room <= 0)
-                    break;
-                got = txs_pull(g_txs, g_txf + wi, room);
-                if (got <= 0) {
-                    g_txs = 0;                  /* generator exhausted */
-                    break;
-                }
-                g_txf_w += (uint32_t)got;
-                g_tx_pulled += got;
-            }
+            tx_fill(256);
             if (txs_faulted())
                 g_beacon.tx_faults++;
         }
         if (g_tx_on && !g_txs && g_txf_r == g_txf_w) {
-            /* every generated sample has left the DAC */
+            /* every generated sample has left the DAC.
+             *
+             * phy.build reported g_tx_total to the station WITHOUT
+             * rendering it, so nothing else would notice if the
+             * generator then produced a different number of samples --
+             * the station would believe it transmitted a frame the air
+             * never carried. Check it here, where both numbers exist. */
+            g_beacon.tx_last_pulled = (uint32_t)g_tx_pulled;
+            g_beacon.tx_last_total = (uint32_t)g_tx_total;
+            if (g_tx_pulled != g_tx_total)
+                g_beacon.tx_short++;
             g_tx_on = 0;
             g_cap_r = g_cap_w;            /* drop what leaked in */
             station_on_tx_end(&g_st, t);
@@ -558,11 +763,14 @@ int main(void)
                 uint32_t t0 = g_ms, dt;
                 g_cap_r += (uint32_t)m;
                 g_beacon.rx_samples += (uint32_t)m;
-                note_busy(chunk, m);
                 for (i = 0; i < 3; i++) {
                     rxs_event_t ev;
                     if (!g_rxs[i] || !rxs_push(g_rxs[i], chunk, m, &ev))
                         continue;
+                    /* every event, decoded or not, moves the burst
+                     * walk on: a failed block must still be counted or
+                     * the receiver steps out of phase with the sender */
+                    burst_advance(i, &ev);
                     if (ev.type != 1)
                         continue;
                     g_beacon.rx_decodes++;
@@ -598,19 +806,8 @@ int main(void)
                      * frames, ~55 per frame, i.e. once per transmission
                      * rather than a throughput problem. Each underrun
                      * puts a mid-rail sample on the air. */
-                    int pre;
                     g_txf_r = g_txf_w = 0;
-                    while ((pre = txs_pull(g_txs, g_txf + (g_txf_w & (TXF_N - 1)),
-                                           (int)(TXF_N - (g_txf_w - g_txf_r)
-                                                 - (g_txf_w & (TXF_N - 1)))))
-                           > 0) {
-                        g_txf_w += (uint32_t)pre;
-                        g_tx_pulled += pre;
-                        if ((uint32_t)(g_txf_w - g_txf_r) >= TXF_N - 64)
-                            break;
-                    }
-                    if (pre <= 0)
-                        g_txs = 0;          /* whole frame already pulled */
+                    tx_fill(0);
                     /* build() opened the generator; start the carrier.
                      * Drop what was captured before now: those samples
                      * pre-date the transmission, and feeding them after

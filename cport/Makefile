@@ -336,6 +336,8 @@ USBFLASH_SRC = target/startup_flash.c usb/usb_flash_main.c \
 # bit2 EXTREME. Each open receiver detects over every sample, so this
 # is a CPU budget -- 7 does not fit real time on this part.
 RXMODES ?= 7
+# ZC resync period inside a streamed burst, in blocks. 0 = open loop.
+RESYNC ?= 4
 
 USBRADIO_SRC = $(subst usb/usb_flash_main.c,usb/usb_radio_main.c,$(USBFLASH_SRC)) \
                src/rx_stream.c src/rx_detect.c src/rx_demod.c
@@ -343,7 +345,7 @@ USBRADIO_SRC = $(subst usb/usb_flash_main.c,usb/usb_radio_main.c,$(USBFLASH_SRC)
 radiofw: $(GEN) | $(BUILD)
 	$(FLASHCC) $(FLASHFLAGS) -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
 	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx -DMAX_LLRS=1024 \
-	    -DOFDM_RX_MODES=$(RXMODES) \
+	    -DOFDM_RX_MODES=$(RXMODES) -DBURST_STREAM_RESYNC=$(RESYNC) \
 	    $(USBRADIO_SRC) -lm -o $(BUILD)/usb_radio.elf
 	@$(QEMUSIZE) $(BUILD)/usb_radio.elf
 

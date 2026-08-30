@@ -304,6 +304,53 @@ Cross-module invariants that are easy to break:
   detection, which is where the cost is. Unmuting rearms the search
   rather than resuming a state machine that was mid-frame when it went
   quiet.
+- `phy.build` reporting a length it never renders means NOTHING else
+  would notice if the generator then produced a different number of
+  samples -- the station would believe it transmitted a frame the air
+  never carried. `usb_radio_main.c` checks `g_tx_pulled` against
+  `g_tx_total` at key-down (`tx_short`). Worth the check: the FIFO
+  capacity arithmetic was written twice and the second copy passed
+  `TXF_N - (w - r) - (w & (TXF_N-1))`, which with r = 0 is `TXF_N - 2w`
+  -- it double-counts the write index against the free space and reaches
+  zero once the FIFO is half full. `txs_pull` then returned 0, the
+  caller read that as "frame finished", and the board transmitted a
+  TRUNCATED frame. It hid at EXTREME (the first pull fills the whole
+  FIFO) and for frames shorter than the FIFO, so the link bootstrapped,
+  climbed to a rung whose frames are longer than the FIFO but pulled in
+  pieces, and then stopped being decodable. One `tx_fill()` now.
+- Carrier sense must be measured on LIVE samples, not on whatever the
+  decoder has caught up to. demoapp accumulates over the samples it
+  pushes into the receiver, which is the same thing there because it
+  pushes in real time; on the part a single `rxs_push` can block for
+  2.4 s, so the pushed stream runs seconds behind the air and energy
+  detection reports the channel as it WAS. `usb_radio_main.c`
+  accumulates in the 12 kHz tick and publishes the mean as one 32-bit
+  store.
+- `burst_window >= 2` is what engages burst ARQ at all (`station.c`);
+  `burst_stream` alone does nothing, and a station left at the default
+  runs legacy stop-and-wait. Both are OFF on the board by measurement:
+  `frag_size` is fixed at engage and uniform for the transfer, so a rung
+  collapse mid-transfer keeps sending fragments sized for the rung it
+  engaged at -- measured, ONE transmission of 2693120 samples (224 s of
+  air) after engaging at rung 12 and falling back to EXTREME, which
+  stalls the transfer having delivered one part. With the defaults the
+  same file crosses byte-exact in ~2 minutes.
+- Streamed burst RECEPTION is implemented on the board (`burst_advance`
+  driving `rxs_continue_burst`, since `phy.receive_burst` is only
+  reachable from the frame-at-once `phy.receive` that a streaming
+  receiver never calls) but does NOT yet decode across two boards. The
+  transmit half is confirmed good (8 blocks in one 116448-sample
+  transmission, `tx_short` 0), the receiver detects the stream marker
+  and arms (`burst_starts` 2, `burst_refused` 0), and then every
+  continued block fails data CRC (`burst_blocks` 0, misses type -3) with
+  the samples present (`ring_miss` 0). Ruled out by measurement:
+  truncated transmit, ring overwrite, arming refusal, the resync
+  step-over (identical with `BURST_STREAM_RESYNC` 0) and the rung floor
+  (it ran at rung 6, NORMAL, above `BURST_MIN_RUNG`). Blocks after the
+  first carry no header, so type -3 means "did not decode", not "header
+  fine". The untested difference from demoapp is two INDEPENDENT sample
+  clocks against a continuation that `rxs_continue_burst` documents as
+  not re-locking -- consistent, but not demonstrated. Open question.
 - Which modes are active follows the NEGOTIATED rung (`follow_rung`),
   and two extras are kept alongside `ladder_mode(ctl.my_req)` for
   reasons that are not optional. EXTREME always: it is rung 0 (the

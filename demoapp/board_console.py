@@ -59,6 +59,15 @@ FILE_TAG = b"FILE:"
 FILE_MAX_SRC = 1 << 19          # same cap app.c uses
 
 QOS_CONTROL, QOS_INTERACTIVE, QOS_BULK = 0, 1, 2
+
+# station.h's diagnostic events, in order. The station reports its own
+# decisions here -- which is far quicker than inferring them from
+# counters when a transfer misbehaves.
+DIAG = ["TX", "RX", "TIMEOUT", "RUNG", "BURST_ENGAGE", "BURST_FRAG",
+        "BURST_ACKTX", "BURST_ACKRX", "BURST_PROBE", "BURST_DONE",
+        "BURST_STREAM", "BURST_SRX", "BURST_SOFF", "RTO", "BURST_WIN"]
+SOFF = {1: "BUILD (the PHY refused)", 2: "NOACK (peer did not follow)",
+        3: "TIMEOUT (windows kept timing out)"}
 QOS_NAME = {0: "ctl", 1: "inter", 2: "bulk"}
 
 BOARD_MSG_MAX = 256             # cport ST_MSG_MAX default
@@ -188,6 +197,14 @@ class Console:
             ratio = f", {total / on_air:.2f}x" if on_air and total else ""
             self.say(f"<< file complete: {path} ({total} bytes,"
                      f" {on_air} on air{ratio})")
+
+    def on_diag(self, d):
+        name = DIAG[d["ev"]] if d["ev"] < len(DIAG) else f"ev{d['ev']}"
+        extra = ""
+        if name == "BURST_SOFF":
+            extra = "  <- " + SOFF.get(d["a"], str(d["a"]))
+        self.say(f"diag {name} a={d['a']} b={d['b']} c={d['c']} d={d['d']}"
+                 + extra)
 
     def on_log(self, text):
         if "refused" in text:
@@ -329,13 +346,22 @@ class Console:
             self.cmd_sendfile(rest)
         elif cmd == "bulk" and rest.isdigit():
             self.cmd_bulk(int(rest))
+        elif cmd == "config" and rest:
+            k, _, v = rest.partition(" ")
+            try:
+                self.m.config(k, int(v))
+                self.plain(f">> config {k} = {int(v)}")
+            except (KeyError, ValueError) as e:            # noqa: BLE001
+                self.plain(f"config: {e}  (keys: rung_ceiling, burst_window,"
+                           " burst_stream, freq_trim_mhz, audio_tap, anchor,"
+                           " diag_stream)")
         elif cmd == "status":
             self.cmd_status()
         elif cmd == "stats":
             self.cmd_stats()
         elif cmd == "help":
             self.plain("send <text> | sendfile <path> | bulk <n> | "
-                       "status | stats | quit")
+                       "config <key> <val> | status | stats | quit")
         else:
             self.plain(f"unknown command '{line}' -- try help")
         return True
@@ -399,6 +425,8 @@ def main():
                         con.on_status(payload)
                     elif kind == "log":
                         con.on_log(payload)
+                    elif kind == "diag" and payload:
+                        con.on_diag(payload)
                 if select.select([sys.stdin], [], [], 0)[0]:
                     line = sys.stdin.readline()
                     if not line:
