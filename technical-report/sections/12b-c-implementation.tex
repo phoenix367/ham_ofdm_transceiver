@@ -1256,6 +1256,134 @@ beacon parser is a checked-in tool
 beside the append-only beacon struct, and the triage ladder itself is
 recorded where the next investigation will find it.
 
+\subsection{Hardening: the Stress Campaign and a DC-Blind Front End}
+\label{sec:cport_harden}
+
+With streamed bursts working, an 8\,kB incompressible transfer --- 35
+console parts, the largest the boards had attempted --- was put through
+the link as a stress test, and sustained load surfaced what a
+six-part file never could. Three more failures fell out, each again
+convicted by measurement, and the campaign ended in a change of
+philosophy rather than another patch: the receiver's front end is now
+DC-blind by construction, and its reliability is enforced by a test
+gate instead of by luck.
+
+\paragraph{Frames longer than every carrier-sense time constant.}
+Fragment size is fixed when a burst transfer engages, so a transfer
+engaged at rung~10 with 203-byte fragments that collapsed to rung~0
+sent \emph{224-second} EXTREME frames. Carrier sense cannot survive
+that: the noise floor's climb crosses the busy threshold after about
+176\,s of continuous signal, and the rebase re-baselines at 300\,s ---
+either way the peer eventually declares the channel idle and keys over
+the frame, which times it out, keeps the rung at zero, and makes the
+next frame another 224 seconds. A death spiral with both boards
+perfectly healthy. The fix is structural: \texttt{poll\_tx} now
+\emph{disengages} a burst whose next fragment would exceed 45\,s of air
+at the rung the link actually has (diagnostic \texttt{BURST\_REFRAG});
+the message falls to the legacy path, whose payloads are air-time
+capped, and the burst re-engages with honestly sized fragments when the
+ladder recovers. Streams get the same refusal, and the rebase window
+rose to 300\,s --- above the worst frame the station can now emit, not
+above demoapp's.
+
+\paragraph{The boot latch.} Gating only the carrier-sense \emph{feed}
+for ADC warm-up left the measured mean at zero, and the busy check ---
+called every millisecond from boot --- read that zero and snapped the
+noise floor to its clamp; a genuinely quiet wire then read ``busy''
+forever. The evidence was exact to the millisecond: both boards' first
+key-ups ever landed at \texttt{ms=300031} and \texttt{ms=300029} ---
+the rebase window precisely, and a collision, two stations going
+deaf-mute together at boot. The warm-up gate now covers the consumer
+too.
+
+\paragraph{The wire that was never broken.} The campaign's longest
+detour was a diagnosis this report must retract as instructively as it
+was made. The raw capture ring showed one board's ADC flatlined at a
+constant 0.81\,V --- and the obvious call, a failed breadboard contact,
+fit every symptom: levels that wandered between reads, a link that
+healed mid-run and relapsed, a power cycle that ``fixed'' it. The wire
+was innocent. The tick only writes the DAC \emph{while transmitting},
+so at the end of every frame the pin held the frame's \emph{last
+sample} --- anywhere within $\pm$0.9\,V --- until the next
+transmission. Decoding never noticed, because the demodulator is
+DC-blind (bin~0 is unused); carrier sense reads mean \emph{square}, and
+a DAC parked 0.83\,V off mid-rail put a constant $2.7\times10^8$ on the
+peer's carrier sense, at a level that changed with every frame's final
+sample. One line parks the DAC at mid-rail at transmit end --- and the
+8\,kB transfer promptly completed, byte-exact, in 255\,s.
+
+\paragraph{The lesson, made structural.} A receiver that any input
+operating point can break is a lab demo, not a receiver. Two changes
+make the property hold by construction rather than by bug-fix
+(Figure~\ref{fig:rxfrontend}):
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{images/rx_frontend.png}
+    \caption{The DC-blind front end. One integer high-pass at the input
+             makes every consumer indifferent to the analog operating
+             point; carrier sense --- where every field failure of the
+             campaign lived --- is a shared module with a host scenario
+             suite.}
+    \label{fig:rxfrontend}
+\end{figure}
+
+First, every ADC sample passes a one-pole IIR high-pass
+(\texttt{dcblock.h}: a leaky-integrator DC tracker subtracted from the
+input, integer-only, two adds and two shifts per sample) \emph{before}
+the capture FIFO and carrier sense. The corner sits at 7.5\,Hz, two
+decades under the band: measured, the filter costs $-0.02$\,dB at
+300\,Hz, absorbs a $+12\,000$-LSB DC step in 117\,ms, and leaves zero
+residual on the measured park level after one second. Whatever DC the
+analog side carries --- a parked peer, the bias network that
+AC-coupling capacitors would need, a ground offset between boards ---
+is now a non-event, which also clears the way for the capacitor
+hardware option.
+
+Second, carrier sense moved out of the firmware into a shared module
+(\texttt{csense.c}) precisely so it could be \emph{tested}, and
+\texttt{make robust} is the resulting reliability gate. Its decode half
+drives the burst harness through an input-abuse matrix --- static DC to
+$\pm$18\,000 LSB, DC steps, $2.5\times$ clipping, 50\,Hz hum, impulse
+clicks, stuck-converter dropouts, all at once, at 5\,ppm of clock
+offset --- and its verdict reframes the campaign: \emph{the
+demodulator passes the entire matrix even without the blocker.} Every
+field failure lived in carrier sense. So carrier sense gets the
+scenario half: boot into a quiet wire must read idle within 5\,s (the
+latch), the parked DC must read idle through the blocker and
+demonstrably latches bare (why the blocker is not optional), a 45-second
+frame --- the new maximum --- must hold busy end to end, frame/gap
+cycles must track, and a DC step may cost at most a 2-second transient.
+Seven scenarios, each a replay of a measured failure; the gate fails on
+every bug this campaign found, had it existed a day earlier.
+
+\begin{table}[H]
+    \centering
+    \caption{The stress campaign, by the numbers. All figures measured
+             on the boards or by the host gate.}
+    \label{tab:harden}
+    \small
+    \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Quantity} & \textbf{Measured} & \textbf{Note} \\
+    \midrule
+    8\,kB transfer, final firmware & \textbf{241\,s, byte-exact} & 35
+        parts, 36 bitmap acks, 5 timeouts \\
+    Same, before the DC blocker & 255\,s & 8 timeouts \\
+    Worst pre-fix frame & 224\,s of air & 203-byte frag at rung 0 \\
+    Floor climb crosses busy & $\approx$176\,s & why frames are capped
+        at 45\,s \\
+    Boot-latch key-ups & \texttt{ms} 300031 / 300029 & the rebase
+        window, both boards \\
+    DC blocker passband & $-0.02$\,dB at 300\,Hz & corner 7.5\,Hz \\
+    DC step absorption & 117\,ms & $+12\,000$ LSB \\
+    Abuse matrix, demodulator bare & \textbf{8/8 blocks, all rows} &
+        DC $\pm$18k, clip, hum, clicks, dropouts \\
+    CS scenario suite & 7/7 & each a measured field failure \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}
 

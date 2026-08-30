@@ -74,6 +74,12 @@
 \setlength{\emergencystretch}{4em}
 
 % -----------------------------------------------------------------------
+% two-digit subsection numbers (12.10) overflow article's default
+% 2.3em TOC number box and run into the title -- widen it
+\makeatletter
+\renewcommand*\l@subsection{\@dottedtocline{2}{1.5em}{3.2em}}
+\makeatother
+
 \begin{document}
 
 % -----------------------------------------------------------------------

@@ -1,0 +1,20 @@
+flowchart LR
+    ADC["ADC1 &mdash; PA6<br/>12 kHz tick<br/>whatever DC the<br/>analog side carries"]
+    DCB["<b>dcblock.h</b><br/>one-pole IIR high-pass<br/>corner 7.5 Hz, integer-only<br/>2 adds + 2 shifts / sample<br/><br/>&minus;0.02 dB at 300 Hz<br/>+12000 DC step: 117 ms<br/>park &minus;16577: 0 residual"]
+    FIFO["capture FIFO<br/>65536 samples"]
+    RXS["<b>rxs_push</b> &times; 3<br/>demodulator<br/><i>passes the full abuse<br/>matrix even bare &mdash;<br/>bin 0 unused</i>"]
+    CS["<b>csense.c</b><br/>floor / busy / rebase<br/>scenario-tested on host<br/><i>where every field<br/>failure lived</i>"]
+    POLL["station_poll_tx<br/>busy gate"]
+
+    ADC --> DCB
+    DCB --> FIFO
+    FIFO --> RXS
+    DCB --> CS
+    CS --> POLL
+
+    classDef hw fill:#fff4e6,stroke:#d98b30
+    classDef fw fill:#e8f4ff,stroke:#3b7dd8
+    classDef hero fill:#eef7ee,stroke:#4a8a4a
+    class ADC hw
+    class FIFO,RXS,POLL fw
+    class DCB,CS hero
