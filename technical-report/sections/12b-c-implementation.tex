@@ -1708,6 +1708,64 @@ instead of 13, zero retransmissions, and the same 780-second
 transfer time --- the allowance only lengthens waits for acks that are
 late anyway.
 
+\subsubsection*{Two more levers, and which one mattered}
+
+The 13-minute transfer still ran at 66\% of the rung-12 channel rate,
+and the per-part rhythm said where the rest was: each 2\,kB part went
+out as \emph{three} acknowledgment cycles --- a window of eight, a
+window of two, and a lone tail fragment. Two levers were measured
+separately, on the same file and the same wire:
+
+\begin{center}
+\begin{tabular}{lccl}
+\hline
+ & time & rate & shape \\
+\hline
+baseline: 2\,kB parts, window 8 & 780\,s & 87\,B/s & 3 acks per part \\
+window-aligned 1600\,B parts & 669\,s & 102\,B/s & 1 ack per part \\
+window 16, parts \emph{not} re-aligned & 695\,s & 98\,B/s & tail penalty \\
+aligned 3.2\,kB parts, window 16 & \textbf{596\,s} & \textbf{114\,B/s} & 1 ack per part \\
+\hline
+\end{tabular}
+\end{center}
+
+The first lever costs nothing: one console part is one station
+message, so splitting parts at $\mathtt{win\_max} \times 200$ minus
+the envelope head --- the peer's declared window, from the handshake
+--- makes every message an exact multiple of the fragment and every
+part exactly one acknowledgment. The third row is why this matters
+more than window size, and it is the row worth remembering: a
+\emph{bigger} window measured \emph{slower}, because the streamer
+refuses short tails inside windows (deliberately --- a stream is
+uniform blocks), so a misaligned part paid a whole extra ack cycle for
+its 27-byte tail. Alignment first, capacity second.
+
+The second lever buys the remainder with RAM nobody was using.
+\texttt{BURST\_STREAM\_MAX} rose to 16 (a 25.3\,s window, still
+under the 30\,s single-acknowledgment exposure cap) and messages to
+3328 bytes --- and the memory to pay for it came from SRAM4, the one
+region every earlier budget had left untouched. Its placement logic
+inverts the usual instinct: SRAM4 sits in the D3 domain behind two bus
+bridges, the \emph{slowest} RAM on the part, which makes it exactly
+right for the station struct ($\sim$58\,kB with the larger pool) ---
+touched at frame cadence from the main loop and never from the ISR.
+Opening it took a linker region, a zero loop in startup (no RCC gate
+exists for CPU access), and hoisting the 16-block stream buffer to
+file scope so the linker could park its 33\,kB in D2 by name. After
+the move: DTCM 56 of 128\,kB, AXI 496 of 512, D2 293 of 295, SRAM4 58
+of 64 --- and ITCM's 64\,kB still the untouched reserve.
+
+The final configuration moves the 68\,kB file in 9.9 minutes at
+87\% of the raw channel rate, byte-exact, with three timeouts across
+the hundred-odd windows of the measurement campaign and zero
+retransmissions; what remains above the wire rate is preambles,
+turnaround and carrier-sense gaps. One operational note carried into
+the documentation: the \emph{first} bulk transfer to a stranger still
+splits conservatively at window 8, because the handshake is triggered
+by that very transfer --- its record arrives too late to size it. A
+small bulk item sent first primes the record when the difference
+matters.
+
 \subsection{Demonstration Infrastructure}
 \label{sec:cport_demo}
 
