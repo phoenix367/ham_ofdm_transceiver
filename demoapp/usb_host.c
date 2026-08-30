@@ -1,6 +1,8 @@
+#define _POSIX_C_SOURCE 200809L /* nanosleep */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <libusb-1.0/libusb.h>
 
 #include "usb_host.h"
@@ -20,12 +22,27 @@ struct usbh {
 static int get_serial(libusb_device_handle *h, char *out, int cap)
 {
     struct libusb_device_descriptor d;
+    int tries;
     if (libusb_get_device_descriptor(libusb_get_device(h), &d) != 0
         || d.iSerialNumber == 0)
         return -1;
-    return libusb_get_string_descriptor_ascii(h, d.iSerialNumber,
-                                              (unsigned char *)out, cap)
-               > 0 ? 0 : -1;
+    /* The string read is a control transfer (langid fetch + the
+     * descriptor) and transiently fails when the device is mid-traffic
+     * or freshly enumerated -- measured as an intermittent
+     * "<unreadable>" in --list while the peer console was streaming.
+     * The serial is factory-constant, so a retry costs nothing and
+     * cannot return a stale answer. */
+    for (tries = 0; tries < 4; tries++) {
+        if (libusb_get_string_descriptor_ascii(h, d.iSerialNumber,
+                                               (unsigned char *)out,
+                                               cap) > 0)
+            return 0;
+        {
+            struct timespec ts = { 0, 50 * 1000 * 1000 };
+            nanosleep(&ts, 0);
+        }
+    }
+    return -1;
 }
 
 int usbh_list(void)
@@ -50,6 +67,8 @@ int usbh_list(void)
         if (libusb_open(list[i], &h) == 0) {
             get_serial(h, ser, sizeof(ser));
             libusb_close(h);
+        } else {
+            snprintf(ser, sizeof(ser), "<open failed -- udev rule?>");
         }
         printf("  bus %03d dev %03d  serial %s\n",
                libusb_get_bus_number(list[i]),
