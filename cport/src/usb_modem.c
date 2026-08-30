@@ -74,6 +74,22 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
         if (len >= 5) {
             int32_t v = get_i32(p + 1);
             switch (p[0]) {
+            case UP_CFG_RUNG_CEILING:
+                /* documented since the first protocol rev, implemented
+                 * now: the fastest rung we transmit at or ask for */
+                if (v < 0) v = 0;
+                if (v > ladder_n() - 1) v = ladder_n() - 1;
+                m->st->my_max_rung = (int)v;
+                if (m->st->peer.valid)
+                    m->st->caps_reply_due = 1;  /* push the new record */
+                break;
+            case UP_CFG_WIN_MAX:
+                if (v < 1) v = 1;
+                if (v > BURST_STREAM_MAX) v = BURST_STREAM_MAX;
+                m->st->my_win_max = (int)v;
+                if (m->st->peer.valid)
+                    m->st->caps_reply_due = 1;
+                break;
             case UP_CFG_BURST_WINDOW: m->st->burst_window = (int)v; break;
             case UP_CFG_BURST_STREAM: m->st->burst_stream = v ? 1 : 0; break;
             case UP_CFG_FREQ_TRIM_MHZ:
@@ -181,6 +197,9 @@ void usb_modem_tick(usb_modem_t *m, double now, int status)
         s.peer_caps = (uint8_t)m->st->peer.flags;
         s.peer_msg_max = (uint16_t)m->st->peer.msg_max;
         s.peer_win_max = (uint8_t)m->st->peer.win_max;
+        s.peer_max_rung1 = (uint8_t)(m->st->peer.valid
+                                     && m->st->peer.max_rung >= 0
+                                         ? m->st->peer.max_rung + 1 : 0);
         n = up_encode_status(&s, out, (int)sizeof(out));
         if (n > 0)
             txq_push(m, out, n);

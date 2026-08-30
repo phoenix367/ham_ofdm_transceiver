@@ -72,7 +72,8 @@
  * apply -- the fallback property streaming already relied on. */
 #define FLAG_CAPS (FLAG_NO_DATA | FLAG_LAST_FRAGMENT | FLAG_PRIO_STREAM) /* 7 */
 #define CAPS_VER 1
-#define CAPS_LEN 10          /* ver flags msg_max(2) win pool fw(2) frags rsv */
+#define CAPS_LEN 10          /* ver flags msg_max(2) win pool fw(2) frags
+                              * max_rung+1 (0 = unspecified: older record) */
 #define CAP_STREAM (1 << 0)  /* can follow streamed burst windows */
 #define CAP_EXT    (1 << 1)  /* EXT_DATA frames (255-byte payloads) */
 #define CAP_LDPC   (1 << 2)
@@ -87,6 +88,7 @@ typedef struct {
     int valid;      /* a record has been received */
     int legacy;     /* probes went unanswered: assume nothing */
     int flags, msg_max, win_max, pool_slots, fw_ver, max_frags;
+    int max_rung;   /* fastest rung the peer accepts; -1 = unspecified */
     double t;       /* when the record arrived */
 } st_caps_t;
 
@@ -246,6 +248,13 @@ typedef struct {
     /* capability handshake (see FLAG_CAPS) */
     st_caps_t peer;        /* what the peer declared */
     int my_caps;           /* what we declare (CAP_*, set by the caller) */
+    /* operator knobs, declared in the record and enforced locally:
+     * my_win_max caps the streamed window we ASK a peer to follow (and
+     * the one we send); my_max_rung is the fastest rung we transmit at
+     * or request -- the UP_CFG_RUNG_CEILING key, which was documented
+     * for a year and implemented nowhere */
+    int my_win_max;        /* 1..BURST_STREAM_MAX */
+    int my_max_rung;       /* 0..ladder_n()-1 */
     int caps_reply_due;    /* leg 2 owed */
     int caps_sent;         /* our record has gone out at least once */
     int caps_confirmed;    /* the peer acked the frame that carried it */

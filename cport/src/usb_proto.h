@@ -92,7 +92,11 @@ enum {
     UP_CFG_FREQ_TRIM_MHZ= 4, /* millihertz, signed */
     UP_CFG_AUDIO_TAP    = 5, /* 0 = off, else decimation factor */
     UP_CFG_ANCHOR       = 6, /* 0/1, AFC frequency reference */
-    UP_CFG_DIAG_STREAM  = 7  /* 0/1, default OFF -- see usb_modem.c */
+    UP_CFG_DIAG_STREAM  = 7, /* 0/1, default OFF -- see usb_modem.c */
+    UP_CFG_WIN_MAX      = 8  /* streamed-window ceiling we accept AND
+                              * send (1..BURST_STREAM_MAX); declared to
+                              * the peer in the capability record, as
+                              * RUNG_CEILING now also is */
 };
 
 /* --- payload layouts, all little-endian, all fixed size ------------- */
@@ -129,6 +133,8 @@ typedef struct {
     uint8_t  peer_state, peer_caps;
     uint16_t peer_msg_max;
     uint8_t  peer_win_max;
+    uint8_t  peer_max_rung1; /* peer's declared rung ceiling + 1; 0 =
+                              * unspecified (an older record) */
 } up_status_t;
 
 /* --- encoding ------------------------------------------------------- */

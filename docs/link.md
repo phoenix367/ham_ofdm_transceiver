@@ -134,7 +134,14 @@ the record decides:
 - **the window is capped by the peer's `win_max`** at engage;
 - **the message size is the peer's**: the boards report their own
   `ST_MSG_MAX` in the USB INFO reply and the peer's in STATUS, and the
-  consoles split files against the smaller.
+  consoles split files against the smaller;
+- **two operator knobs travel in the record**: `config win_max` (the
+  streamed-window ceiling this station accepts and sends) and
+  `config rung_ceiling` (the fastest rung it transmits at or asks
+  for). Both are enforced at every rung decision and at window engage,
+  against our own setting and against whatever the peer declared — and
+  changing either while the peer is known pushes a refreshed record
+  immediately.
 
 An unanswered probe is *forgiven* by the rate controller — silence
 from an older firmware is a fact about the peer, not the channel — and

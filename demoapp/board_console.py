@@ -429,8 +429,10 @@ class Console:
                    f"  (board holds {BOARD_QUEUE} per queue)")
         ps = st.get("peer_state", 0)
         if ps >= 2:
+            mr = st.get("peer_max_rung1", 0)
             self.plain(f"peer: {CAPS_NAMES(st['peer_caps'])}messages up to "
-                       f"{st['peer_msg_max']} B, window {st['peer_win_max']}"
+                       f"{st['peer_msg_max']} B, window {st['peer_win_max']},"
+                       f" rung ceiling {mr - 1 if mr else 'unspecified'}"
                        + (" (handshake complete)" if ps == 3
                           else " (awaiting our confirmation)"))
         else:
@@ -475,7 +477,7 @@ class Console:
             except (KeyError, ValueError) as e:            # noqa: BLE001
                 self.plain(f"config: {e}  (keys: rung_ceiling, burst_window,"
                            " burst_stream, freq_trim_mhz, audio_tap, anchor,"
-                           " diag_stream)")
+                           " diag_stream, win_max)")
         elif cmd == "debug":
             # the events come from the BOARD, whose diag stream is off
             # by default; this is `config diag_stream` with a memorable

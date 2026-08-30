@@ -665,6 +665,44 @@ static void test_caps(void)
           && A.btx.streamed_n == 0);
     printf("  caps (no-stream peer): %d frames\n", frames);
 
+    /* B narrows itself by configuration: a 4-window and a rung-9
+     * ceiling, both declared in its record. A must respect BOTH without
+     * being told anything out of band. */
+    {
+        static station_t A2, B2;
+        station_phy_t pa = { 0, phy_build, phy_receive, phy_build_burst,
+                             phy_receive_burst };
+        station_phy_t pb = pa;
+        static uint8_t big[250];
+        lc_word_t lc;
+        double t = 100.0;
+        int k, fr;
+        for (k = 0; k < 250; k++)
+            big[k] = (uint8_t)(k * 31 + 5);
+        station_init(&A2, &pa, 555);
+        station_init(&B2, &pb, 556);
+        A2.burst_window = B2.burst_window = 8;
+        A2.burst_stream = B2.burst_stream = 1;
+        B2.my_win_max = 4;
+        B2.my_max_rung = 9;
+        memset(&lc, 0, sizeof(lc));
+        lc.flags = FLAG_NO_DATA;
+        lc.req_rung = 12;             /* the controller WANTS the top */
+        lc.snr_db = 10.0;
+        ctl_on_rx_frame(&A2.ctl, 10.0, &lc, t);
+        ctl_on_rx_frame(&B2.ctl, 10.0, &lc, t);
+        station_submit(&A2, big, 250, QOS_BULK);
+        fr = pump(&A2, &B2, &t, 3000.0, 0);
+        (void)fr;
+        check("caps: declared knobs arrive (win 4, rung ceiling 9)",
+              A2.peer.valid && A2.peer.win_max == 4
+              && A2.peer.max_rung == 9);
+        check("caps: the window respects the peer's declared ceiling",
+              B2.delivered_n >= 1 && A2.btx.win > 0 && A2.btx.win <= 4);
+        check("caps: the tx rung never exceeds the peer's rung ceiling",
+              A2.stats.last_rung <= 9 && A2.stats.last_rung > 0);
+    }
+
     /* B predates the handshake: it never answers. A must give up after
      * CAPS_TRIES without charging the ladder, then run on the defaults
      * -- the transfer still completes, streamed (B does decode

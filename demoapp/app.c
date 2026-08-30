@@ -927,7 +927,7 @@ static void usb_on_frame(void *ctx, uint8_t type, const uint8_t *pl, int len)
 static const struct { const char *name; int key; } USB_CFG[] = {
     { "rung_ceiling", 1 }, { "burst_window", 2 }, { "burst_stream", 3 },
     { "freq_trim_mhz", 4 }, { "audio_tap", 5 }, { "anchor", 6 },
-    { "diag_stream", 7 },
+    { "diag_stream", 7 }, { "win_max", 8 },
 };
 
 static int usb_command(char *line)
@@ -1003,18 +1003,24 @@ static int usb_command(char *line)
                    g_ust.pending ? "  pending-ack" : "");
             printf("  queues: ctl %u  inter %u  bulk %u\n", g_ust.q_ctl,
                    g_ust.q_inter, g_ust.q_bulk);
-            if (g_ust.peer_state >= 2)
-                printf("  peer: %s%s%s%s%smessages up to %u B, window %u"
-                       "%s\n",
+            if (g_ust.peer_state >= 2) {
+                char mr[16];
+                if (g_ust.peer_max_rung1)
+                    snprintf(mr, sizeof(mr), "%d", g_ust.peer_max_rung1 - 1);
+                else
+                    snprintf(mr, sizeof(mr), "unspecified");
+                printf("  peer: %s%s%s%s%smessages up to %u B, window %u, "
+                       "rung ceiling %s%s\n",
                        (g_ust.peer_caps & 1) ? "stream " : "",
                        (g_ust.peer_caps & 2) ? "ext " : "",
                        (g_ust.peer_caps & 4) ? "ldpc " : "",
                        (g_ust.peer_caps & 8) ? "burst " : "",
                        (g_ust.peer_caps & 16) ? "bcast " : "",
-                       g_ust.peer_msg_max, g_ust.peer_win_max,
+                       g_ust.peer_msg_max, g_ust.peer_win_max, mr,
                        g_ust.peer_state == 3 ? " (handshake complete)"
                                              : " (awaiting our confirmation)");
-            else
+            }
+            if (g_ust.peer_state < 2)
                 printf("  peer: %s\n", g_ust.peer_state == 1
                        ? "did not answer the capability probe -- legacy "
                          "defaults"

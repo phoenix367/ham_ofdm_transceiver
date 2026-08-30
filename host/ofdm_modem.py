@@ -50,7 +50,7 @@ RSP_INFO, EVT_MESSAGE, EVT_STATUS, EVT_DIAG, RSP_PONG, EVT_LOG, EVT_AUDIO = (
 
 CFG = {"rung_ceiling": 1, "burst_window": 2, "burst_stream": 3,
        "freq_trim_mhz": 4, "audio_tap": 5, "anchor": 6,
-       "diag_stream": 7}
+       "diag_stream": 7, "win_max": 8}
 
 TYPE_NAME = {RSP_INFO: "info", EVT_MESSAGE: "message", EVT_STATUS: "status",
              EVT_DIAG: "diag", RSP_PONG: "pong", EVT_LOG: "log",
@@ -125,6 +125,7 @@ def decode_status(p):
         d["peer_state"], d["peer_caps"] = p[32], p[33]
         d["peer_msg_max"] = struct.unpack_from("<H", p, 34)[0]
         d["peer_win_max"] = p[36]
+        d["peer_max_rung1"] = p[37]
     return d
 
 

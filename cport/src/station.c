@@ -214,6 +214,8 @@ void station_init(station_t *st, const station_phy_t *phy, uint64_t seed)
      * firmware ORs in CAP_BCAST; a test masks bits out to play an older
      * peer. */
     st->my_caps = CAP_STREAM | CAP_EXT | CAP_LDPC | CAP_BURST;
+    st->my_win_max = BURST_STREAM_MAX;
+    st->my_max_rung = ladder_n() - 1;
     st->caps_next_t = 0.0; /* optimistic until a bitmap says otherwise */
 }
 
@@ -500,6 +502,29 @@ static int burst_win_air_cap(int rung_idx, int payload_len, int want)
 }
 
 /* engage burst mode for the current/next bulk message if eligible */
+/* The rung this station will actually TRANSMIT at: the controller's
+ * choice clamped by our own ceiling and by the fastest rung the peer
+ * declared it accepts. The controller keeps its own view -- clamping
+ * inside ctl would poison the offset learning with rungs it never
+ * chose. */
+static int st_tx_rung(const station_t *st, double t, int qos)
+{
+    int r = ctl_tx_rung_for_class(&st->ctl, t, qos);
+    if (r > st->my_max_rung)
+        r = st->my_max_rung;
+    if (st->peer.valid && st->peer.max_rung >= 0
+        && r > st->peer.max_rung)
+        r = st->peer.max_rung;
+    return r;
+}
+
+/* what we ask the peer to send at: never above our own ceiling */
+static int st_rx_request(station_t *st, double t)
+{
+    int r = ctl_rx_request(&st->ctl, t);
+    return r > st->my_max_rung ? st->my_max_rung : r;
+}
+
 /* ---- capability handshake ---- */
 
 static void caps_encode(const station_t *st, int ack, uint8_t *p)
@@ -517,12 +542,14 @@ static void caps_encode(const station_t *st, int ack, uint8_t *p)
     p[1] = (uint8_t)f;
     p[2] = (uint8_t)(ST_MSG_MAX & 0xFF);
     p[3] = (uint8_t)(ST_MSG_MAX >> 8);
-    p[4] = (uint8_t)BURST_STREAM_MAX;
+    p[4] = (uint8_t)(st->my_win_max > 0
+                     && st->my_win_max < BURST_STREAM_MAX
+                         ? st->my_win_max : BURST_STREAM_MAX);
     p[5] = (uint8_t)ST_POOL_SLOTS;
     p[6] = (uint8_t)(st->fw_ver & 0xFF);
     p[7] = (uint8_t)(st->fw_ver >> 8);
     p[8] = (uint8_t)BURST_MAX_FRAGS;
-    p[9] = 0;
+    p[9] = (uint8_t)(st->my_max_rung + 1);  /* 0 = unspecified */
 }
 
 static int caps_decode(const uint8_t *pkt_bits, int pkt_n, st_caps_t *c)
@@ -545,6 +572,7 @@ static int caps_decode(const uint8_t *pkt_bits, int pkt_n, st_caps_t *c)
     c->pool_slots = p[5];
     c->fw_ver = p[6] | (p[7] << 8);
     c->max_frags = p[8];
+    c->max_rung = p[9] > 0 ? p[9] - 1 : -1;
     return 0;
 }
 
@@ -606,6 +634,8 @@ static int burst_try_engage(station_t *st, int rung_idx)
         int w = st->burst_window;
         if (w > BURST_STREAM_MAX)
             w = BURST_STREAM_MAX;
+        if (st->my_win_max > 0 && w > st->my_win_max)
+            w = st->my_win_max;
         if (st->peer.valid && st->peer.win_max > 0 && w > st->peer.win_max)
             w = st->peer.win_max;
         if (w > n)
@@ -760,7 +790,7 @@ static int burst_send_stream(station_t *st, int rung_idx, int16_t *out,
 
     lc.seq = st->btx.id;
     lc.ack = st->last_rx_seq >= 0 ? st->last_rx_seq : 0;
-    lc.req_rung = ctl_rx_request(&st->ctl, t);
+    lc.req_rung = st_rx_request(st, t);
     lc.snr_db = ctl_filtered_snr(&st->ctl, t);
     lc.freq_corr_hz = 0.0;
     lc.flags = FLAG_BURST_DATA;
@@ -815,7 +845,7 @@ static int burst_send_stream(station_t *st, int rung_idx, int16_t *out,
     st->last_tx_rung = rung_idx;
     st->reply_due = 0;
     st->expects_reply = 1;
-    st->reply_rung_guess = ctl_rx_request(&st->ctl, t) - 2;
+    st->reply_rung_guess = st_rx_request(st, t) - 2;
     if (st->reply_rung_guess < 0)
         st->reply_rung_guess = 0;
     st->reply_len_guess = (st->btx.n + 7) / 8;
@@ -958,12 +988,12 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
         memcpy(payload, st->brx.have, (size_t)nb);
         lc.seq = st->seq;
         lc.ack = st->brx.id;
-        lc.req_rung = ctl_rx_request(&st->ctl, t);
+        lc.req_rung = st_rx_request(st, t);
         lc.snr_db = ctl_filtered_snr(&st->ctl, t);
         lc.freq_corr_hz = 0.0;
         lc.flags = FLAG_BURST_ACK;
         pkt_n = data_encode(lc_pack(&lc), payload, nb, pkt_bits);
-        rung_idx = ctl_tx_rung_for_class(&st->ctl, t, QOS_CONTROL);
+        rung_idx = st_tx_rung(st, t, QOS_CONTROL);
         n = st->phy.build(st->phy.ctx, pkt_bits, pkt_n, PKT_TYP_DATA,
                           rung_idx, out, out_cap);
         if (n <= 0)
@@ -989,12 +1019,12 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
         st->seq = (st->seq + 1) & 3;
         lc.seq = st->seq;
         lc.ack = st->last_rx_seq >= 0 ? st->last_rx_seq : 0;
-        lc.req_rung = ctl_rx_request(&st->ctl, t);
+        lc.req_rung = st_rx_request(st, t);
         lc.snr_db = ctl_filtered_snr(&st->ctl, t);
         lc.freq_corr_hz = 0.0;
         lc.flags = FLAG_CAPS;
         pkt_n = data_encode(lc_pack(&lc), payload, CAPS_LEN, pkt_bits);
-        rung_idx = ctl_tx_rung_for_class(&st->ctl, t, QOS_CONTROL);
+        rung_idx = st_tx_rung(st, t, QOS_CONTROL);
         n = st->phy.build(st->phy.ctx, pkt_bits, pkt_n, PKT_TYP_DATA,
                           rung_idx, out, out_cap);
         if (n <= 0)
@@ -1014,14 +1044,14 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
         st->last_tx_rung = rung_idx;
         st->reply_due = 0;
         st->expects_reply = 1;
-        st->reply_rung_guess = ctl_rx_request(&st->ctl, t);
+        st->reply_rung_guess = st_rx_request(st, t);
         st->reply_len_guess = CAPS_LEN;
         return n;
     }
 
     /* burst transmit: up to window_left back-to-back fragments, the last
      * one carrying the ack request */
-    rung_idx = ctl_tx_rung_for_class(&st->ctl, t, QOS_BULK);
+    rung_idx = st_tx_rung(st, t, QOS_BULK);
     if (!st->btx.active && burst_try_engage(st, rung_idx))
         diag(st, ST_EV_BURST_ENGAGE, st->btx.n, st->btx.frag_size,
              st->btx.id, 0, t);
@@ -1064,7 +1094,7 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
                    (size_t)flen);
             lc.seq = st->btx.id;
             lc.ack = st->last_rx_seq >= 0 ? st->last_rx_seq : 0;
-            lc.req_rung = ctl_rx_request(&st->ctl, t);
+            lc.req_rung = st_rx_request(st, t);
             lc.snr_db = ctl_filtered_snr(&st->ctl, t);
             lc.freq_corr_hz = 0.0;
             lc.flags = FLAG_BURST_DATA;
@@ -1092,7 +1122,7 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
             /* the bitmap ack comes at the PEER's control rung, which can
              * sit below what we request -- budget two rungs conservative
              * and for the actual bitmap size, not a 1-byte frame */
-            st->reply_rung_guess = ctl_rx_request(&st->ctl, t) - 2;
+            st->reply_rung_guess = st_rx_request(st, t) - 2;
             if (st->reply_rung_guess < 0)
                 st->reply_rung_guess = 0;
             st->reply_len_guess = (st->btx.n + 7) / 8;
@@ -1110,8 +1140,8 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
         qos = QOS_BULK;
     else
         qos = QOS_CONTROL;
-    rung_idx = ctl_tx_rung_for_class(
-        &st->ctl, t, station_has_traffic(st) ? qos : QOS_CONTROL);
+    rung_idx = st_tx_rung(st, t,
+                          station_has_traffic(st) ? qos : QOS_CONTROL);
 
     frag = take_fragment(st, rung_idx);
     if (frag) {
@@ -1148,7 +1178,7 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
 
     lc.seq = seq;
     lc.ack = st->last_rx_seq >= 0 ? st->last_rx_seq : 0;
-    lc.req_rung = ctl_rx_request(&st->ctl, t);
+    lc.req_rung = st_rx_request(st, t);
     lc.snr_db = ctl_filtered_snr(&st->ctl, t);
     lc.freq_corr_hz = freq_req;
     lc.flags = flags;
@@ -1166,7 +1196,7 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
     st->last_tx_rung = rung_idx;
     st->reply_due = 0;
     st->expects_reply = expects_reply;
-    st->reply_rung_guess = ctl_rx_request(&st->ctl, t);
+    st->reply_rung_guess = st_rx_request(st, t);
     st->reply_len_guess = 1;
     return n;
 }

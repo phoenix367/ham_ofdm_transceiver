@@ -171,7 +171,20 @@ Cross-module invariants that are easy to break:
   Unit tests that drive one station by hand set `caps_disabled` (they
   expect the first frame to be theirs, not a probe). The Python
   `station.py` does NOT mirror this (it never mirrored burst ARQ
-  either); `test_link.c` `test_caps` is the twin.
+  either); `test_link.c` `test_caps` is the twin. The record also
+  carries two OPERATOR knobs -- `my_win_max` (byte 4, `config win_max`,
+  UP_CFG key 8) and `my_max_rung` (byte 9 as ceiling+1 so 0 stays
+  "unspecified"; `config rung_ceiling`, key 1, which was documented
+  since the first protocol rev and implemented NOWHERE until this) --
+  and both are enforced on BOTH ends: the window at engage is
+  min(burst_window, BURST_STREAM_MAX, my_win_max, peer.win_max), and
+  every tx-rung decision goes through `st_tx_rung()` = controller
+  clamped by my_max_rung and the peer's declared ceiling (clamping
+  inside ctl would poison its offset learning -- keep the clamp in
+  station.c). Requests go through `st_rx_request()` for the same
+  reason. A config change while the peer is known sets
+  `caps_reply_due` so the refreshed record is pushed rather than
+  waiting for the next transfer.
 - The radio boards hold 3328-byte messages (`-DST_MSG_MAX=3328`,
   `-DBURST_STREAM_MAX=16` in radiofw). Placement: `g_st` (~58 kB)
   lives in SRAM4 -- the D3 domain, the SLOWEST RAM for the M7 (two bus

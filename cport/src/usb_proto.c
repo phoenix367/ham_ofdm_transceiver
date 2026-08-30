@@ -85,7 +85,8 @@ int up_encode_status(const up_status_t *st, uint8_t *out, int out_cap)
         q[33] = st->peer_caps;
         put_u16(q + 34, st->peer_msg_max);
         q[36] = st->peer_win_max;
-        q[37] = q[38] = q[39] = 0;
+        q[37] = st->peer_max_rung1;
+        q[38] = q[39] = 0;
         return up_encode(UP_EVT_STATUS, q, 40, out, out_cap);
     }
 }
@@ -208,9 +209,11 @@ int up_decode_status(const uint8_t *payload, int len, up_status_t *out)
         out->peer_caps = payload[33];
         out->peer_msg_max = get_u16(payload + 34);
         out->peer_win_max = payload[36];
+        out->peer_max_rung1 = payload[37];
     } else {
         out->peer_state = out->peer_caps = out->peer_win_max = 0;
         out->peer_msg_max = 0;
+        out->peer_max_rung1 = 0;
     }
     return 0;
 }
