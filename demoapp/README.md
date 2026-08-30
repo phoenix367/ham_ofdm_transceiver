@@ -172,7 +172,10 @@ the wire. 36 s end to end, which is what an EXTREME bootstrap frame
 The rate ladder then does its job: a second message over the same wire
 took **15 s instead of 35 s**, and both boards' receivers followed the
 negotiated rung up from EXTREME alone to NORMAL+EXTREME (`my_req` 9 and
-7, SNR +15.0 and +9.7 dB) with no dropped samples. Which modes a board
+7, SNR +15.0 and +9.7 dB) with no dropped samples. Streamed bursts work
+across the wire too --- one 8-block stream behind a single preamble
+acked 8 of 11 file fragments at once, and a 1200-byte incompressible
+file crosses byte-exact with the burst machinery on by default. Which modes a board
 listens for is a CPU budget on this part --- three concurrent detectors
 do not fit real time --- so the firmware mutes the ones the negotiated
 rung says it does not need, while always keeping EXTREME for bootstrap

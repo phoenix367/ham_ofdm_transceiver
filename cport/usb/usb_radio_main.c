@@ -78,6 +78,25 @@ typedef struct {
     uint32_t burst_refused, ring_miss;
     uint32_t tx_short, tx_last_pulled, tx_last_total;
     int32_t  last_miss_type, last_miss_bits;
+    /* forensics of the FIRST failed continued block since boot:
+     * the leading 44 decoded bits (20-bit LC word + 3 subheader
+     * bytes -- all predictable), packed MSB-first into two words,
+     * the SNR the demod saw, and the walk geometry. The host
+     * harness decodes 8/8 under every modeled impairment, so
+     * whatever kills block 1 exists only on the boards -- make
+     * the boards say what they decoded. */
+    uint32_t miss_lead_hi, miss_lead_lo;  /* bits 0..31, 32..43 */
+    int32_t  miss_snr_q8, miss_start;
+    uint32_t walk_base_lo, walk_step;     /* block-0 end, length */
+    uint32_t miss_cs;                     /* cs_mean at first miss */
+    /* the last four key-ups: when, and what carrier sense saw.
+     * B transmitted over A's live stream while poll_tx is gated
+     * on channel_busy() -- so either CS answered idle against
+     * 2e8 of mean-square signal, or the key-up came at a moment
+     * the air was genuinely quiet. This is the recorder that
+     * stops that being a mystery a second time. */
+    uint32_t keyups;
+    uint32_t keyup_ms[4], keyup_cs[4], keyup_floor[4];
 } beacon_t;
 volatile beacon_t g_beacon __attribute__((section(".results"), used));
 enum { ST_ENTER = 1, ST_SUPPLY, ST_ANALOG, ST_RXS, ST_TUSB, ST_LOOP,
@@ -93,6 +112,7 @@ enum { ST_ENTER = 1, ST_SUPPLY, ST_ANALOG, ST_RXS, ST_TUSB, ST_LOOP,
 #define IRQ_TIM6_DAC 54
 
 static volatile uint32_t g_ms;
+static void note_busy_isr(int16_t v);  /* carrier sense, defined below */
 
 void SysTick_Handler(void) { g_ms++; }
 
@@ -203,6 +223,15 @@ static void tim6_isr(void)
         uint32_t w = g_cap_w;
         /* the conversion started last tick is finished long since */
         int16_t v = (int16_t)(ADC_DR - 32768u);
+        /* carrier sense on LIVE samples. This call was meant to arrive
+         * with the note_busy_isr commit and did not -- the edit's
+         * pattern had the wrong indentation and replaced nothing, so
+         * g_cs_mean stayed 0 and channel_busy() answered idle FOREVER.
+         * That is what let this station answer block 0's ack request
+         * over the top of the peer's still-running stream. Caught by
+         * the key-up recorder: cs=0 at every key-up, when a quiet wire
+         * (the peer's DAC holds mid-rail) reads ~2e4. */
+        note_busy_isr(v);
         if ((uint32_t)(w - g_cap_r) < CAP_N)
             g_cap[w & (CAP_N - 1)] = v, g_cap_w = w + 1;
         else
@@ -357,6 +386,7 @@ static void tx_fill(uint32_t slack)
 }
 
 static rxs_t *g_rxs[3];   /* declared here: burst_advance() needs it */
+static volatile uint32_t g_cs_mean;  /* defined with carrier sense below */
 
 /* --- streamed bursts -------------------------------------------------
  *
@@ -381,6 +411,11 @@ static rxs_t *g_rxs[3];   /* declared here: burst_advance() needs it */
  * covers the case where that last block is itself the one that did not
  * decode. */
 static int g_burst_left[3], g_burst_miss[3];
+/* A walk in progress HOLDS this station's transmitter (below), so
+ * it must not be able to last forever: if the peer dies mid-
+ * stream no further events fire, burst_left never reaches 0, and
+ * without a deadline the hold would mute us for good. */
+static uint32_t g_burst_deadline[3];
 
 static int frame_is_streamed(const uint8_t *bits, int nbits, int *ack_req)
 {
@@ -410,10 +445,16 @@ static void burst_advance(int m, const rxs_event_t *ev)
 
     streamed = ev->type == 1
                && frame_is_streamed(ev->bits, ev->pkt_bits_n, &ackreq);
+    if (g_burst_left[m] > 0 || streamed)
+        g_burst_deadline[m] = g_ms + 15000u;
     if (streamed && g_burst_left[m] == 0) {
         g_burst_left[m] = BURST_STREAM_MAX - 1;
         g_burst_miss[m] = 0;
         g_beacon.burst_starts++;
+        /* geometry of the walk this arms: block 0's start and the step
+         * the continuation will take from its end */
+        g_beacon.walk_base_lo = (uint32_t)ev->start_abs;
+        g_beacon.walk_step = (uint32_t)ev->pkt_bits_n;
     } else if (streamed) {
         g_burst_miss[m] = 0;
         g_beacon.burst_blocks++;
@@ -430,6 +471,19 @@ static void burst_advance(int m, const rxs_event_t *ev)
          * streamed)? The two want different fixes. */
         g_beacon.last_miss_type = ev->type;
         g_beacon.last_miss_bits = ev->type == 1 ? ev->pkt_bits_n : -1;
+        if (g_beacon.miss_lead_hi == 0 && g_beacon.miss_lead_lo == 0) {
+            uint32_t hi = 0, lo = 0;
+            int b;
+            for (b = 0; b < 32; b++)
+                hi = (hi << 1) | (ev->bits[b] & 1u);
+            for (b = 32; b < 44; b++)
+                lo = (lo << 1) | (ev->bits[b] & 1u);
+            g_beacon.miss_lead_hi = hi;
+            g_beacon.miss_lead_lo = lo;
+            g_beacon.miss_snr_q8 = (int32_t)(ev->snr_db * 256.0);
+            g_beacon.miss_start = ev->start_abs;
+            g_beacon.miss_cs = g_cs_mean;
+        }
         if (++g_burst_miss[m] >= 2)
             g_burst_left[m] = 0;
         else
@@ -476,7 +530,7 @@ static volatile uint32_t g_cs_mean;      /* published by the ISR */
 static double g_floor = 1e9, g_busy_since = -1.0;
 
 /* called from the 12 kHz tick, one live sample at a time */
-static inline void note_busy_isr(int16_t v)
+static void note_busy_isr(int16_t v)
 {
     int16_t old = g_bring[g_bpos];
     g_bacc += (int64_t)v * v - (int64_t)old * old;
@@ -489,11 +543,19 @@ static inline void note_busy_isr(int16_t v)
 static int channel_busy(double now)
 {
     double p = (double)g_cs_mean;
+    static uint32_t climb_ms;
     int busy;
-    if (p < g_floor)
+    if (p < g_floor) {
         g_floor = p;
-    else
+    } else if ((uint32_t)(g_ms - climb_ms) >= 40u) {
+        /* The climb rate is DEFINED per 40 ms window (demoapp's cadence,
+         * 0.05% per block), not per call: this function runs at 1 kHz
+         * here against demoapp's ~25 Hz, and multiplying per call made
+         * the floor rise 40x too fast -- x1.65 per second of continuous
+         * signal instead of x1.013. */
         g_floor *= 1.0005;
+        climb_ms = g_ms;
+    }
     if (g_floor < 25.0)
         g_floor = 25.0;
     busy = p > BUSY_RATIO_SQ * g_floor;
@@ -652,8 +714,18 @@ int main(void)
      * resize the window with UP_CFG_BURST_WINDOW, and the station falls
      * back by itself if a peer turns out not to follow a stream
      * (ST_SOFF_NOACK). */
-    /* Both of these stay at the station's defaults -- stop-and-wait, no
-     * streaming -- and that is a MEASURED choice, not an oversight.
+    /* Burst windows and streamed windows: ON. They were shipped OFF
+     * when every streamed transfer died, and the post-mortem found
+     * three real causes, none of them the burst machinery itself:
+     * MAX_LLRS=1024 overflowing g_d64 on any frag_size >= 100 (host
+     * repro: 0/3 blocks at 1024, 3/3 at the default), carrier sense
+     * dead since its ISR hook was never actually inserted, and the
+     * station answering block 0's ack request over the peer's live
+     * stream (fixed by the walk hold below). With all three fixed the
+     * same 1200-byte file crosses byte-exact in ~21 s streamed against
+     * ~2 min per-frame, one 8-block stream acking 8 of 11 frags at
+     * once. The fallbacks (bitmap ack, ST_SOFF_*) remain for peers and
+     * channels that cannot stream.
      *
      * Selective-repeat windows with a bitmap ack: ON. Streaming a whole
      * window behind ONE preamble: OFF, and measured rather than
@@ -695,10 +767,11 @@ int main(void)
      * minutes, timers expire, and the transfer stalls having delivered
      * one part. Without the window the same file crossed byte-exact.
      *
-     * So the shipped default is the configuration that was measured to
-     * work end to end, and `config burst_window 8` / `config
-     * burst_stream 1` are there for the work that follows. */
-    g_st.burst_stream = 0;
+     * (That 224-second-frame hazard -- frag_size fixed at engage, rung
+     * collapsing mid-transfer -- was itself a symptom: the collapse was
+     * driven by the failures above poisoning the controller.) */
+    g_st.burst_window = BURST_STREAM_MAX;
+    g_st.burst_stream = 1;
     usb_modem_init(&g_modem, &g_st, UID, 0x0200,
                    UP_CAP_LDPC | UP_CAP_EXT_FRAMES);
     g_st.diag_cb = usb_modem_diag;
@@ -795,7 +868,26 @@ int main(void)
             if (g_ms <= 500u)
                 g_cap_r = g_cap_w;       /* discard the settling transient */
             follow_rung(t);
-            if (!g_tx_on && !g_txs) {
+            /* expire wedged walks (peer died mid-stream: no events) */
+            {
+                int i2;
+                for (i2 = 0; i2 < 3; i2++)
+                    if (g_burst_left[i2] > 0
+                        && (int32_t)(g_ms - g_burst_deadline[i2]) > 0)
+                        g_burst_left[i2] = 0;
+            }
+            /* A receiver that KNOWS more blocks are coming must not
+             * transmit over them. Measured on the stand without this:
+             * block 0 of a stream carries the ack request (by design,
+             * for peers that cannot stream), B's station answered it
+             * ~2 s into A's 9.75 s transmission, key-up dropped B's own
+             * capture, and the walk decoded noise at -30 dB -- every
+             * streamed burst died this way while A's transmit counters
+             * showed a clean carrier. The ack goes out when the walk
+             * ends, which is exactly the contract: one ack, after every
+             * block of the burst has been processed. */
+            if (!g_tx_on && !g_txs
+                && !(g_burst_left[0] | g_burst_left[1] | g_burst_left[2])) {
                 int air = station_poll_tx(&g_st, t, channel_busy(t),
                                           (int16_t *)air_dummy,
                                           1 << 24);
@@ -814,6 +906,13 @@ int main(void)
                      * it ends would hand the receiver a stream whose
                      * time order does not match the air. */
                     g_cap_r = g_cap_w;
+                    {
+                        uint32_t ki = g_beacon.keyups & 3u;
+                        g_beacon.keyup_ms[ki] = g_ms;
+                        g_beacon.keyup_cs[ki] = g_cs_mean;
+                        g_beacon.keyup_floor[ki] = (uint32_t)g_floor;
+                        g_beacon.keyups++;
+                    }
                     g_tx_on = 1;
                     g_beacon.tx_frames++;
                     g_beacon.last_rung = g_st.stats.last_rung;

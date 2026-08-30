@@ -327,30 +327,44 @@ Cross-module invariants that are easy to break:
   accumulates in the 12 kHz tick and publishes the mean as one 32-bit
   store.
 - `burst_window >= 2` is what engages burst ARQ at all (`station.c`);
-  `burst_stream` alone does nothing, and a station left at the default
-  runs legacy stop-and-wait. Both are OFF on the board by measurement:
-  `frag_size` is fixed at engage and uniform for the transfer, so a rung
-  collapse mid-transfer keeps sending fragments sized for the rung it
-  engaged at -- measured, ONE transmission of 2693120 samples (224 s of
-  air) after engaging at rung 12 and falling back to EXTREME, which
-  stalls the transfer having delivered one part. With the defaults the
-  same file crosses byte-exact in ~2 minutes.
-- Streamed burst RECEPTION is implemented on the board (`burst_advance`
-  driving `rxs_continue_burst`, since `phy.receive_burst` is only
-  reachable from the frame-at-once `phy.receive` that a streaming
-  receiver never calls) but does NOT yet decode across two boards. The
-  transmit half is confirmed good (8 blocks in one 116448-sample
-  transmission, `tx_short` 0), the receiver detects the stream marker
-  and arms (`burst_starts` 2, `burst_refused` 0), and then every
-  continued block fails data CRC (`burst_blocks` 0, misses type -3) with
-  the samples present (`ring_miss` 0). Ruled out by measurement:
-  truncated transmit, ring overwrite, arming refusal, the resync
-  step-over (identical with `BURST_STREAM_RESYNC` 0) and the rung floor
-  (it ran at rung 6, NORMAL, above `BURST_MIN_RUNG`). Blocks after the
-  first carry no header, so type -3 means "did not decode", not "header
-  fine". The untested difference from demoapp is two INDEPENDENT sample
-  clocks against a continuation that `rxs_continue_burst` documents as
-  not re-locking -- consistent, but not demonstrated. Open question.
+  `burst_stream` alone does nothing. Both are ON in the radio firmware
+  now that the three streamed-burst causes are fixed. The 224-s-frame
+  hazard that once argued for OFF (`frag_size` fixed at engage, rung
+  collapsing mid-transfer) was a symptom: the collapse was driven by
+  those failures poisoning the controller.
+- Streamed bursts DECODE across two boards (`burst_advance` driving
+  `rxs_continue_burst`; `phy.receive_burst` stays NULL because it is
+  only reachable from the frame-at-once `phy.receive` a streaming
+  receiver never calls). The failure that looked like a channel problem
+  had THREE causes, none of them the burst machinery, and none of them
+  the clocks (`cport/bench/burst_repro.c`, `make burstrepro`, decodes
+  8/8 under DAC/ADC requantization + DC + 56 ppm):
+  1. `-DMAX_LLRS=1024` (copied from the small-frame bench builds)
+     overflowed `g_d64` for any `frag_size >= ~100` -- silently, there
+     was no guard. Host repro: 0/3 blocks at 1024, 3/3 at the default.
+     `rx_stream.c` now REFUSES a header whose block exceeds
+     `MAX_SYMS`/`MAX_LLRS` (type -2), and the radio build uses 4416
+     (largest EXT frame), with `g_d64` placed in DTCM by the linker.
+  2. Carrier sense was DEAD: the edit that was to call `note_busy_isr`
+     from the tick had wrong indentation in its pattern and
+     `str.replace` silently did nothing -- `g_cs_mean` stayed 0 and
+     `channel_busy()` said idle forever. Caught by the beacon's key-up
+     recorder (`cs=0` at every key-up where a quiet wire reads ~2e4).
+     Assert every patch replacement, and record cs/floor at key-up.
+  3. Block 0 of a stream carries the ack request BY DESIGN (for peers
+     that cannot stream), so the station answers it immediately -- and
+     with CS dead, B keyed its bitmap ack ~2 s into A's 9.75 s stream,
+     dropped its own capture at key-up, and the walk decoded -30 dB
+     noise. The fix is structural, not just CS: a receiver whose walk
+     expects more blocks (`g_burst_left`) HOLDS its transmitter, with a
+     15 s deadline so a peer dying mid-stream cannot mute us forever.
+  With all three fixed: one 8-block stream acks 8 of 11 frags, the
+  1200-byte file crosses byte-exact, `burst_blocks` 8 / `misses` 0, and
+  the burst defaults (`burst_window`, `burst_stream`) are ON.
+- The CS floor's climb rate is defined PER 40 ms WINDOW (demoapp's
+  cadence), not per call: `channel_busy()` runs at 1 kHz on the boards
+  vs ~25 Hz in demoapp, and multiplying per call raised the floor 40x
+  too fast. Climb only when 40 ms have elapsed.
 - Which modes are active follows the NEGOTIATED rung (`follow_rung`),
   and two extras are kept alongside `ladder_mode(ctl.my_req)` for
   reasons that are not optional. EXTREME always: it is rung 0 (the

@@ -813,6 +813,24 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                                                        r->pkt_bits_count);
                 r->n_data = (coded_len + r->cap - 1) / r->cap;
             }
+            /* A frame the buffers cannot hold must be REFUSED here, not
+             * discovered later: nothing downstream checks, so an
+             * oversized header walks g_d64[inst] straight into the
+             * neighbouring instance's rows and g_dexps past its row --
+             * and decodes garbage that fails CRC in a way that looks
+             * like a bad channel. Found on the two-board stand: the
+             * radio firmware shipped with -DMAX_LLRS=1024 (copied from
+             * the small-frame bench builds) and every burst engage with
+             * frag_size >= 100 produced exactly that signature -- host
+             * repro decodes 0/3 blocks at MAX_LLRS=1024 and 3/3 at the
+             * default. The reject takes the bad-version exit: the
+             * header WAS valid, but this receiver build cannot decode
+             * the frame it announces, which is the same contract. */
+            if (r->n_data > MAX_SYMS || r->n_data * r->cap > MAX_LLRS) {
+                ev->type = -2;
+                rearm(r, r->start_abs + r->n_hdr * r->demod.symbol_len);
+                return 1;
+            }
             r->sym_idx = 0;
             r->data_base = r->start_abs
                            + (int64_t)r->n_hdr * r->demod.symbol_len;

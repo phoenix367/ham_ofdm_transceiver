@@ -268,6 +268,20 @@ link-read:
 	   -c "echo {=== TX beacon ===}" -c "mdw 0x20000000 44" \
 	   -c exit 2>&1 | python3 bench/analog_link_report.py
 
+# Host repro of the two-board streamed-burst failure: builds the exact
+# waveform the radio firmware streams, applies the board's impairments
+# (12-bit DAC re-read by the ADC, mid-rail DC, sample-clock ppm), and
+# walks it with the firmware's burst logic. This is what separated the
+# three real causes from every plausible-but-wrong theory: it decoded
+# 8/8 under every impairment (exonerating the DSP and the clocks) and
+# 0/3 at -DMAX_LLRS=1024 with frag_size 100 (convicting the overflow).
+#   ./build/burst_repro [-f frag] [-r rung] [-n blocks] [-q] [-d] [ppm]
+burstrepro: $(GEN) | $(BUILD)
+	gcc -std=c99 -O2 -Isrc -DMAX_LLRS=4416 -o $(BUILD)/burst_repro \
+	    bench/burst_repro.c src/rx_stream.c src/rx_detect.c src/rx_demod.c \
+	    src/tx.c src/fft.c src/dsp.c src/bits.c src/conv.c src/ldpc.c \
+	    src/packets.c src/link.c src/arena.c -lm
+
 # --- sanitizers -----------------------------------------------------
 # Every suite under AddressSanitizer + UndefinedBehaviorSanitizer, and
 # the host-link parser under 40 MB of random input. The suites passing
@@ -329,6 +343,13 @@ USBFLASH_SRC = target/startup_flash.c usb/usb_flash_main.c \
                $(TINYUSB)/src/portable/synopsys/dwc2/dcd_dwc2.c \
                $(TINYUSB)/src/portable/synopsys/dwc2/dwc2_common.c
 
+# MAX_LLRS=4416, NOT the 1024 of the bench builds: 1024 was copied here
+# and every burst engage with frag_size >= 100 overflowed g_d64 into the
+# next instance's rows -- silently, there was no guard -- and failed CRC
+# in a way that looked like a bad channel. 4416 covers the largest EXT
+# frame (255 len bytes -> 2084 pkt bits -> ~4200 conv-R1/2 LLRs padded to
+# whole symbols). The +81 kB lands as: g_d64 in DTCM (see the linker
+# script), g_h64 grown in AXI.
 # The USB modem WITH a radio: the same station, but its PHY is the
 # board's own DAC and ADC instead of a stub. Adds the receiver
 # (rx_stream/rx_detect/rx_demod) to the USB image.
@@ -344,7 +365,7 @@ USBRADIO_SRC = $(subst usb/usb_flash_main.c,usb/usb_radio_main.c,$(USBFLASH_SRC)
 
 radiofw: $(GEN) | $(BUILD)
 	$(FLASHCC) $(FLASHFLAGS) -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
-	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx -DMAX_LLRS=1024 \
+	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx -DMAX_LLRS=4416 \
 	    -DOFDM_RX_MODES=$(RXMODES) -DBURST_STREAM_RESYNC=$(RESYNC) \
 	    $(USBRADIO_SRC) -lm -o $(BUILD)/usb_radio.elf
 	@$(QEMUSIZE) $(BUILD)/usb_radio.elf
@@ -511,4 +532,4 @@ flash-probe: test-probe
 	 $(ARDUINO_CLI) compile --fqbn esp32:esp32:esp32 -u -p $(PROBE_PORT) \
 	   $(PROBE_DIR)/esp32_rbb | tail -3
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read radiofw flash-radio-a flash-radio-b
+.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read radiofw flash-radio-a flash-radio-b burstrepro

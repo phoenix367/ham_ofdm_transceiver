@@ -42,6 +42,16 @@ SECTIONS
 
     .dtcm_bss (NOLOAD) : {
         . = ALIGN(8); _sdtcmbss = .;
+        /* the receiver's data-LLR store: 3 x MAX_LLRS x 4 B. At the
+         * radio build's MAX_LLRS=4416 that is 53 kB, which AXI cannot
+         * take on top of everything else but DTCM can -- and the LLR
+         * store is the hottest large object in the demod, so DTCM is
+         * where it wants to be anyway. */
+        *(.bss.g_d64)
+        /* the carrier-sense ring: touched every 12 kHz tick from the
+         * ISR, and the 960 B that put AXI 504 B over when its call
+         * site became real. DTCM is where an ISR-hot ring belongs. */
+        *(.bss.g_bring)
         *(.dtcm_bss*)
         . = ALIGN(8); _edtcmbss = .;
     } > DTCM
