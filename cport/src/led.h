@@ -35,7 +35,13 @@
                                      * perfectly on a pin with no LED. */
 #endif
 #ifndef LED_ACTIVE_LOW
-#define LED_ACTIVE_LOW 0            /* 1 = the LED is wired to VDD */
+#define LED_ACTIVE_LOW 1            /* the LED is wired to VDD: the pin
+                                     * goes LOW to light it. Measured:
+                                     * the input probe reads PA1 high
+                                     * against the internal pull-down
+                                     * (the LED's own pull), and with
+                                     * active-high the "solid" state
+                                     * came out dark on the stand. */
 #endif
 
 #define LED_AHB4ENR (*(volatile uint32_t *)0x580244E0u)

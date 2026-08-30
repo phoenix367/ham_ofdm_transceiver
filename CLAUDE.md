@@ -433,7 +433,10 @@ Cross-module invariants that are easy to break:
   the 25 MHz crystal -- so PH2..PH15 do not exist and writing their
   MODER/ODR bits drives nothing. PA0, the obvious first guess, floats
   (input probe: follows an internal pull both ways); PA1 reads HIGH
-  against an internal pull-down, which is the board holding it. The
+  against an internal pull-down, which is the LED's own pull to VDD --
+  it is ACTIVE-LOW (`LED_ACTIVE_LOW 1`; the solid state came out dark
+  on the stand with active-high, and that is the one thing the beacon
+  cannot see, so ask the eye). The
   finder is `make run-led` (`bench/led_test.c`, RAM-resident so flash
   is untouched; `LED_PIN=` / `LED_DEFS=-DLED_PORT_BASE=` to try
   another pin), and it blinks a four-phase pattern rather than a plain
