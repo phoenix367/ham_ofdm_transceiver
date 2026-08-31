@@ -599,6 +599,13 @@ static int g_bc_waiting;
  * 73 kB file arrived as 74027 bytes, the first 665 of them the
  * previous aborted run's groups */
 static int g_bc_close_due;     /* emit a closing EOS group first */
+/* the transmission now draining the DAC is a BROADCAST group, not a
+ * station frame: its end must NOT reach station_on_tx_end. It did --
+ * and a stale expects_reply then re-armed a 17 s reply timer at every
+ * group end (one RTO diag line per group, the queued control probe
+ * never transmitting, and a phantom loss charged to the ladder when
+ * the bogus timer finally lapsed on an idle channel). */
+static int g_tx_is_bc;
 static uint32_t g_bc_feed_last_ms;
 #define BC_FEED_TIMEOUT_MS 30000u
 static uint32_t g_bc_wait_deadline, g_bc_next_probe;
@@ -1354,7 +1361,9 @@ int main(void)
              * dac_init's mid-rail), 2.75e8 after the first frame. */
             DAC_DHR12R1 = 2048;
             g_cap_r = g_cap_w;            /* drop what leaked in */
-            station_on_tx_end(&g_st, t);
+            if (!g_tx_is_bc)
+                station_on_tx_end(&g_st, t);
+            g_tx_is_bc = 0;
         }
 
         /* ---- receive: only when not transmitting (arena, half duplex)
@@ -1525,6 +1534,7 @@ int main(void)
                         g_beacon.keyup_floor[ki] = (uint32_t)g_cs.floor_;
                         g_beacon.keyups++;
                         g_tx_on = 1;
+                        g_tx_is_bc = 1;
                         g_beacon.tx_frames++;
                         g_beacon.bc_tx_groups++;
                         g_beacon.bc_tx_ms = g_ms;

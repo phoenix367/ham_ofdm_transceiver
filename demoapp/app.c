@@ -1112,6 +1112,10 @@ static int usb_command(char *line)
                    g_ust.pending ? "  pending-ack" : "");
             printf("  queues: ctl %u  inter %u  bulk %u\n", g_ust.q_ctl,
                    g_ust.q_inter, g_ust.q_bulk);
+            if (g_ubcf_f)
+                printf("  broadcastfile: %ld of %ld bytes fed to the "
+                       "board (board buffer %u B free)\n", g_ubcf_off,
+                       g_ubcf_len, g_ust.bc_free);
             if (g_ust.peer_state >= 2) {
                 char mr[16];
                 if (g_ust.peer_max_rung1)

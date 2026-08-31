@@ -497,6 +497,10 @@ class Console:
                    f"{'  pending-ack' if st['pending'] else ''}")
         self.plain(f"queues: ctl {q[0]}  inter {q[1]}  bulk {q[2]}"
                    f"  (board holds {BOARD_QUEUE} per queue)")
+        if getattr(self, "_ubcf_f", None):
+            self.plain(f"broadcastfile: {self._ubcf_off} of "
+                       f"{self._ubcf_len} bytes fed to the board "
+                       f"(board buffer {st.get('bc_free', 0)} B free)")
         ps = st.get("peer_state", 0)
         if ps >= 2:
             mr = st.get("peer_max_rung1", 0)
