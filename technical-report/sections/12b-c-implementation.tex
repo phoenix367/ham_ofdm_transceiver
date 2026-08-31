@@ -1763,6 +1763,23 @@ $-2$\,dB & adaptive & \textbf{6100 ($+39$\%)} & \\
 \end{tabular}
 \end{center}
 
+Figure~\ref{fig:bcastfadeseq} draws the measured deep-fade run as the
+exchange the two ends actually had --- including the two windows in
+which nothing was exchanged at all, which is where half the control
+law lives.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.52\textwidth]{images/bcast_fade_seq.png}
+    \caption{The deep-fade run of \texttt{make bcfade}, drawn from its
+             transcript. The red span is the $-5$\,dB floor: the lost
+             EOB markers become step-downs (silence as feedback), the
+             survivorship-biased SNR is overruled by the block's loss
+             rate, and the rung-4 blocks carry the stream through the
+             floor until the recovery ask lifts it back.}
+    \label{fig:bcastfadeseq}
+\end{figure}
+
 \subsubsection*{What the clean wire then taught}
 
 Verifying the ported laws on the boards flushed out five real

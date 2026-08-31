@@ -1,0 +1,25 @@
+sequenceDiagram
+    participant A as Sender
+    participant B as Receiver (CAP_BC_STATS)
+    Note over A,B: make bcfade — the measured deep-fade run.<br/>channel +20 dB, fading to a −5 dB floor and back
+    rect rgb(238,247,238)
+    A->>B: block 1 at rung 12 (45 s)
+    A->>B: EOB
+    B->>A: t=47.5 s — stats: 0% loss, asks rung 12
+    end
+    rect rgb(255,236,236)
+    Note over A,B: the fade reaches −5 dB — rung-12 groups die whole,<br/>and the EOB markers and replies die WITH them:<br/>feedback vanishes exactly when it is needed
+    A--xB: EOB lost in the fade
+    Note over A: t=99.3 s — no reply where one was promised IS feedback:<br/>step down to rung 10, next block SHORT (20 s)
+    A--xB: EOB lost again
+    Note over A: t=125.1 s — step down to rung 8
+    A->>B: EOB (rung-8 groups start surviving)
+    Note over B: the SNR estimate still reads +22 dB — it is measured<br/>only on frames that SURVIVED. A lossy block anchors its<br/>ask on the last ask, never the SNR — 34% loss: floor
+    B->>A: t=146 s — stats: 34% block loss, asks rung 4
+    A->>B: block at rung 4 — decodes through the fade floor
+    end
+    rect rgb(238,247,238)
+    B->>A: t=178 s — stats: 0% loss, asks rung 12
+    A->>B: remaining blocks at rung 12 — the fade has lifted
+    end
+    Note over A,B: delivered 5481 of 8192 bytes against 4154 fixed at rung 12 (+32%).<br/>trajectory 12 → 10 → 8 → 4 → 12, all of it driven by the receiver's<br/>stats and the sender's reading of silence
