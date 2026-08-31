@@ -1623,6 +1623,47 @@ continuation when no broadcast is in flight, the retest delivered the
 1\,kB file byte-exact in 19 seconds at rung~12 --- 44 frames in
 eleven groups, zero lost, one completion message.
 
+\paragraph{The negotiation belongs where the payload waits.} The
+socket demo has always \emph{held} a broadcast on an idle link and
+driven the ladder up first (\texttt{bc\_poll\_link}: control-class
+probes every 25\,s, release when the link can carry a broadcast, give
+up after 180\,s). Porting broadcast to the firmware left that
+machinery host-side, on the reasoning that the host sees the status
+stream and can probe with a message first --- and the first real
+operator promptly typed \texttt{bcastfile} into two fresh consoles
+and watched nothing happen, because the idle-link default is rung~0
+and the first 42-second EXTREME frame shows no evidence of itself. Two
+patches told the story in order: first the board's announce line
+gained the \emph{consequence} (\texttt{$\sim$32 min total -- idle
+link defaults to EXTREME: exchange a message first, or use -r}), and
+then the honest fix landed --- \texttt{bc\_poll\_link} runs on the
+board now, semantics line for line. Measured with the operator's exact
+flow, no priming, no flags:
+
+\begin{quote}\ttfamily\small
+12:11:38 board: broadcast: held -- link is idle, probing to bring it
+up (release at NORMAL, give up after 180 s)\\
+12:12:14 board: broadcast: 1024 B at rung 12 (NORMAL), 4 frame(s) per
+group, 1.6 s each, $\sim$18 s total\\
+12:12:33 [B] stored 1024 bytes as rx\_broadcast.bin
+\end{quote}
+
+Thirty-six seconds from command to release, zero operator steps, the
+LINK probe visible on the peer's console as an ordinary message. An
+explicit \texttt{-r} bypasses the hold: the operator said where.
+
+\paragraph{And the console needs no buffer at all.} The first
+\texttt{bcastfile} read the whole file into a host buffer whose
+64\,kB cap refused the first real file (a 73\,kB PNG). The cap was a
+leftover of one-shot thinking: the pump is chunked and paced against
+\texttt{bc\_free} anyway, so it now reads the file
+\emph{sequentially}, a kilobyte per chunk as the board drains --- no
+buffer, no cap, with a short read mid-stream (the file truncated
+underneath the console) ending the broadcast cleanly rather than
+leaving the board waiting for continuations forever. The board never
+held more than its 8\,kB source either way; only the host had
+forgotten that.
+
 \subsection{The Capability Handshake, and 2\,kB Messages}
 \label{sec:cport_caps}
 
