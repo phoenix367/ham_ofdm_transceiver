@@ -529,6 +529,24 @@ Cross-module invariants that are easy to break:
     they see; and the C console does exactly that reset.
     Clean-run reference: 73362 B in 22.3 min at rung 12, 3089 frames,
     0 lost, one start event, byte-identical.
+  * BLOCK STATS (CAP_BC_STATS in the capability record): when the
+    sender HOLDS a peer record with the bit, the stream is cut into
+    ~45 s blocks, each ended by an EOB marker -- a dataless
+    single-frame group (SYNC, dlen 0, no EOS), which an old receiver
+    appends zero bytes for and walks past, so the wire stays
+    backward-compatible. The sender then PAUSES for a reply window and
+    the receiver answers with typ BCSTAT (frames ok, lost, SNR,
+    desired rung); the sender logs it and RE-RUNGS the next groups --
+    legal because every group re-announces its geometry. Invariants
+    from the first live runs, both measured: the receiver's desired
+    rung comes from the STREAM'S OWN SNR mapped through
+    ladder_sens_db + 2.5 (ctl_tx_rung is the decayed chat memory and
+    answered "rung 0" into a +22 dB stream), and a receiver whose
+    reply would not FIT the window stays silent (r < BURST_MIN_RUNG:
+    the first run keyed a 22-second EXTREME stats frame into a
+    5-second window, the sender resumed mid-reply, and the collision
+    cost the receiver the rest of the stream -- 497 bytes stored of
+    8192). No record or no bit = classic silent broadcast, untouched.
   * A lost group is lost WHOLE: the loss is a missed preamble
     acquisition, and every frame behind it goes with it. Measured at
     rung 4 (4-frame groups, 9.2 s each): 24/24 groups over a

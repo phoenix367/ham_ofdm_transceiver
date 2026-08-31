@@ -270,6 +270,7 @@ static const char *diag_typ_name(int t)
     case PKT_TYP_DATA: return "data";
     case PKT_TYP_EXT_DATA: return "ext-data";
     case PKT_TYP_BCAST: return "bcast";
+    case PKT_TYP_BCSTAT: return "bcast-stats";
     default: return "?";
     }
 }
@@ -353,13 +354,14 @@ void station_diag_format(int ev, int a, int b, int c, int d,
             snprintf(out, (size_t)cap, "caps: no answer after %d tries -- "
                      "peer assumed legacy, defaults apply", b);
         else
-            snprintf(out, (size_t)cap, "caps %s: %s%s%s%s%s msg %d B, "
+            snprintf(out, (size_t)cap, "caps %s: %s%s%s%s%s%s msg %d B, "
                      "window %d", a == 2 ? "received" : a == 1 ? "sent (reply)"
                                                                 : "sent",
                      (b & CAP_STREAM) ? "stream " : "",
                      (b & CAP_EXT) ? "ext " : "", (b & CAP_LDPC) ? "ldpc " : "",
                      (b & CAP_BURST) ? "burst " : "",
-                     (b & CAP_BCAST) ? "bcast " : "", c, d);
+                     (b & CAP_BCAST) ? "bcast " : "",
+                     (b & CAP_BC_STATS) ? "bcstats " : "", c, d);
         break;
     default:
         snprintf(out, (size_t)cap, "%s a=%d b=%d c=%d d=%d",

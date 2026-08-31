@@ -111,7 +111,8 @@ DIAG_FMT = [
 def CAPS_NAMES(f):
     return "".join(n + " " for bit, n in ((1, "stream"), (2, "ext"),
                                           (4, "ldpc"), (8, "burst"),
-                                          (16, "bcast")) if f & bit)
+                                          (16, "bcast"),
+                                          (32, "bcstats")) if f & bit)
 QOS_NAME = {0: "ctl", 1: "inter", 2: "bulk"}
 
 BOARD_MSG_MAX = 256             # cport ST_MSG_MAX default

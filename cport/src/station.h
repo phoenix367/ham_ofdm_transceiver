@@ -79,6 +79,9 @@
 #define CAP_LDPC   (1 << 2)
 #define CAP_BURST  (1 << 3)  /* selective-repeat bursts at all */
 #define CAP_BCAST  (1 << 4)  /* receives broadcasts (firmware sets it) */
+#define CAP_BC_STATS (1 << 5) /* will ANSWER a broadcast's end-of-block
+                               * marker with a stats frame (typ BCSTAT):
+                               * frames ok, lost, SNR, desired rung */
 #define CAP_ACK    (1 << 7)  /* this record answers yours */
 #define CAPS_TRIES 2         /* unanswered probes before "legacy peer" */
 #define CAPS_RETRY_S 300.0   /* ...and how long that verdict holds */

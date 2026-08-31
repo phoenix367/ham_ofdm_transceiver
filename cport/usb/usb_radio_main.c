@@ -606,6 +606,19 @@ static int g_bc_close_due;     /* emit a closing EOS group first */
  * never transmitting, and a phantom loss charged to the ladder when
  * the bogus timer finally lapsed on an idle channel). */
 static int g_tx_is_bc;
+/* Block-structured stats (CAP_BC_STATS): when the peer's record says
+ * it will answer, the stream is cut into ~45 s BLOCKS. Each block ends
+ * with an EOB marker -- a dataless single-frame group (SYNC, dlen 0,
+ * no EOS), which an old receiver appends zero bytes for and walks past
+ * -- and the sender then PAUSES for the reply window. The stats frame
+ * (typ BCSTAT) carries frames ok, lost, SNR and the receiver's desired
+ * rung, and the sender re-rungs the next groups to it: every group
+ * re-announces its geometry, so a mid-stream rung change is already
+ * legal on this wire. */
+#define BC_BLOCK_AIR_S 45.0
+static double g_bc_block_air;     /* air time keyed since the last EOB */
+static int g_bc_eob_due;          /* cut the block at the next keying */
+static uint32_t g_bc_stat_wait;   /* pause until then, 0 = not waiting */
 static uint32_t g_bc_starve_ms;  /* when the source ran dry, 0 = it has data */
 #define BC_FEED_TIMEOUT_MS 30000u
 static uint32_t g_bc_wait_deadline, g_bc_next_probe;
@@ -623,7 +636,8 @@ static int g_bc_left[3], g_bc_miss[3];
 static uint32_t g_bc_deadline[3];
 static int g_bc_rx_group = 4, g_bc_ptype = -1, g_bc_last_seq = -1;
 static int g_bc_frames, g_bc_lost;
-static int g_bc_evt_open;   /* a start event went to the host; EOS or a
+static int g_bc_evt_open;
+static int g_bc_stat_due;        /* an EOB asked us for a stats frame */   /* a start event went to the host; EOS or a
                              * dead walk clears it -- per-group SYNCs in
                              * between emit nothing */
 static double g_bc_last_snr;
@@ -889,12 +903,24 @@ static int bc_open_group(void)
     int pkt_n = 0, nf = 0, first = 1, cap0 = BC_FRAME - 3,
         cap = BC_FRAME - 2, grp = bc_group_frames();
 
-    if (g_bc_close_due) {
+    if (g_bc_close_due || g_bc_eob_due) {
+        int eob = !g_bc_close_due;
         memset(payload, 0, sizeof(payload));
-        payload[0] = (uint8_t)(BC_EOS | (g_bc_seq & BC_SEQ_MASK));
+        payload[0] = (uint8_t)((eob ? BC_SYNC : BC_EOS)
+                               | (g_bc_seq & BC_SEQ_MASK));
         payload[1] = 0;                       /* zero data bytes */
+        if (eob) {
+            payload[2] = (uint8_t)(g_bc_ptype_tx & 0x0F);
+            g_bc_seq++;                       /* EOB consumes a seq */
+            g_bc_eob_due = 0;
+            g_bc_block_air = 0.0;
+            g_bc_stat_wait = g_ms
+                + (uint32_t)(2000.0
+                             + 2000.0 * estimate_air_time(g_bc_rung, 8));
+        } else {
+            g_bc_close_due = 0;
+        }
         pkt_n = data_encode(0, payload, BC_FRAME, blocks);
-        g_bc_close_due = 0;
         return phy_build_stream(blocks, pkt_n, 1, PKT_TYP_BCAST, g_bc_rung,
                                 BURST_STREAM_RESYNC);
     }
@@ -937,8 +963,18 @@ static int bc_open_group(void)
                     blocks + (size_t)i * (36 + 8 * BC_FRAME),
                     (size_t)pkt_n);
     }
-    return phy_build_stream(blocks, pkt_n, nf, PKT_TYP_BCAST, g_bc_rung,
-                            BURST_STREAM_RESYNC);
+    {
+        int n = phy_build_stream(blocks, pkt_n, nf, PKT_TYP_BCAST,
+                                 g_bc_rung, BURST_STREAM_RESYNC);
+        if (n > 0) {
+            g_bc_block_air += (double)n / 12000.0;
+            if (g_bc_block_air >= BC_BLOCK_AIR_S
+                && g_st.peer.valid && (g_st.peer.flags & CAP_BC_STATS)
+                && !(g_bc_complete && g_bc_src_off >= g_bc_src_len))
+                g_bc_eob_due = 1;   /* cut here; EOS ends the last block */
+        }
+        return n;
+    }
 }
 
 /* one decoded (or failed) event on receiver m: the broadcast walk.
@@ -1003,7 +1039,12 @@ static int bc_advance(int m, const rxs_event_t *ev)
                 g_bc_rx_group = 4;
             g_bc_left[m] = g_bc_rx_group - 1;
             g_bc_deadline[m] = g_ms + BC_WALK_DEADLINE_MS;
-            if (!g_bc_evt_open) {
+            if (dlen == 0 && !(flags & BC_EOS)) {
+                /* the EOB marker: a dataless SYNC group. Answer with a
+                 * stats frame in the window the sender is now holding
+                 * open -- we declared CAP_BC_STATS, that is the deal */
+                g_bc_stat_due = 1;
+            } else if (!g_bc_evt_open) {
                 g_bc_evt_open = 1;
                 out[nb++] = (uint8_t)(BC_SYNC | g_bc_ptype);
                 usb_modem_emit(&g_modem, UP_EVT_BCAST, out, nb);
@@ -1442,6 +1483,39 @@ int main(void)
                             | (g_beacon.cap_overruns & 0xFFFFu);
                         g_beacon.ev_ring[k][2] = (uint32_t)ev.start_abs;
                     }
+                    if (ev.type == 1 && ev.hdr.typ == PKT_TYP_BCSTAT) {
+                        const uint8_t *b2 = ev.bits;
+                        int j2, v2, k2, by[8];
+                        for (k2 = 0; k2 < 8; k2++) {
+                            for (j2 = 0, v2 = 0; j2 < 8; j2++)
+                                v2 = (v2 << 1)
+                                     | (b2[20 + 8 * k2 + j2] & 1);
+                            by[k2] = v2;
+                        }
+                        {
+                            int ok2 = by[0] | (by[1] << 8);
+                            int lost2 = by[2] | (by[3] << 8);
+                            int want = by[6];
+                            char msg[112], *q = msg;
+                            q = bc_str(q, "broadcast stats from peer: ");
+                            q = bc_num(q, ok2);
+                            q = bc_str(q, " ok, ");
+                            q = bc_num(q, lost2);
+                            q = bc_str(q, " lost, asks rung ");
+                            q = bc_num(q, want);
+                            if (want >= BURST_MIN_RUNG
+                                && want <= g_st.my_max_rung
+                                && want != g_bc_rung
+                                && g_bc_src_off < g_bc_src_len) {
+                                g_bc_rung = want;
+                                q = bc_str(q, " -- re-rung");
+                            }
+                            usb_modem_emit(&g_modem, UP_EVT_LOG, msg,
+                                           (int)(q - msg));
+                        }
+                        g_bc_stat_wait = 0;   /* window served */
+                        continue;
+                    }
                     /* broadcast first: BCAST frames are Data-shaped
                      * but carry no link-control word, so they must
                      * never reach the station's reassembler */
@@ -1562,8 +1636,63 @@ int main(void)
                     && (uint32_t)(g_ms - g_bc_rx_last_ms)
                            < (uint32_t)(g_bc_hold_s * 1000.0))
                     busy_now = 1;
-                if (!busy_now && !g_bc_waiting
-                    && (g_bc_close_due || g_bc_src_off < g_bc_src_len)
+                if (g_bc_stat_due && !g_tx_on && !g_txs) {
+                    /* exempt from the bc-rx hold: the sender is
+                     * pausing for exactly this frame */
+                    uint8_t pl[8], bits[600];
+                    int pn, r;
+                    /* the DESIRED rung is what this broadcast's own
+                     * measured SNR can carry -- not ctl_tx_rung, which
+                     * is the decayed chat-link memory and answered
+                     * "rung 0" into a +22 dB stream on the first live
+                     * run. Highest rung whose sensitivity clears the
+                     * stream's SNR with the ladder's usual margin: */
+                    for (r = ladder_n() - 1; r > 0; r--)
+                        if (g_bc_last_snr >= ladder_sens_db(r) + 2.5)
+                            break;
+                    if (r > g_st.my_max_rung)
+                        r = g_st.my_max_rung;
+                    pl[0] = (uint8_t)(g_bc_frames & 0xFF);
+                    pl[1] = (uint8_t)(g_bc_frames >> 8);
+                    pl[2] = (uint8_t)(g_bc_lost & 0xFF);
+                    pl[3] = (uint8_t)(g_bc_lost >> 8);
+                    {
+                        int q8 = (int)(g_bc_last_snr * 256.0);
+                        pl[4] = (uint8_t)(q8 & 0xFF);
+                        pl[5] = (uint8_t)((q8 >> 8) & 0xFF);
+                    }
+                    pl[6] = (uint8_t)r;
+                    pl[7] = 0;
+                    if (r < BURST_MIN_RUNG) {
+                        /* A reply the window cannot fit is worse than
+                         * none: the first live run keyed a 22-second
+                         * EXTREME stats frame into a 5-second window,
+                         * the sender resumed groups mid-reply, and the
+                         * collision cost the receiver the rest of the
+                         * stream (348 frames heard, 497 bytes stored
+                         * of 8192). Silence is data too. */
+                        g_bc_stat_due = 0;
+                        goto station_done;
+                    }
+                    pn = data_encode(0, pl, 8, bits);
+                    if (phy_build_stream(bits, pn, 1, PKT_TYP_BCSTAT,
+                                         r, 0) > 0 && g_txs) {
+                        g_txf_r = g_txf_w = 0;
+                        tx_fill(0);
+                        g_cap_r = g_cap_w;
+                        g_tx_on = 1;
+                        g_tx_is_bc = 1;   /* not a station frame */
+                        g_beacon.tx_frames++;
+                    }
+                    g_bc_stat_due = 0;
+                    goto station_done;
+                }
+                if (g_bc_stat_wait
+                    && (int32_t)(g_ms - g_bc_stat_wait) > 0)
+                    g_bc_stat_wait = 0;      /* window over, no stats */
+                if (!busy_now && !g_bc_waiting && !g_bc_stat_wait
+                    && (g_bc_close_due || g_bc_eob_due
+                        || g_bc_src_off < g_bc_src_len)
                     /* while chunks are still arriving, only key a FULL
                      * group -- a starved tail group would go out
                      * without EOS and the true last frame must carry

@@ -1127,13 +1127,14 @@ static int usb_command(char *line)
                     snprintf(mr, sizeof(mr), "%d", g_ust.peer_max_rung1 - 1);
                 else
                     snprintf(mr, sizeof(mr), "unspecified");
-                printf("  peer: %s%s%s%s%smessages up to %u B, window %u, "
+                printf("  peer: %s%s%s%s%s%smessages up to %u B, window %u, "
                        "rung ceiling %s%s\n",
                        (g_ust.peer_caps & 1) ? "stream " : "",
                        (g_ust.peer_caps & 2) ? "ext " : "",
                        (g_ust.peer_caps & 4) ? "ldpc " : "",
                        (g_ust.peer_caps & 8) ? "burst " : "",
                        (g_ust.peer_caps & 16) ? "bcast " : "",
+                       (g_ust.peer_caps & 32) ? "bcstats " : "",
                        g_ust.peer_msg_max, g_ust.peer_win_max, mr,
                        g_ust.peer_state == 3 ? " (handshake complete)"
                                              : " (awaiting our confirmation)");

@@ -188,7 +188,7 @@ void usb_modem_init(usb_modem_t *m, station_t *st, const uint8_t uid[12],
      * layer's own abilities plus broadcast if this build has it */
     st->fw_ver = fw_ver;
     if (caps & UP_CAP_BCAST)
-        st->my_caps |= CAP_BCAST;
+        st->my_caps |= CAP_BCAST | CAP_BC_STATS;
 }
 
 void usb_modem_rx(usb_modem_t *m, const uint8_t *data, int n)

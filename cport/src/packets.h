@@ -17,6 +17,9 @@
 /* broadcast (non-ARQ): Data-shaped, but the reserved field is NOT a link
  * control word and the frame must never reach the ARQ reassembler */
 #define PKT_TYP_BCAST 6
+/* broadcast STATS reply (receiver -> sender, unicast): Data-shaped,
+ * answers the end-of-block marker; never reaches the ARQ reassembler */
+#define PKT_TYP_BCSTAT 7
 
 /* packet bit count from a decoded header (type-dependent len units) */
 #define PKT_BITS_FROM_HDR(typ, len) \
