@@ -547,6 +547,32 @@ Cross-module invariants that are easy to break:
     5-second window, the sender resumed mid-reply, and the collision
     cost the receiver the rest of the stream -- 497 bytes stored of
     8192). No record or no bit = classic silent broadcast, untouched.
+    The FADING harness (`make bcfade`, the host twin of the whole
+    block/stats machinery over an SNR profile the wire stand cannot
+    produce) proved two control laws now in the firmware: a LOSSY
+    block anchors its ask on the receiver's own last ask, never the
+    SNR (survivorship bias: +22 dB measured inside a -5 dB fade),
+    severe loss (>40%) goes straight to the floor; and NO REPLY where
+    one was promised steps the sender down 2 rungs and shortens the
+    next block to 20 s (silence is feedback). Measured: deep-fade
+    delivery +32% over fixed-rung, mild +39%.
+  * The stats EXCHANGE took five board-side fixes, each measured on
+    the stand: (1) the SENDER must listen on the mode it broadcasts in
+    (follow_rung knew nothing about broadcast; the mask read
+    EXTREME-only mid-NORMAL-broadcast); (2) the reply window arms when
+    the EOB's CARRIER DROPS, sized for the real chain (~9.4 s: peer
+    commit + keying + reply air + our commit), not at group build; (3)
+    the reply TRANSPORT is pinned to the NORMAL floor (BPSK 1/2
+    decodes at any SNR the stream survives; the desired rung rides
+    inside) and B logs "stats keyed"; (4) after EVERY own transmission
+    toggle each active rxs instance off/on -- the capture stream
+    stitches pre-tx to post-tx samples, detectors false-lock on the
+    seam, and the rearm skip blinds them for the 1-4 s in which the
+    reply arrives (chat never noticed; two of three replies lost); (5)
+    the station must NOT key into a stats window the broadcast opened
+    (g_bc_stat_wait holds poll_tx) -- a leftover chat frame defeated
+    every FIRST exchange while later ones worked, which is why it
+    masqueraded as a timing race.
   * A lost group is lost WHOLE: the loss is a missed preamble
     acquisition, and every frame behind it goes with it. Measured at
     rung 4 (4-frame groups, 9.2 s each): 24/24 groups over a
