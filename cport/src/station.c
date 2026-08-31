@@ -589,7 +589,7 @@ static int caps_probe_wanted(station_t *st, double t)
         st->peer.legacy = 0;          /* re-probe: firmware may have changed */
         st->caps_tries = 0;
     }
-    if (!(st->qcount[QOS_BULK] || st->cur_bulk.active))
+    if (!(st->qcount[QOS_BULK] || st->cur_bulk.active || st->caps_kick))
         return 0;
     if (st->btx.active || st->pending.active || st->caps_inflight)
         return 0;
@@ -978,7 +978,12 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
     {
         int owes_ack = (st->last_rx_seq >= 0 && st->reply_due)
                        || st->brx.ack_due;
-        if (!owes_ack && !station_has_traffic(st))
+        /* a kicked or owed capability exchange is a reason to transmit
+         * even with every queue empty -- the kick path carried no
+         * traffic and this early-out silently swallowed it: a held
+         * broadcast probed for 180 s with tx_frames 0 */
+        if (!owes_ack && !station_has_traffic(st)
+            && !st->caps_kick && !st->caps_reply_due)
             return 0;
     }
 
@@ -1030,6 +1035,7 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
         if (n <= 0)
             return 0;
         st->caps_reply_due = 0;
+        st->caps_kick = 0;
         st->caps_sent = 1;
         st->caps_inflight = 1;
         st->caps_seq = lc.seq;

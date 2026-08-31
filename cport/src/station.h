@@ -260,6 +260,10 @@ typedef struct {
     int caps_confirmed;    /* the peer acked the frame that carried it */
     int caps_inflight;     /* a CAPS frame awaits its reply (forgiven) */
     int caps_tries, caps_seq;
+    int caps_kick;         /* fire the caps probe without bulk waiting
+                            * (a held broadcast probes with CAPS: the
+                            * exchange moves the ladder AND fills the
+                            * record) -- consumed by the next probe */
     int fw_ver;            /* advertised in the record; caller sets */
     int caps_disabled;     /* test knob: behave like a peer that predates
                             * the handshake (ignore CAPS, never send) */

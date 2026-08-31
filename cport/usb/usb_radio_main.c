@@ -606,7 +606,7 @@ static int g_bc_close_due;     /* emit a closing EOS group first */
  * never transmitting, and a phantom loss charged to the ladder when
  * the bogus timer finally lapsed on an idle channel). */
 static int g_tx_is_bc;
-static uint32_t g_bc_feed_last_ms;
+static uint32_t g_bc_starve_ms;  /* when the source ran dry, 0 = it has data */
 #define BC_FEED_TIMEOUT_MS 30000u
 static uint32_t g_bc_wait_deadline, g_bc_next_probe;
 #define BC_LINK_TIMEOUT_MS 180000u
@@ -672,7 +672,6 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
     (void)ctx;
     if (len <= 0 || len > BC_TX_CAP)
         return;
-    g_bc_feed_last_ms = g_ms ? g_ms : 1;
     if (cont) {
         if (g_bc_src_len == 0)
             return;   /* no broadcast in flight: a stray continuation
@@ -733,11 +732,16 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
     if (rung > 12 && g_bc_rung < BURST_MIN_RUNG) {
         /* no rung given and the link cannot carry a broadcast yet:
          * hold the payload and bring the link up first */
-        static const uint8_t probe[] = "LINK";
         g_bc_waiting = 1;
         g_bc_wait_deadline = g_ms + BC_LINK_TIMEOUT_MS;
         g_bc_next_probe = g_ms + BC_PROBE_EVERY_MS;
-        station_submit(&g_st, probe, (int)sizeof(probe) - 1, QOS_CONTROL);
+        if (!g_st.peer.valid && !g_st.peer.legacy) {
+            g_st.caps_kick = 1;
+        } else {
+            static const uint8_t probe[] = "LINK";
+            station_submit(&g_st, probe, (int)sizeof(probe) - 1,
+                           QOS_CONTROL);
+        }
         usb_modem_emit(&g_modem, UP_EVT_LOG,
                        "broadcast: held -- link is idle, probing to bring "
                        "it up (release at NORMAL, give up after 180 s)",
@@ -824,9 +828,18 @@ static void bc_poll_link(void)
         return;
     }
     if ((int32_t)(g_ms - g_bc_next_probe) >= 0) {
-        static const uint8_t probe[] = "LINK";
         g_bc_next_probe = g_ms + BC_PROBE_EVERY_MS;
-        station_submit(&g_st, probe, (int)sizeof(probe) - 1, QOS_CONTROL);
+        if (!g_st.peer.valid && !g_st.peer.legacy) {
+            /* probe WITH the capability record: the exchange moves the
+             * ladder exactly as a LINK frame would, and fills the peer
+             * record -- so status can answer "who is out there" before
+             * the broadcast releases */
+            g_st.caps_kick = 1;
+        } else {
+            static const uint8_t probe[] = "LINK";
+            station_submit(&g_st, probe, (int)sizeof(probe) - 1,
+                           QOS_CONTROL);
+        }
     }
 }
 
@@ -1457,13 +1470,30 @@ int main(void)
                                       * next SYNC is a new start */
                 g_bc_last_seq = -1;
             }
-            if (!g_bc_complete && g_bc_feed_last_ms
-                && (uint32_t)(g_ms - g_bc_feed_last_ms) > BC_FEED_TIMEOUT_MS) {
-                g_bc_complete = 1;    /* truncate: drain what we hold */
-                g_bc_feed_last_ms = 0;
-                usb_modem_emit(&g_modem, UP_EVT_LOG,
-                               "broadcast: host stopped feeding -- "
-                               "closing the stream truncated", 57);
+            /* The abandoned-host timeout counts from the moment the
+             * SOURCE RAN DRY, never from the last chunk: at rung 8 the
+             * board drains 38 B/s and a healthy host's next chunk is
+             * ~27 s out -- the first version timed on chunk gaps and
+             * cried "host stopped feeding" three times into a live
+             * transfer, truncating and un-truncating as it went. A
+             * starved transmitter with more file promised is the ONLY
+             * abandoned state. */
+            if (!g_bc_complete && g_bc_src_len > 0
+                && g_bc_src_off >= g_bc_src_len) {
+                if (!g_bc_starve_ms) {
+                    g_bc_starve_ms = g_ms ? g_ms : 1;
+                } else if ((uint32_t)(g_ms - g_bc_starve_ms)
+                           > BC_FEED_TIMEOUT_MS) {
+                    static const char m[] =
+                        "broadcast: host stopped feeding -- closing the "
+                        "stream truncated";
+                    g_bc_complete = 1;
+                    g_bc_starve_ms = 0;
+                    usb_modem_emit(&g_modem, UP_EVT_LOG, m,
+                                   (int)sizeof(m) - 1);
+                }
+            } else {
+                g_bc_starve_ms = 0;
             }
             g_modem.bcast_free =
                 (uint16_t)(BC_TX_CAP - (g_bc_src_len - g_bc_src_off));

@@ -464,12 +464,20 @@ Cross-module invariants that are easy to break:
     26-byte frames are 9.2 s at rung 4 but over a minute at EXTREME,
     which would break the carrier-sense time constants above.
   * HOLD-AND-PROBE runs in the FIRMWARE (bc_poll_link): a broadcast
-    with no explicit rung and an idle link is held while control-class
-    LINK probes bring the ladder up, released at BURST_MIN_RUNG,
-    dropped with a log after 180 s. It was first left host-side by
-    design and the first real operator hit a silent half-hour EXTREME
-    broadcast -- the negotiation belongs where the payload waits. An
-    explicit `-r` still bypasses the hold.
+    with no explicit rung and an idle link is held while probes bring
+    the ladder up, released at BURST_MIN_RUNG, dropped with a log
+    after 180 s. It was first left host-side by design and the first
+    real operator hit a silent half-hour EXTREME broadcast -- the
+    negotiation belongs where the payload waits. An explicit `-r`
+    still bypasses the hold. The probe IS the capability exchange when
+    the peer is a stranger (`caps_kick`): same ladder movement as a
+    LINK frame, and the record is filled before release, so `status`
+    answers "who is out there" mid-broadcast and bcastfile warns if
+    the known peer never declared CAP_BCAST (legacy peers fall back to
+    a plain LINK probe). The kick MUST be in poll_tx's early-out gate
+    (`!station_has_traffic && !caps_kick && !caps_reply_due`): the
+    kicked probe carries no traffic, and the gate silently swallowed
+    it -- measured, a held broadcast probed 180 s with tx_frames 0.
   * The rung DECIDES WHETHER THE PEER IS LISTENING AT ALL, because
     active modes follow the negotiated rung (`follow_rung`) and decay
     to EXTREME-only after `RX_STALE_S` of silence. So the default
@@ -502,7 +510,10 @@ Cross-module invariants that are easy to break:
     CLOSED on the air with a zero-length EOS frame -- without one, the
     stale tail of the aborted stream lands in the next sink (measured:
     a 73 kB file arrived as 74027 bytes, the first 665 the previous
-    run's groups); the start EVENT to the host fires once per STREAM,
+    run's groups); the host-gone timeout counts from the source
+    RUNNING DRY, never from chunk gaps -- at rung 8 the drain is
+    38 B/s and a healthy host's next chunk is ~27 s out, so gap-timing
+    fired "host stopped feeding" three times into a live transfer; the start EVENT to the host fires once per STREAM,
     not per group SYNC (g_bc_evt_open, cleared by EOS or a
     2x-hold-time silence), so consoles reset their sink on every start
     they see; and the C console does exactly that reset.

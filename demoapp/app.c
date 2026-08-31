@@ -1055,6 +1055,11 @@ static int usb_command(char *line)
                 printf("bcastfile: %s is empty\n", rest);
                 fclose(f);
             } else {
+                if (g_ust_valid && g_ust.peer_state >= 2
+                    && !(g_ust.peer_caps & 16))
+                    printf("note: the known peer did not declare "
+                           "broadcast reception -- other listeners may "
+                           "still hear it\n");
                 g_ubcf_f = f;         /* read sequentially as the board
                                        * drains; no size cap */
                 g_ubcf_len = sz;
