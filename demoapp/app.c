@@ -930,8 +930,18 @@ static void usb_on_frame(void *ctx, uint8_t type, const uint8_t *pl, int len)
         if (len < 1)
             break;
         if (pl[0] & BC_SYNC) {
+            /* one start event per STREAM now (the firmware suppresses
+             * per-group duplicates), so this is the moment to reset
+             * the sink -- a stale open file belongs to a stream that
+             * died without its EOS */
             g_ubc_ptype = pl[0] & 0x0F;
-            if (g_ubc_ptype == BC_PT_OPAQUE && !g_ubc_file)
+            if (g_ubc_file) {
+                fclose(g_ubc_file);
+                g_ubc_file = 0;
+                g_ubc_written = 0;
+            }
+            g_ubc_len = 0;
+            if (g_ubc_ptype == BC_PT_OPAQUE)
                 g_ubc_file = fopen(BC_RX_PATH, "wb");
             printf("\n%s [%s] << broadcast starting (ptype %d%s)\n> ",
                    tstamp(), g_name, g_ubc_ptype,

@@ -593,6 +593,14 @@ static int g_bc_complete = 1;  /* no more chunks coming from the host */
  * log line, if 180 s of probing cannot get it there. An explicit -r
  * bypasses the hold entirely: the operator said where. */
 static int g_bc_waiting;
+/* an incomplete stream the host stopped feeding is CLOSED on the air
+ * with an explicit zero-length EOS frame -- without one, the stale
+ * tail of a superseded broadcast lands in the next sink: measured, a
+ * 73 kB file arrived as 74027 bytes, the first 665 of them the
+ * previous aborted run's groups */
+static int g_bc_close_due;     /* emit a closing EOS group first */
+static uint32_t g_bc_feed_last_ms;
+#define BC_FEED_TIMEOUT_MS 30000u
 static uint32_t g_bc_wait_deadline, g_bc_next_probe;
 #define BC_LINK_TIMEOUT_MS 180000u
 #define BC_PROBE_EVERY_MS 25000u
@@ -608,6 +616,9 @@ static int g_bc_left[3], g_bc_miss[3];
 static uint32_t g_bc_deadline[3];
 static int g_bc_rx_group = 4, g_bc_ptype = -1, g_bc_last_seq = -1;
 static int g_bc_frames, g_bc_lost;
+static int g_bc_evt_open;   /* a start event went to the host; EOS or a
+                             * dead walk clears it -- per-group SYNCs in
+                             * between emit nothing */
 static double g_bc_last_snr;
 static uint32_t g_bc_rx_last_ms = 0;   /* 0 = never */
 
@@ -654,6 +665,7 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
     (void)ctx;
     if (len <= 0 || len > BC_TX_CAP)
         return;
+    g_bc_feed_last_ms = g_ms ? g_ms : 1;
     if (cont) {
         if (g_bc_src_len == 0)
             return;   /* no broadcast in flight: a stray continuation
@@ -682,6 +694,9 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
         g_bc_complete = !more;
         return;
     }
+    if (!g_bc_complete || g_bc_src_off < g_bc_src_len)
+        g_bc_close_due = 1;   /* an unfinished stream is on the air:
+                               * close it before this one starts */
     memcpy(g_bc_src, data, (size_t)len);
     g_bc_src_len = len;
     g_bc_src_off = 0;
@@ -741,7 +756,10 @@ static void bc_announce(void)
                           * 10.0 + 0.5);
         p = bc_str(p, "broadcast: ");
         p = bc_num(p, g_bc_src_len);
-        p = bc_str(p, " B at rung ");
+        if (!g_bc_complete)
+            p = bc_str(p, "+ B (streaming from the host) at rung ");
+        else
+            p = bc_str(p, " B at rung ");
         p = bc_num(p, g_bc_rung);
         p = bc_str(p, " (");
         p = bc_str(p, MODE_NAME[(int)ladder_mode(g_bc_rung)]);
@@ -759,7 +777,7 @@ static void bc_announce(void)
             int per = (BC_FRAME - 3) + (grp - 1) * (BC_FRAME - 2);
             int groups = (g_bc_src_len - g_bc_src_off + per - 1) / per;
             int total_s = (groups * air10 + 9) / 10;
-            p = bc_str(p, ", ~");
+            p = bc_str(p, g_bc_complete ? ", ~" : ", ~>");
             if (total_s >= 120) {
                 p = bc_num(p, (total_s + 59) / 60);
                 p = bc_str(p, " min total");
@@ -837,6 +855,15 @@ static int bc_open_group(void)
     int pkt_n = 0, nf = 0, first = 1, cap0 = BC_FRAME - 3,
         cap = BC_FRAME - 2, grp = bc_group_frames();
 
+    if (g_bc_close_due) {
+        memset(payload, 0, sizeof(payload));
+        payload[0] = (uint8_t)(BC_EOS | (g_bc_seq & BC_SEQ_MASK));
+        payload[1] = 0;                       /* zero data bytes */
+        pkt_n = data_encode(0, payload, BC_FRAME, blocks);
+        g_bc_close_due = 0;
+        return phy_build_stream(blocks, pkt_n, 1, PKT_TYP_BCAST, g_bc_rung,
+                                BURST_STREAM_RESYNC);
+    }
     if (g_bc_src_off >= g_bc_src_len)
         return 0;
     while (nf < grp && g_bc_src_off < g_bc_src_len) {
@@ -939,8 +966,11 @@ static int bc_advance(int m, const rxs_event_t *ev)
                 g_bc_rx_group = 4;
             g_bc_left[m] = g_bc_rx_group - 1;
             g_bc_deadline[m] = g_ms + BC_WALK_DEADLINE_MS;
-            out[nb++] = (uint8_t)(BC_SYNC | g_bc_ptype);
-            usb_modem_emit(&g_modem, UP_EVT_BCAST, out, nb);
+            if (!g_bc_evt_open) {
+                g_bc_evt_open = 1;
+                out[nb++] = (uint8_t)(BC_SYNC | g_bc_ptype);
+                usb_modem_emit(&g_modem, UP_EVT_BCAST, out, nb);
+            }
             nb = 0;
         } else if (g_bc_left[m] > 0) {
             g_bc_left[m]--;
@@ -973,8 +1003,10 @@ static int bc_advance(int m, const rxs_event_t *ev)
         if (g_bc_left[m] > 0
             && !rxs_continue_burst(g_rxs[m], BURST_STREAM_RESYNC))
             g_bc_left[m] = 0;
-        if (flags & BC_EOS)
+        if (flags & BC_EOS) {
             bc_emit_stats();
+            g_bc_evt_open = 0;
+        }
         return 1;
     }
 }
@@ -1409,6 +1441,21 @@ int main(void)
                 g_beacon.cs_peak_ms = g_ms;
             }
             bc_poll_link();
+            if (g_bc_evt_open && g_bc_rx_last_ms
+                && (uint32_t)(g_ms - g_bc_rx_last_ms)
+                       > (uint32_t)(2.0 * g_bc_hold_s * 1000.0)) {
+                g_bc_evt_open = 0;   /* stream died without EOS: the
+                                      * next SYNC is a new start */
+                g_bc_last_seq = -1;
+            }
+            if (!g_bc_complete && g_bc_feed_last_ms
+                && (uint32_t)(g_ms - g_bc_feed_last_ms) > BC_FEED_TIMEOUT_MS) {
+                g_bc_complete = 1;    /* truncate: drain what we hold */
+                g_bc_feed_last_ms = 0;
+                usb_modem_emit(&g_modem, UP_EVT_LOG,
+                               "broadcast: host stopped feeding -- "
+                               "closing the stream truncated", 57);
+            }
             g_modem.bcast_free =
                 (uint16_t)(BC_TX_CAP - (g_bc_src_len - g_bc_src_off));
             follow_rung(t);
@@ -1453,12 +1500,12 @@ int main(void)
                            < (uint32_t)(g_bc_hold_s * 1000.0))
                     busy_now = 1;
                 if (!busy_now && !g_bc_waiting
-                    && g_bc_src_off < g_bc_src_len
+                    && (g_bc_close_due || g_bc_src_off < g_bc_src_len)
                     /* while chunks are still arriving, only key a FULL
                      * group -- a starved tail group would go out
                      * without EOS and the true last frame must carry
                      * it */
-                    && (g_bc_complete
+                    && (g_bc_close_due || g_bc_complete
                         || g_bc_src_len - g_bc_src_off
                                >= BC_GROUP * (BC_FRAME - 2))) {
                     /* one GROUP per keying; the yield between groups is

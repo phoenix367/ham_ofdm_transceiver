@@ -496,7 +496,18 @@ Cross-module invariants that are easy to break:
     groups are keyed -- a starved tail group would otherwise go out
     without EOS and the receiver's walk would never see the end. Raw
     bytes, ptype OPAQUE, same convention as socket-mode broadcastfile:
-    every receiver stores rx_broadcast.bin.
+    every receiver stores rx_broadcast.bin. Three stream-boundary
+    rules, each from a measured failure: an incomplete stream that a
+    new bcastfile supersedes (or whose host stops feeding for 30 s) is
+    CLOSED on the air with a zero-length EOS frame -- without one, the
+    stale tail of the aborted stream lands in the next sink (measured:
+    a 73 kB file arrived as 74027 bytes, the first 665 the previous
+    run's groups); the start EVENT to the host fires once per STREAM,
+    not per group SYNC (g_bc_evt_open, cleared by EOS or a
+    2x-hold-time silence), so consoles reset their sink on every start
+    they see; and the C console does exactly that reset.
+    Clean-run reference: 73362 B in 22.3 min at rung 12, 3089 frames,
+    0 lost, one start event, byte-identical.
   * A lost group is lost WHOLE: the loss is a missed preamble
     acquisition, and every frame behind it goes with it. Measured at
     rung 4 (4-frame groups, 9.2 s each): 24/24 groups over a
