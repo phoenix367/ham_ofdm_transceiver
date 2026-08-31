@@ -440,12 +440,12 @@ class Console:
                 rest = part[1] if len(part) > 1 else ""
         try:
             with open(rest, "rb") as f:
-                data = f.read(65537)
+                data = f.read(262145)
         except OSError as e:                          # noqa: BLE001
             self.plain(f"bcastfile: cannot open {rest}: {e}")
             return
-        if not data or len(data) > 65536:
-            self.plain("bcastfile: empty, or over the 64 kB cap")
+        if not data or len(data) > 262144:
+            self.plain("bcastfile: empty, or over the 256 kB cap")
             return
         self._ubcf = data
         self._ubcf_off = 0

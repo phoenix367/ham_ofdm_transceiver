@@ -463,6 +463,13 @@ Cross-module invariants that are easy to break:
     log2(group) -- and is capped by air time (`bc_group_frames`): four
     26-byte frames are 9.2 s at rung 4 but over a minute at EXTREME,
     which would break the carrier-sense time constants above.
+  * HOLD-AND-PROBE runs in the FIRMWARE (bc_poll_link): a broadcast
+    with no explicit rung and an idle link is held while control-class
+    LINK probes bring the ladder up, released at BURST_MIN_RUNG,
+    dropped with a log after 180 s. It was first left host-side by
+    design and the first real operator hit a silent half-hour EXTREME
+    broadcast -- the negotiation belongs where the payload waits. An
+    explicit `-r` still bypasses the hold.
   * The rung DECIDES WHETHER THE PEER IS LISTENING AT ALL, because
     active modes follow the negotiated rung (`follow_rung`) and decay
     to EXTREME-only after `RX_STALE_S` of silence. So the default

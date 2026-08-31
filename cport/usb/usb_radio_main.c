@@ -554,9 +554,10 @@ static void burst_advance(int m, const rxs_event_t *ev)
  * 64 kB because a PC can); groups of BC_GROUP frames go out one keying
  * per group through the SAME streaming generator every other
  * transmission uses, yielding to carrier sense between groups, so no
- * air buffer exists at all. The hold-and-probe machinery demoapp runs
- * (drive the ladder up before a broadcast) stays on the host side:
- * the host sees the status stream and can probe with a message first.
+ * air buffer exists at all. The hold-and-probe machinery runs HERE
+ * (bc_poll_link below), demoapp's line for line -- it first stayed on
+ * the host side, and the first operator promptly hit a silent
+ * half-hour EXTREME broadcast.
  * RX: the walk is demoapp's line for line -- descriptor BEFORE arming
  * the group count, EOS ends the group whatever the descriptor
  * promised, failed blocks are stepped over but bounded -- and the
@@ -584,6 +585,17 @@ static double g_bc_hold_s = BC_RX_HOLD_S;
 static uint8_t g_bc_src[BC_TX_CAP];
 static int g_bc_src_len, g_bc_src_off, g_bc_seq, g_bc_rung, g_bc_ptype_tx;
 static int g_bc_complete = 1;  /* no more chunks coming from the host */
+/* Hold-and-probe, the socket demo's line for line (bc_poll_link): a
+ * broadcast with no rung given and an idle link is HELD while
+ * control-class probes drive the ladder up -- a probe is a frame the
+ * peer answers, which is exactly what moves it. Released the moment
+ * the link reaches a rung that can carry a broadcast; dropped, with a
+ * log line, if 180 s of probing cannot get it there. An explicit -r
+ * bypasses the hold entirely: the operator said where. */
+static int g_bc_waiting;
+static uint32_t g_bc_wait_deadline, g_bc_next_probe;
+#define BC_LINK_TIMEOUT_MS 180000u
+#define BC_PROBE_EVERY_MS 25000u
 static int g_bc_left[3], g_bc_miss[3];
 /* A broadcast walk holds this station's transmitter exactly as a burst
  * walk does, so it needs the same escape: a peer that stops mid-group
@@ -607,6 +619,7 @@ static uint32_t g_bc_rx_last_ms = 0;   /* 0 = never */
  * follow the switch. There is no queue: a broadcast nobody
  * acknowledges has no backpressure to queue against. */
 static int bc_group_frames(void);
+static void bc_announce(void);
 
 /* the image has no stdio: two helpers are cheaper than pulling one in */
 static char *bc_num(char *p, int v)
@@ -695,6 +708,25 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
     g_bc_rung = (rung >= 0 && rung <= 12)
                     ? rung
                     : ctl_tx_rung(&g_st.ctl, g_modem.now);
+    if (rung > 12 && g_bc_rung < BURST_MIN_RUNG) {
+        /* no rung given and the link cannot carry a broadcast yet:
+         * hold the payload and bring the link up first */
+        static const uint8_t probe[] = "LINK";
+        g_bc_waiting = 1;
+        g_bc_wait_deadline = g_ms + BC_LINK_TIMEOUT_MS;
+        g_bc_next_probe = g_ms + BC_PROBE_EVERY_MS;
+        station_submit(&g_st, probe, (int)sizeof(probe) - 1, QOS_CONTROL);
+        usb_modem_emit(&g_modem, UP_EVT_LOG,
+                       "broadcast: held -- link is idle, probing to bring "
+                       "it up (release at NORMAL, give up after 180 s)",
+                       102);
+        return;
+    }
+    bc_announce();
+}
+
+static void bc_announce(void)
+{
     {   /* Say what was chosen. The host asked for "the link's rung"
          * and cannot see which one that was -- and when a broadcast
          * goes unheard the rung is the first thing to check, because
@@ -708,7 +740,7 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
         int air10 = (int)(stream_air_time_pub(g_bc_rung, BC_FRAME, grp)
                           * 10.0 + 0.5);
         p = bc_str(p, "broadcast: ");
-        p = bc_num(p, len);
+        p = bc_num(p, g_bc_src_len);
         p = bc_str(p, " B at rung ");
         p = bc_num(p, g_bc_rung);
         p = bc_str(p, " (");
@@ -740,6 +772,36 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
                               "exchange a message first, or use -r");
         }
         usb_modem_emit(&g_modem, UP_EVT_LOG, msg, (int)(p - msg));
+    }
+}
+
+/* the hold's poll: runs in the 1 kHz block */
+static void bc_poll_link(void)
+{
+    if (!g_bc_waiting)
+        return;
+    {
+        int rung = ctl_tx_rung(&g_st.ctl, g_modem.now);
+        if (rung >= BURST_MIN_RUNG) {
+            g_bc_waiting = 0;
+            g_bc_rung = rung;
+            bc_announce();
+            return;
+        }
+    }
+    if ((int32_t)(g_ms - g_bc_wait_deadline) > 0) {
+        g_bc_waiting = 0;
+        g_bc_src_len = g_bc_src_off = 0;
+        g_bc_complete = 1;
+        usb_modem_emit(&g_modem, UP_EVT_LOG,
+                       "broadcast: gave up -- 180 s of probing and the "
+                       "link still cannot carry it", 76);
+        return;
+    }
+    if ((int32_t)(g_ms - g_bc_next_probe) >= 0) {
+        static const uint8_t probe[] = "LINK";
+        g_bc_next_probe = g_ms + BC_PROBE_EVERY_MS;
+        station_submit(&g_st, probe, (int)sizeof(probe) - 1, QOS_CONTROL);
     }
 }
 
@@ -1346,6 +1408,7 @@ int main(void)
                 g_beacon.cs_peak = g_cs.mean;
                 g_beacon.cs_peak_ms = g_ms;
             }
+            bc_poll_link();
             g_modem.bcast_free =
                 (uint16_t)(BC_TX_CAP - (g_bc_src_len - g_bc_src_off));
             follow_rung(t);
@@ -1389,7 +1452,8 @@ int main(void)
                     && (uint32_t)(g_ms - g_bc_rx_last_ms)
                            < (uint32_t)(g_bc_hold_s * 1000.0))
                     busy_now = 1;
-                if (!busy_now && g_bc_src_off < g_bc_src_len
+                if (!busy_now && !g_bc_waiting
+                    && g_bc_src_off < g_bc_src_len
                     /* while chunks are still arriving, only key a FULL
                      * group -- a starved tail group would go out
                      * without EOS and the true last frame must carry

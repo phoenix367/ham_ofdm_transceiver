@@ -672,7 +672,7 @@ static char g_upfile[128];
  * rx_broadcast.bin whichever path carried it. */
 #define UBCF_CHUNK 1024
 static void usb_send_frame(uint8_t type, const void *payload, int len);
-static uint8_t g_ubcf[65536];
+static uint8_t g_ubcf[262144];
 static int g_ubcf_len, g_ubcf_off = -1, g_ubcf_rung;
 
 static void usb_pump_bcfile(void)
