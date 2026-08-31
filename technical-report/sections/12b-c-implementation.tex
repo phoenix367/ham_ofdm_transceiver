@@ -1730,6 +1730,84 @@ zero lost, a minute faster than the same file at flat rung~8. A
 broadcast to strangers, or to a peer that never declared the bit,
 remains exactly the classic silent stream.
 
+\subsubsection*{Adaptation under a fade}
+
+The wire between the boards cannot fade, so the fading test is a host
+twin in the project's usual style: \texttt{make bcfade} runs the
+firmware's block/stats/re-rung machinery --- sender state machine,
+receiver walk, both control decisions --- over an AWGN channel whose
+SNR follows a V-shaped profile ($+20 \to -5 \to +20$\,dB over a
+60-second floor). Its first run earned the harness its place: the
+adaptation \emph{did not adapt}. The receiver's SNR estimate is
+measured only on frames strong enough to decode --- survivorship bias
+--- and read $+22$\,dB inside the $-5$\,dB fade while 41\% of a
+block died; meanwhile the EOB markers and stats replies died with the
+fade, so the feedback vanished exactly when it was needed. Two control
+laws fix it, harness-proven and then ported to the firmware verbatim:
+a lossy block anchors its rung request on the receiver's \emph{own
+last ask}, never on the SNR, with severe loss ($>$40\%) going
+straight to the NORMAL floor; and a promised reply that never arrives
+steps the sender down two rungs and shortens the next block to 20\,s
+--- silence is itself feedback. On identical fades:
+
+\begin{center}
+\begin{tabular}{llcl}
+\hline
+fade floor & arm & delivered (of 8192) & rung trajectory \\
+\hline
+$-5$\,dB & fixed rung 12 & 4154 & 12 throughout \\
+$-5$\,dB & adaptive & \textbf{5481 ($+32$\%)} & $12 \to 10 \to 8 \to 4 \to 12$ \\
+$-2$\,dB & fixed rung 12 & 4392 & \\
+$-2$\,dB & adaptive & \textbf{6100 ($+39$\%)} & \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsubsection*{What the clean wire then taught}
+
+Verifying the ported laws on the boards flushed out five real
+firmware defects, one per run, each convicted by the boards' own
+counters --- a sequence worth recording because every one masqueraded
+as something else first:
+
+\begin{itemize}
+\item The \emph{sender was not listening on the mode it broadcasts
+      in}: \texttt{follow\_rung} knew nothing about broadcast, the
+      active-mode mask read EXTREME-only in the middle of a NORMAL
+      broadcast, and every reply the receiver keyed was physically
+      undecodable.
+\item The reply window was anchored at EOB \emph{build} time,
+      spending its first $\sim$2\,s on the EOB's own air; it arms at
+      carrier drop now, sized $\sim$9.4\,s for the real chain (the
+      peer's end-of-frame commit, its keying, the reply's air, our
+      commit) after timestamps showed the receiver keying at :35
+      against an expiry at :40.
+\item The reply transport is pinned to the NORMAL floor --- BPSK~1/2
+      decodes at any SNR the stream itself survives, and the desired
+      rung rides inside the frame --- and the receiver logs
+      \texttt{stats keyed}, which is what turned counter guesswork
+      into comparable timelines.
+\item After \emph{every} transmission of our own, the receivers are
+      re-armed: the capture stream stitches pre-transmission samples
+      to post, the detectors false-lock on the seam, and the re-arm
+      skip blinds them for exactly the 1--4\,s in which a stats reply
+      arrives. Twenty-two garbage-header events in one run; two of
+      three replies lost. The chat link never noticed in a year of
+      running, because its replies arrive seconds later.
+\item The station must not key into a stats window the broadcast
+      opened: a leftover chat frame in the window defeated every
+      \emph{first} exchange while later ones worked --- which is
+      precisely why it masqueraded as a timing race until the key-up
+      recorder said otherwise.
+\end{itemize}
+
+The final clean run: three stats windows, three replies decoded within
+1--2 seconds each, the deliberate rung-8 start re-rung to 12 in the
+first window, and the file stored byte-identical. The fourth item is
+the one with reach beyond broadcast: post-transmission receiver
+blindness was latent in every half-duplex exchange this system runs,
+and only a reply fast enough to land inside it could make it visible.
+
 \subsection{The Capability Handshake, and 2\,kB Messages}
 \label{sec:cport_caps}
 
