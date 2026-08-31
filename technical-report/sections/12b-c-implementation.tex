@@ -1662,7 +1662,73 @@ buffer, no cap, with a short read mid-stream (the file truncated
 underneath the console) ending the broadcast cleanly rather than
 leaving the board waiting for continuations forever. The board never
 held more than its 8\,kB source either way; only the host had
-forgotten that.
+forgotten that. Figure~\ref{fig:bcastfileseq} draws the complete
+file-broadcast flow as it now stands --- the chunked feed, the hold
+with the capability exchange as its probe, and the loss accounting the
+campaign forced into the EOS statistics.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.72\textwidth]{images/bcastfile_seq.png}
+    \caption{The chunk-fed file broadcast, end to end. The hold phase
+             (top) probes with the capability record itself when the
+             peer is a stranger --- or whenever the remembered rung has
+             gone stale, after a 10-minute-old memory committed
+             45~minutes of air to what one exchange refreshes. The
+             stream phase repeats one group per keying, the host
+             re-reading the file sequentially against the pacing field
+             in the status stream.}
+    \label{fig:bcastfileseq}
+\end{figure}
+
+\subsubsection*{Blocks, receiver statistics, and a broadcast that
+adapts}
+
+The last extension makes the one-way street report back. When the
+sender \emph{holds} a capability record whose new
+\texttt{CAP\_BC\_STATS} bit is set --- the receiver's declaration
+that it will answer, exactly the negotiation the operator asked for
+--- the stream is cut into $\sim$45\,s blocks. Each block ends with
+an \emph{end-of-block marker}: a dataless single-frame group (SYNC
+flag, zero data bytes, no EOS), chosen over new frame flags because an
+old receiver appends zero bytes for it and walks past --- the wire
+stays compatible with every earlier firmware. The sender then pauses,
+and the receiver answers with a small unicast frame (the last free
+packet type): frames decoded, frames lost since the stream began, the
+SNR, and the rung it wants. The sender logs the quality and
+\emph{re-rungs the remaining groups}, which this wire has always
+permitted --- every group re-announces its geometry in its SYNC
+descriptor. Figure~\ref{fig:bcaststatsseq} traces the measured
+exchange.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.66\textwidth]{images/bcast_stats_seq.png}
+    \caption{Block statistics and the mid-stream re-rung, with the
+             measured run's numbers. Both guard rules at the bottom
+             came from collisions the first live runs produced.}
+    \label{fig:bcaststatsseq}
+\end{figure}
+
+The first two live runs each contributed a rule. The receiver's
+``desired rung'' initially came from its rate controller --- which is
+the \emph{chat link's} decayed memory, and answered ``rung~0'' into a
+stream it was decoding at $+22$\,dB; the request now comes from the
+stream's own measured SNR mapped through the ladder sensitivities,
+which is the question actually being asked. And the reply must
+\emph{fit the window}: the first exchange keyed a 22-second EXTREME
+stats frame into a five-second pause, the sender resumed its groups
+mid-reply, and the collision cost the receiver the rest of the stream
+--- 497 bytes stored of 8192. A receiver whose reply would need a rung
+below NORMAL now stays silent, and silence is itself information.
+
+The verification run started deliberately slow: \texttt{bcastfile -r
+8}, 8192 bytes. One block later the stats frame came back --- \texttt{200
+ok, 0 lost, asks rung 12 -- re-rung} --- the remaining groups went out
+at rung~12, and the file stored byte-identical with 350 frames and
+zero lost, a minute faster than the same file at flat rung~8. A
+broadcast to strangers, or to a peer that never declared the bit,
+remains exactly the classic silent stream.
 
 \subsection{The Capability Handshake, and 2\,kB Messages}
 \label{sec:cport_caps}

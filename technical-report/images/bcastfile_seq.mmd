@@ -1,0 +1,21 @@
+sequenceDiagram
+    participant H as Console A
+    participant A as Board A
+    participant B as Board B
+    H->>A: bcastfile <path> — first 1 kB chunk (more follows)
+    rect rgb(255,246,230)
+    Note over A: link idle, or the peer's request STALE (>90 s):<br/>the payload is HELD — a decayed memory once committed<br/>45 min of air to a guess one exchange refreshes
+    A->>B: capability record (the probe IS the handshake)
+    B->>A: capability record + ack — ladder moves, record filled
+    Note over A: released at the negotiated rung — 27..52 s measured,<br/>zero operator steps. Explicit -r bypasses the hold
+    end
+    rect rgb(232,244,255)
+    loop one group per keying, yielding to carrier sense
+        H->>A: next chunk when bc_free allows (status-paced)
+        A->>B: [preamble][header][SYNC f0][f1][f2][f3]
+        B-->>B: bytes stream to the sink as they decode
+    end
+    Note over A: the 8 kB source refills from the host's SEQUENTIAL<br/>read — no host buffer, no size cap. A host silent while<br/>the source is DRY for 30 s closes the stream truncated
+    A->>B: last group — final frame carries EOS ("N frame(s) sent")
+    Note over B: stats event: frames ok, lost (head loss counted:<br/>a stream starts at seq 0, so first lock at seq N = N lost),<br/>SNR — stored as rx_broadcast.bin
+    end

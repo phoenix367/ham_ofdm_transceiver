@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant A as Board A (sender)
+    participant B as Board B (declared CAP_BC_STATS)
+    Note over A: the peer's record carries CAP_BC_STATS,<br/>so the stream is cut into ~45 s BLOCKS.<br/>Measured run: bcastfile -r 8, 8192 bytes
+    rect rgb(232,244,255)
+    A->>B: block 1 — groups at rung 8, 2.5 s each
+    A->>B: EOB — a dataless single-frame group (SYNC, dlen 0, no EOS).<br/>an old receiver appends zero bytes and walks past
+    end
+    rect rgb(238,247,238)
+    Note over A: PAUSES for the reply window (~2 s + 2x reply air)
+    Note over B: desired rung from the STREAM'S OWN SNR through the<br/>ladder sensitivities — not ctl_tx_rung, the decayed chat<br/>memory that answered "rung 0" into a +22 dB stream
+    B->>A: BCSTAT — 200 ok, 0 lost, +22 dB, asks rung 12
+    Note over A: "stats from peer: 200 ok, 0 lost, asks rung 12 — re-rung".<br/>legal mid-stream: every group re-announces its geometry
+    end
+    rect rgb(232,244,255)
+    A->>B: block 2 — groups at rung 12, 1.6 s each
+    A->>B: EOS — 350 frame(s) sent
+    Note over B: 8192 bytes stored byte-identical, 0 lost —<br/>a minute faster than the same file at flat rung 8
+    end
+    Note over A,B: two guards, both from measured collisions: a receiver whose<br/>reply needs a rung below NORMAL stays SILENT (a 22 s EXTREME<br/>reply into a 5 s window cost the rest of the stream), and without<br/>the record or the bit the broadcast stays classic and silent
