@@ -277,6 +277,33 @@ static const char *tstamp(void)
     return buf;
 }
 
+/* link.c reports -99.0 dB for "no measurement": ctl_filtered_snr returns
+ * it once every sample has aged past SNR_MAX_AGE_S (60 s), and
+ * peer_report_db sits there until the peer has reported at all.  Printed
+ * as a number it reads like a dead link -- an idle board with a healthy
+ * peer record showed "SNR -99.0 dB" -- so say what it means instead. */
+static const char *snr_str(char *buf, size_t n, double db, const char *none)
+{
+    if (db <= -90.0)
+        snprintf(buf, n, "%s", none);
+    else
+        snprintf(buf, n, "%+.1f dB", db);
+    return buf;
+}
+
+/* Same defect one field to the right: link.c stamps "never happened" as
+ * -1e9, so a station that has heard nothing reports an age of a billion
+ * seconds.  The staleness TESTS already ask whether it ever happened;
+ * only the display did the arithmetic anyway. */
+static const char *age_str(char *buf, size_t n, double age_s)
+{
+    if (age_s >= 1e8)
+        snprintf(buf, n, "never");
+    else
+        snprintf(buf, n, "%.0fs", age_s);
+    return buf;
+}
+
 /* Open the broadcast sink once the descriptor says the payload is
  * opaque. Anything already buffered (frames that arrived before the
  * SYNC) is flushed into it first. */
@@ -375,10 +402,12 @@ static void diag_print(void *ctx, int ev, int a, int b, int c, int d,
         break;
     case ST_EV_RUNG: {
         link_diag_t ld;
+        char pb[32], rb[16];
         ctl_diag(&g_st.ctl, t, &ld);
-        printf(" %d -> %d (losses=%d cap=%d peer_req=%d peer_snr=%.0fdB "
-               "req_age=%.0fs)", a, b, c, d, ld.peer_req,
-               ld.peer_report_db, ld.req_age_s);
+        printf(" %d -> %d (losses=%d cap=%d peer_req=%d peer_snr=%s "
+               "req_age=%s)", a, b, c, d, ld.peer_req,
+               snr_str(pb, sizeof(pb), ld.peer_report_db, "not reported"),
+               age_str(rb, sizeof(rb), ld.req_age_s));
         break;
     }
     case ST_EV_BURST_ENGAGE:
@@ -406,8 +435,13 @@ static void diag_print(void *ctx, int ev, int a, int b, int c, int d,
 static void show_status(void)
 {
     printf("--- %s @ t=%.1f s (audio clock)\n", g_name, now_t());
-    printf("  channel: %s   last frame: SNR %+.1f dB, CFO %+.1f Hz\n",
-           channel_busy() ? "BUSY" : "idle", g_last_snr, g_last_cfo);
+    {
+        char sb[32];
+        printf("  channel: %s   last frame: SNR %s, CFO %+.1f Hz\n",
+               channel_busy() ? "BUSY" : "idle",
+               snr_str(sb, sizeof(sb), g_last_snr, "-- (none decoded yet)"),
+               g_last_cfo);
+    }
     printf("  carrier sense: rms^2 %.0f, noise floor %.0f (%.1f dB over "
            "floor, busy above %.1f dB)\n",
            g_busy_acc / BUSY_WIN, g_noise_floor,
@@ -427,14 +461,17 @@ static void show_status(void)
            station_pool_refused());
     {
         link_diag_t ld;
+        char pb[32], mb[32], rb[16], xb[16];
         ctl_diag(&g_st.ctl, now_t(), &ld);
         printf("  link ctl: rung=%d cap=%d peer_req=%d my_req=%d "
                "losses=%d\n"
-               "            peer_snr=%+.1fdB my_snr=%+.1fdB "
-               "req_age=%.0fs rx_age=%.0fs offset=%.1fdB\n",
+               "            peer_snr=%s my_snr=%s "
+               "req_age=%s rx_age=%s offset=%.1fdB\n",
                ld.rung, ld.cap, ld.peer_req, ld.my_req, ld.losses,
-               ld.peer_report_db, ld.filtered_snr, ld.req_age_s,
-               ld.rx_age_s, ld.offset_db);
+               snr_str(pb, sizeof(pb), ld.peer_report_db, "not reported"),
+               snr_str(mb, sizeof(mb), ld.filtered_snr, "none in 60 s"),
+               age_str(rb, sizeof(rb), ld.req_age_s),
+               age_str(xb, sizeof(xb), ld.rx_age_s), ld.offset_db);
     }
 }
 
@@ -1111,10 +1148,15 @@ static int usb_command(char *line)
         if (!g_ust_valid) {
             printf("no status yet -- the board pushes one every 0.5 s\n");
         } else {
-            printf("%s [%s] rung %d  SNR %+.1f dB  %s%s\n", tstamp(),
-                   g_name, g_ust.rung, g_ust.snr_q8 / 256.0,
-                   g_ust.busy ? "BUSY" : "idle",
-                   g_ust.pending ? "  pending-ack" : "");
+            {
+                char sb[32];
+                printf("%s [%s] rung %d  SNR %s  %s%s\n", tstamp(),
+                       g_name, g_ust.rung,
+                       snr_str(sb, sizeof(sb), g_ust.snr_q8 / 256.0,
+                               "-- (none in 60 s)"),
+                       g_ust.busy ? "BUSY" : "idle",
+                       g_ust.pending ? "  pending-ack" : "");
+            }
             printf("  queues: ctl %u  inter %u  bulk %u\n", g_ust.q_ctl,
                    g_ust.q_inter, g_ust.q_bulk);
             if (g_ubcf_f)

@@ -120,6 +120,13 @@ BOARD_QUEUE = 8                 # cport ST_MAX_MSGS
 INFLIGHT = 4                    # parts we allow in the board's bulk queue
 
 
+def snr_str(db, none="-- (none in 60 s)"):
+    """link.c reports -99.0 dB for "no measurement" -- every SNR sample has
+    aged past SNR_MAX_AGE_S (60 s).  Printed as a number it reads like a
+    dead link, so name it instead."""
+    return none if db <= -90.0 else f"{db:+.1f} dB"
+
+
 def ts():
     return time.strftime("%H:%M:%S")
 
@@ -493,7 +500,7 @@ class Console:
             self.plain("no status yet -- the board pushes one every 0.5 s")
             return
         q = st["queues"]
-        self.plain(f"rung {st['rung']}  SNR {st['snr_db']:+.1f} dB  "
+        self.plain(f"rung {st['rung']}  SNR {snr_str(st['snr_db'])}  "
                    f"{'BUSY' if st['busy'] else 'idle'}"
                    f"{'  pending-ack' if st['pending'] else ''}")
         self.plain(f"queues: ctl {q[0]}  inter {q[1]}  bulk {q[2]}"
