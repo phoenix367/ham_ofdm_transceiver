@@ -672,38 +672,54 @@ static char g_upfile[128];
  * rx_broadcast.bin whichever path carried it. */
 #define UBCF_CHUNK 1024
 static void usb_send_frame(uint8_t type, const void *payload, int len);
-static uint8_t g_ubcf[262144];
-static int g_ubcf_len, g_ubcf_off = -1, g_ubcf_rung;
+/* No file buffer and no size cap: the pump is already chunked and
+ * paced against the board's bc_free, so it reads the file
+ * SEQUENTIALLY -- the board never holds more than its 8 kB source
+ * anyway, and a huge file is the operator's call (the board's ETA
+ * line prices it). */
+static FILE *g_ubcf_f;
+static long g_ubcf_len, g_ubcf_off;
+static int g_ubcf_rung;
 
 static void usb_pump_bcfile(void)
 {
-    if (g_ubcf_off < 0 || g_ubcf_off >= g_ubcf_len)
+    if (!g_ubcf_f)
         return;
-    while (g_ust_valid && g_ust.bc_free >= 2 * UBCF_CHUNK
-           && g_ubcf_off < g_ubcf_len) {
+    while (g_ust_valid && g_ust.bc_free >= 2 * UBCF_CHUNK) {
         uint8_t body[2 + UBCF_CHUNK];
-        int n = g_ubcf_len - g_ubcf_off;
-        int more;
-        if (n > UBCF_CHUNK)
-            n = UBCF_CHUNK;
-        more = g_ubcf_off + n < g_ubcf_len;
+        long left = g_ubcf_len - g_ubcf_off;
+        int n = left > UBCF_CHUNK ? UBCF_CHUNK : (int)left;
+        int more = g_ubcf_off + n < g_ubcf_len;
+        if (n <= 0 || fread(body + 2, 1, (size_t)n, g_ubcf_f) != (size_t)n) {
+            /* short read (file truncated underneath us): end the
+             * broadcast cleanly rather than leave the board waiting
+             * for chunks forever -- the stream is truncated, and says
+             * so */
+            printf("%s [%s] broadcastfile: read failed at %ld/%ld -- "
+                   "broadcast truncated\n", tstamp(), g_name, g_ubcf_off,
+                   g_ubcf_len);
+            body[0] = (uint8_t)(0x0F | 0x40);
+            body[1] = (uint8_t)g_ubcf_rung;
+            body[2] = 0;
+            usb_send_frame(UP_CMD_BCAST, body, 3);
+            fclose(g_ubcf_f);
+            g_ubcf_f = 0;
+            break;
+        }
         body[0] = (uint8_t)(0x0F | (more ? 0x80 : 0)
                             | (g_ubcf_off ? 0x40 : 0));
         body[1] = (uint8_t)g_ubcf_rung;
-        memcpy(body + 2, g_ubcf + g_ubcf_off, (size_t)n);
         usb_send_frame(UP_CMD_BCAST, body, n + 2);
         g_ubcf_off += n;
         g_ust.bc_free = (uint16_t)(g_ust.bc_free - n); /* until the next
                                                         * status frame */
         if (!more) {
-            printf("%s [%s] broadcastfile: all %d bytes handed to the "
+            printf("%s [%s] broadcastfile: all %ld bytes handed to the "
                    "board (no delivery guarantee)\n", tstamp(), g_name,
                    g_ubcf_len);
-            g_ubcf_off = -1;
-            break;   /* -1 < len keeps the while alive without this:
-                      * measured, three completion prints and a 19 kB
-                      * received file from a 1 kB source -- the loop
-                      * re-sent overlapping chunks with off = -1 */
+            fclose(g_ubcf_f);
+            g_ubcf_f = 0;
+            break;
         }
     }
 }
@@ -1016,7 +1032,7 @@ static int usb_command(char *line)
                 rest = e;
             }
         }
-        if (g_ubcf_off >= 0 && g_ubcf_off < g_ubcf_len) {
+        if (g_ubcf_f) {
             printf("bcastfile: a broadcast is already streaming to the "
                    "board\n");
         } else if (!(f = fopen(rest, "rb"))) {
@@ -1025,16 +1041,13 @@ static int usb_command(char *line)
             fseek(f, 0, SEEK_END);
             sz = ftell(f);
             fseek(f, 0, SEEK_SET);
-            if (sz <= 0 || sz > (long)sizeof(g_ubcf)) {
-                printf("bcastfile: %s is %ld bytes, cap is %zu\n", rest,
-                       sz, sizeof(g_ubcf));
-                fclose(f);
-            } else if (fread(g_ubcf, 1, (size_t)sz, f) != (size_t)sz) {
-                printf("bcastfile: read error\n");
+            if (sz <= 0) {
+                printf("bcastfile: %s is empty\n", rest);
                 fclose(f);
             } else {
-                fclose(f);
-                g_ubcf_len = (int)sz;
+                g_ubcf_f = f;         /* read sequentially as the board
+                                       * drains; no size cap */
+                g_ubcf_len = sz;
                 g_ubcf_off = 0;
                 g_ubcf_rung = rung;
                 printf("%s [%s] broadcasting %s (%ld bytes, raw, no "

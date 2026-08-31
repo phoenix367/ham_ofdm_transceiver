@@ -439,18 +439,24 @@ class Console:
                 rung = v
                 rest = part[1] if len(part) > 1 else ""
         try:
-            with open(rest, "rb") as f:
-                data = f.read(262145)
+            f = open(rest, "rb")
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(0)
         except OSError as e:                          # noqa: BLE001
             self.plain(f"bcastfile: cannot open {rest}: {e}")
             return
-        if not data or len(data) > 262144:
-            self.plain("bcastfile: empty, or over the 256 kB cap")
+        if not size:
+            self.plain("bcastfile: empty file")
+            f.close()
             return
-        self._ubcf = data
+        # sequential: the pump reads chunks as the board drains --
+        # no buffer, no size cap
+        self._ubcf_f = f
+        self._ubcf_len = size
         self._ubcf_off = 0
         self._ubcf_rung = rung
-        self.plain(f">> broadcasting {rest} ({len(data)} bytes, raw, "
+        self.plain(f">> broadcasting {rest} ({size} bytes, raw, "
                    "no delivery guarantee)")
         self.pump_bcfile()
 
@@ -458,25 +464,27 @@ class Console:
         # chunk toward the board against the bc_free it reports; bit 7
         # of the ptype byte = more follows, bit 6 = continuation
         CHUNK = 1024
-        off = getattr(self, "_ubcf_off", -1)
-        if off < 0:
+        f = getattr(self, "_ubcf_f", None)
+        if f is None:
             return
         free = (self.status or {}).get("bc_free", 0)
         enc = __import__("ofdm_modem").encode
-        while off < len(self._ubcf) and free >= 2 * CHUNK:
-            n = min(CHUNK, len(self._ubcf) - off)
-            more = off + n < len(self._ubcf)
-            head = 0x0F | (0x80 if more else 0) | (0x40 if off else 0)
-            self.m.t.write(enc(0x06, bytes([head, self._ubcf_rung])
-                               + self._ubcf[off:off + n]))
-            off += n
-            free -= n
-            if not more:
-                self.plain(f"broadcastfile: all {len(self._ubcf)} bytes "
-                           "handed to the board")
-                off = -1
+        while free >= 2 * CHUNK:
+            data = f.read(min(CHUNK, self._ubcf_len - self._ubcf_off))
+            if not data:
                 break
-        self._ubcf_off = off
+            more = self._ubcf_off + len(data) < self._ubcf_len
+            head = 0x0F | (0x80 if more else 0) \
+                | (0x40 if self._ubcf_off else 0)
+            self.m.t.write(enc(0x06, bytes([head, self._ubcf_rung]) + data))
+            self._ubcf_off += len(data)
+            free -= len(data)
+            if not more:
+                self.plain(f"broadcastfile: all {self._ubcf_len} bytes "
+                           "handed to the board")
+                f.close()
+                self._ubcf_f = None
+                break
 
     def cmd_status(self):
         st = self.status
