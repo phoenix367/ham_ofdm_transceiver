@@ -14,7 +14,8 @@ CON=/home/ivan/projects/ofdm_transceiver_proto/demoapp/build/ofdm_console
 A=320047000851333438363436   # or: $CON --list
 B=240041000551333438363436
 
-mkdir -p /tmp/arx                     # B's own cwd -- rx_* files collide
+rm -rf /tmp/arx && mkdir -p /tmp/arx   # B's own cwd, emptied: rx_* files
+                                      # collide, and a stale one compares clean
 ( sleep 1; echo "config diag_stream 1"; sleep 900; echo quit ) \
     | (cd /tmp/arx && $CON --usb $B B) > /tmp/b.log 2>&1 &
 
@@ -37,13 +38,19 @@ its output; foreground `sleep` is blocked in this harness, so waits go
   `make flash-radio-*` fails the same way.
 
   ```bash
-  ps -eo pid,cmd | grep '[o]fdm_console --usb' | awk '{print $1}' > /tmp/pids
-  while read p; do kill $p; done < /tmp/pids || true
+  pgrep -x ofdm_console          # see them
+  pkill -x ofdm_console || true  # -x matches the process NAME
   ```
 
-  The loop occasionally exits 144 and takes the rest of a `&&` chain
-  with it -- tolerate it, then verify the state and redo what was
-  skipped.
+  Match the name, not the command line: `pgrep -f 'ofdm_console --usb'`
+  also matches the shell that is running the check, and a kill loop
+  built from it can shoot its own harness. Any kill loop occasionally
+  exits 144 and takes the rest of a `&&` chain with it -- tolerate it,
+  then verify the state and redo what was skipped.
+
+  Avoid `$1` and friends anywhere in a skill body: the loader
+  substitutes them when it renders the file, so what gets read is not
+  what is on disk.
 - **Size the window past the transfer.** A 68 kB file at rung 12 is
   ~10 min; a 73 kB broadcast is 22. Consoles killed mid-transfer look
   exactly like a link failure. Estimate first (the board logs an ETA
@@ -62,6 +69,27 @@ its output; foreground `sleep` is blocked in this harness, so waits go
   that matched nothing is silent; that is how carrier sense was left
   dead for a whole campaign. Write files only after all asserts pass,
   then verify with `grep`.
+
+## A known-good run, for calibration
+
+6000 random bytes, both boards idle beforehand (2026-09-01):
+
+```
+02:53:01  bulk 8 primer queued
+02:54:31  status: rung 12, SNR +16.2 dB, peer record complete
+          (stream ext ldpc burst bcast bcstats, 3328 B, window 16, ceiling 12)
+02:54:33  sendfile -> 2 parts of 3184 B     (16 x 200 - envelope head)
+02:55:25  stored as rx_f.bin, byte-identical
+          tx 11 frames, timeouts 0, retx 0, usb resyncs 0
+```
+
+52 s for 6000 bytes is 115 B/s, which is the documented ladder figure
+independently reproduced. Both consoles print "drained N stale bytes"
+at attach -- that is the drain-don't-reset opening rule working, not a
+fault. A `status` taken minutes after the last exchange reads
+`SNR -99.0 dB`: the sentinel `ctl_filtered_snr` returns once every
+sample has aged past `SNR_MAX_AGE_S`, with the rung and peer record
+still intact. Not a link failure.
 
 ## Reading the result
 
