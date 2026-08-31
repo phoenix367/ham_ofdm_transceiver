@@ -56,7 +56,7 @@ board-to-board; the host only sees its effects in the log lines
 ## The diagnostic stream
 
 `EVT_DIAG` events mirror `station.c`'s `ST_EV_*` set (TX, RX, TIMEOUT,
-RUNG, the burst family, RTO, CAPS — 19 events). They are **off by
+RUNG, the burst family, RTO, CAPS — 17 events). They are **off by
 default** and shed before anything else under backpressure: a station
 with no radio attached once filled the endpoint with timeout events
 and buried its own command responses (the measured wedge that made the
