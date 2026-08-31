@@ -474,7 +474,17 @@ Cross-module invariants that are easy to break:
     LINK frame, and the record is filled before release, so `status`
     answers "who is out there" mid-broadcast and bcastfile warns if
     the known peer never declared CAP_BCAST (legacy peers fall back to
-    a plain LINK probe). The kick MUST be in poll_tx's early-out gate
+    a plain LINK probe). The hold ALSO engages when the default rung is
+    a DECAYED memory (ctl_diag req_age_s > 90 on entry AND on release):
+    the staleness decay walks a remembered rung 12 down one rung per
+    90 s of silence, and an operator 10 minutes after the last exchange
+    got a 45-minute rung-7 broadcast from what one probe exchange
+    refreshes to rung 12 in seconds. Loss accounting: a stream always
+    starts at seq 0, so a FIRST lock at seq N counts N frames lost --
+    the head loss gap arithmetic cannot see (measured: a first-group
+    acquisition miss delivered 73267/73362 with "0 lost"); the sender
+    logs its total frame count at the EOS group so the two consoles'
+    numbers can be compared. The kick MUST be in poll_tx's early-out gate
     (`!station_has_traffic && !caps_kick && !caps_reply_due`): the
     kicked probe carries no traffic, and the gate silently swallowed
     it -- measured, a held broadcast probed 180 s with tx_frames 0.

@@ -729,6 +729,18 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
     g_bc_rung = (rung >= 0 && rung <= 12)
                     ? rung
                     : ctl_tx_rung(&g_st.ctl, g_modem.now);
+    if (rung > 12) {
+        /* the default is only trustworthy while the peer's request is
+         * FRESH: the staleness decay walks a remembered rung 12 down
+         * one rung per 90 s of silence, and an operator 10 minutes
+         * after the last exchange got rung 7 -- a 45-minute broadcast
+         * committed to a guess, when one probe exchange refreshes the
+         * true rung in seconds */
+        link_diag_t d;
+        ctl_diag(&g_st.ctl, g_modem.now, &d);
+        if (d.req_age_s > 90.0)
+            g_bc_rung = 0;    /* force the hold below */
+    }
     if (rung > 12 && g_bc_rung < BURST_MIN_RUNG) {
         /* no rung given and the link cannot carry a broadcast yet:
          * hold the payload and bring the link up first */
@@ -810,8 +822,10 @@ static void bc_poll_link(void)
     if (!g_bc_waiting)
         return;
     {
+        link_diag_t d;
         int rung = ctl_tx_rung(&g_st.ctl, g_modem.now);
-        if (rung >= BURST_MIN_RUNG) {
+        ctl_diag(&g_st.ctl, g_modem.now, &d);
+        if (rung >= BURST_MIN_RUNG && d.req_age_s <= 90.0) {
             g_bc_waiting = 0;
             g_bc_rung = rung;
             bc_announce();
@@ -892,9 +906,12 @@ static int bc_open_group(void)
         if (take > g_bc_src_len - g_bc_src_off)
             take = g_bc_src_len - g_bc_src_off;
         if (g_bc_complete && g_bc_src_off + take >= g_bc_src_len) {
+            char msg[64], *q = msg;
             flags |= BC_EOS;
-            usb_modem_emit(&g_modem, UP_EVT_LOG,
-                           "broadcast: last group keying now", 32);
+            q = bc_str(q, "broadcast: last group keying now -- ");
+            q = bc_num(q, g_bc_seq + 1);
+            q = bc_str(q, " frame(s) sent");
+            usb_modem_emit(&g_modem, UP_EVT_LOG, msg, (int)(q - msg));
         }
         memset(payload, 0, sizeof(payload));
         payload[0] = (uint8_t)(flags | (g_bc_seq & BC_SEQ_MASK));
@@ -999,6 +1016,13 @@ static int bc_advance(int m, const rxs_event_t *ev)
             int gap = (seq - g_bc_last_seq - 1) & BC_SEQ_MASK;
             if (gap > 0 && gap < 32)
                 g_bc_lost += gap;
+        } else if (seq > 0 && seq < 32) {
+            /* every stream starts at seq 0, so joining at seq N means
+             * N frames are already gone -- the head loss the gap
+             * arithmetic cannot see. Measured: a first-group
+             * acquisition miss delivered 73267 of 73362 bytes with
+             * "0 lost" reported. */
+            g_bc_lost += seq;
         }
         g_bc_last_seq = seq;
         g_bc_frames++;
