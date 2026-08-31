@@ -616,9 +616,12 @@ static int g_tx_is_bc;
  * re-announces its geometry, so a mid-stream rung change is already
  * legal on this wire. */
 #define BC_BLOCK_AIR_S 45.0
+#define BC_BLOCK_AIR_SHORT_S 20.0 /* after trouble: re-probe quickly */
 static double g_bc_block_air;     /* air time keyed since the last EOB */
+static double g_bc_block_len = BC_BLOCK_AIR_S;
 static int g_bc_eob_due;          /* cut the block at the next keying */
 static uint32_t g_bc_stat_wait;   /* pause until then, 0 = not waiting */
+static int g_bc_stat_arm;         /* an EOB is keying: arm at its end */
 static uint32_t g_bc_starve_ms;  /* when the source ran dry, 0 = it has data */
 #define BC_FEED_TIMEOUT_MS 30000u
 static uint32_t g_bc_wait_deadline, g_bc_next_probe;
@@ -637,7 +640,9 @@ static uint32_t g_bc_deadline[3];
 static int g_bc_rx_group = 4, g_bc_ptype = -1, g_bc_last_seq = -1;
 static int g_bc_frames, g_bc_lost;
 static int g_bc_evt_open;
-static int g_bc_stat_due;        /* an EOB asked us for a stats frame */   /* a start event went to the host; EOS or a
+static int g_bc_stat_due;        /* an EOB asked us for a stats frame */
+static int g_bc_last_ask = -1;   /* what we asked last block, -1 = none */
+static int g_bc_frames0, g_bc_lost0;  /* snapshot at the last reply */   /* a start event went to the host; EOS or a
                              * dead walk clears it -- per-group SYNCs in
                              * between emit nothing */
 static double g_bc_last_snr;
@@ -914,9 +919,7 @@ static int bc_open_group(void)
             g_bc_seq++;                       /* EOB consumes a seq */
             g_bc_eob_due = 0;
             g_bc_block_air = 0.0;
-            g_bc_stat_wait = g_ms
-                + (uint32_t)(2000.0
-                             + 2000.0 * estimate_air_time(g_bc_rung, 8));
+            g_bc_stat_arm = 1;   /* window opens at tx END, below */
         } else {
             g_bc_close_due = 0;
         }
@@ -968,7 +971,7 @@ static int bc_open_group(void)
                                  g_bc_rung, BURST_STREAM_RESYNC);
         if (n > 0) {
             g_bc_block_air += (double)n / 12000.0;
-            if (g_bc_block_air >= BC_BLOCK_AIR_S
+            if (g_bc_block_air >= g_bc_block_len
                 && g_st.peer.valid && (g_st.peer.flags & CAP_BC_STATS)
                 && !(g_bc_complete && g_bc_src_off >= g_bc_src_len))
                 g_bc_eob_due = 1;   /* cut here; EOS ends the last block */
@@ -1091,6 +1094,8 @@ static int bc_advance(int m, const rxs_event_t *ev)
         if (flags & BC_EOS) {
             bc_emit_stats();
             g_bc_evt_open = 0;
+            g_bc_last_ask = -1;
+            g_bc_frames0 = g_bc_lost0 = 0;
         }
         return 1;
     }
@@ -1241,6 +1246,14 @@ static void follow_rung(double now)
     for (i = 0; i < 3; i++)
         if (g_burst_left[i] > 0 || g_bc_left[i] > 0)
             want |= 1 << i;
+    /* A broadcast SENDER awaiting stats must be listening on the mode
+     * it broadcasts in -- follow_rung otherwise knows nothing about
+     * broadcast, and the stand measured the consequence: the sender's
+     * mask read EXTREME-only mid-NORMAL-broadcast, and every stats
+     * reply the receiver keyed was physically undecodable. */
+    if (g_bc_src_off < g_bc_src_len || g_bc_stat_wait || g_bc_eob_due
+        || (g_tx_on && g_tx_is_bc))
+        want |= 1 << (int)ladder_mode(g_bc_rung);
 
     if ((uint32_t)want != g_beacon.rx_active_mask)
         g_beacon.follow_changes++;
@@ -1439,8 +1452,42 @@ int main(void)
              * dac_init's mid-rail), 2.75e8 after the first frame. */
             DAC_DHR12R1 = 2048;
             g_cap_r = g_cap_w;            /* drop what leaked in */
+            {
+                /* REARM every active receiver: the capture stream they
+                 * see stitches pre-transmission samples to post, and
+                 * the detectors false-lock on the seam -- then the
+                 * rearm skip blinds them for the seconds that follow.
+                 * Chat never noticed (its replies arrive late enough);
+                 * the broadcast stats reply arrives in 1-4 s and was
+                 * lost two times in three to exactly this (measured:
+                 * 22 garbage-header NORMAL events in one run, B's
+                 * keyed replies at :06 and :31 never decoded).
+                 * Toggling active is the sanctioned rearm: "start
+                 * looking from now, not from then". */
+                int i3;
+                for (i3 = 0; i3 < 3; i3++)
+                    if (g_rxs[i3] && rxs_active(g_rxs[i3])) {
+                        rxs_set_active(g_rxs[i3], 0);
+                        rxs_set_active(g_rxs[i3], 1);
+                    }
+            }
             if (!g_tx_is_bc)
                 station_on_tx_end(&g_st, t);
+            if (g_tx_is_bc && g_bc_stat_arm) {
+                g_bc_stat_arm = 0;
+                /* The reply always rides the NORMAL floor: size the
+                 * window for the REAL chain -- the receiver's
+                 * end-of-frame commit (~2 s), its keying, the ~1.9 s
+                 * reply air, and OUR commit of it (~2 s). The first
+                 * 6.4 s window lost the race twice by one and two
+                 * seconds: B keyed at :35 against an expiry at :40,
+                 * and at :56 against :02. */
+                g_bc_stat_wait = g_ms
+                    + (uint32_t)(5000.0
+                                 + 2000.0
+                                   * estimate_air_time(BURST_MIN_RUNG,
+                                                       8));
+            }
             g_tx_is_bc = 0;
         }
 
@@ -1507,8 +1554,14 @@ int main(void)
                                 && want <= g_st.my_max_rung
                                 && want != g_bc_rung
                                 && g_bc_src_off < g_bc_src_len) {
+                                g_bc_block_len =
+                                    want < g_bc_rung
+                                        ? BC_BLOCK_AIR_SHORT_S
+                                        : BC_BLOCK_AIR_S;
                                 g_bc_rung = want;
                                 q = bc_str(q, " -- re-rung");
+                            } else {
+                                g_bc_block_len = BC_BLOCK_AIR_S;
                             }
                             usb_modem_emit(&g_modem, UP_EVT_LOG, msg,
                                            (int)(q - msg));
@@ -1641,15 +1694,33 @@ int main(void)
                      * pausing for exactly this frame */
                     uint8_t pl[8], bits[600];
                     int pn, r;
-                    /* the DESIRED rung is what this broadcast's own
-                     * measured SNR can carry -- not ctl_tx_rung, which
-                     * is the decayed chat-link memory and answered
-                     * "rung 0" into a +22 dB stream on the first live
-                     * run. Highest rung whose sensitivity clears the
-                     * stream's SNR with the ladder's usual margin: */
+                    int bd = (g_bc_frames - g_bc_frames0)
+                             + (g_bc_lost - g_bc_lost0);
+                    double lf = bd > 0
+                        ? (double)(g_bc_lost - g_bc_lost0) / bd : 0.0;
+                    /* The DESIRED rung: SNR-derived on a clean block,
+                     * but a LOSSY block anchors on our own last ask,
+                     * never on the SNR -- the estimate is measured
+                     * only on frames that survived, and the fading
+                     * harness read +22 dB inside a -5 dB fade while
+                     * 41% of the block died. Severe loss goes straight
+                     * to the floor. */
                     for (r = ladder_n() - 1; r > 0; r--)
                         if (g_bc_last_snr >= ladder_sens_db(r) + 2.5)
                             break;
+                    if (g_bc_last_ask >= 0) {
+                        if (lf > 0.40)
+                            r = BURST_MIN_RUNG;
+                        else if (lf > 0.25)
+                            r = g_bc_last_ask - 4;
+                        else if (lf > 0.05)
+                            r = g_bc_last_ask - 2;
+                    }
+                    if (r < 0)
+                        r = 0;
+                    g_bc_frames0 = g_bc_frames;
+                    g_bc_lost0 = g_bc_lost;
+                    g_bc_last_ask = r;
                     if (r > g_st.my_max_rung)
                         r = g_st.my_max_rung;
                     pl[0] = (uint8_t)(g_bc_frames & 0xFF);
@@ -1675,21 +1746,70 @@ int main(void)
                         goto station_done;
                     }
                     pn = data_encode(0, pl, 8, bits);
-                    if (phy_build_stream(bits, pn, 1, PKT_TYP_BCSTAT,
-                                         r, 0) > 0 && g_txs) {
-                        g_txf_r = g_txf_w = 0;
-                        tx_fill(0);
-                        g_cap_r = g_cap_w;
-                        g_tx_on = 1;
-                        g_tx_is_bc = 1;   /* not a station frame */
-                        g_beacon.tx_frames++;
+                    {
+                        /* transport at the NORMAL floor, always: BPSK
+                         * 1/2 decodes at any SNR the stream itself
+                         * survives, the ~1.9 s frame fits every
+                         * window, and the sender is guaranteed
+                         * listening on NORMAL while it broadcasts
+                         * there. The DESIRED rung rides inside. */
+                        int n2 = phy_build_stream(bits, pn, 1,
+                                                  PKT_TYP_BCSTAT,
+                                                  BURST_MIN_RUNG, 0);
+                        if (n2 > 0 && g_txs) {
+                            g_txf_r = g_txf_w = 0;
+                            tx_fill(0);
+                            g_cap_r = g_cap_w;
+                            g_tx_on = 1;
+                            g_tx_is_bc = 1;   /* not a station frame */
+                            g_beacon.tx_frames++;
+                            {
+                                char msg[56], *q = msg;
+                                q = bc_str(q, "stats keyed: asks rung ");
+                                q = bc_num(q, r);
+                                usb_modem_emit(&g_modem, UP_EVT_LOG, msg,
+                                               (int)(q - msg));
+                            }
+                        } else {
+                            char msg[64], *q = msg;
+                            q = bc_str(q, "stats keying REFUSED: n=");
+                            q = bc_num(q, n2);
+                            q = bc_str(q, " r=");
+                            q = bc_num(q, r);
+                            q = bc_str(q, " txs=");
+                            q = bc_num(q, g_txs ? 1 : 0);
+                            usb_modem_emit(&g_modem, UP_EVT_LOG, msg,
+                                           (int)(q - msg));
+                        }
                     }
                     g_bc_stat_due = 0;
                     goto station_done;
                 }
                 if (g_bc_stat_wait
-                    && (int32_t)(g_ms - g_bc_stat_wait) > 0)
-                    g_bc_stat_wait = 0;      /* window over, no stats */
+                    && (int32_t)(g_ms - g_bc_stat_wait) > 0) {
+                    /* No reply where one was promised IS the feedback:
+                     * the EOB or the reply died in whatever is eating
+                     * the stream, or the receiver's SNR fell below the
+                     * NORMAL floor and it is correctly silent. Either
+                     * way, down -- and re-probe on a short block. The
+                     * fading harness (make bcfade) measured this rule:
+                     * a -5 dB fade walked 12 -> 10 -> 8 on silence
+                     * alone, and delivery rose 32% over fixed-rung. */
+                    g_bc_stat_wait = 0;
+                    g_bc_block_len = BC_BLOCK_AIR_SHORT_S;
+                    if (g_bc_rung > BURST_MIN_RUNG
+                        && g_bc_src_off < g_bc_src_len) {
+                        char msg[72], *q = msg;
+                        g_bc_rung -= 2;
+                        if (g_bc_rung < BURST_MIN_RUNG)
+                            g_bc_rung = BURST_MIN_RUNG;
+                        q = bc_str(q, "broadcast: no stats reply -- "
+                                      "stepping down to rung ");
+                        q = bc_num(q, g_bc_rung);
+                        usb_modem_emit(&g_modem, UP_EVT_LOG, msg,
+                                       (int)(q - msg));
+                    }
+                }
                 if (!busy_now && !g_bc_waiting && !g_bc_stat_wait
                     && (g_bc_close_due || g_bc_eob_due
                         || g_bc_src_off < g_bc_src_len)
@@ -1725,6 +1845,11 @@ int main(void)
                 }
                 if (g_tx_on)
                     goto station_done;
+                if (g_bc_stat_wait)
+                    goto station_done;   /* WE opened this listening
+                                          * window: the station keying a
+                                          * leftover chat frame into it
+                                          * defeats the whole exchange */
                 int air = station_poll_tx(&g_st, t, busy_now,
                                           (int16_t *)air_dummy,
                                           1 << 24);

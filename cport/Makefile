@@ -310,6 +310,17 @@ link-read:
 # 8/8 under every impairment (exonerating the DSP and the clocks) and
 # 0/3 at -DMAX_LLRS=1024 with frag_size 100 (convicting the overflow).
 #   ./build/burst_repro [-f frag] [-r rung] [-n blocks] [-q] [-d] [ppm]
+# Adaptive broadcast under a fading channel: the firmware's
+# block/stats/re-rung machinery over an SNR profile the wire stand
+# cannot produce. `make bcfade` prints both arms.
+bcfade: $(GEN) | $(BUILD)
+	gcc -std=c99 -O2 -Isrc -DMAX_LLRS=4416 -o $(BUILD)/bc_fade \
+	    bench/bc_fade.c src/rx_stream.c src/rx_detect.c src/rx_demod.c \
+	    src/tx.c src/fft.c src/dsp.c src/bits.c src/conv.c src/ldpc.c \
+	    src/packets.c src/link.c src/station.c src/arena.c -lm
+	./$(BUILD)/bc_fade | tail -8
+	./$(BUILD)/bc_fade -fixed | tail -3
+
 bcrepro: $(GEN) | $(BUILD)
 	gcc -std=c99 -O2 -Isrc -DMAX_LLRS=4416 -o $(BUILD)/bc_repro \
 	    bench/bc_repro.c src/rx_stream.c src/rx_detect.c src/rx_demod.c \
