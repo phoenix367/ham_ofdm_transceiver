@@ -703,7 +703,7 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
          * hand. */
         static const char *const MODE_NAME[3] = { "NORMAL", "ROBUST",
                                                   "EXTREME" };
-        char msg[96], *p = msg;
+        char msg[192], *p = msg;
         int grp = bc_group_frames();
         int air10 = (int)(stream_air_time_pub(g_bc_rung, BC_FRAME, grp)
                           * 10.0 + 0.5);
@@ -720,6 +720,25 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
         *p++ = '.';
         p = bc_num(p, air10 % 10);
         p = bc_str(p, " s each");
+        {   /* the consequence, not just the rate: at an idle link the
+             * default rung is 0 and a 1 kB file is half an HOUR of
+             * EXTREME frames -- "no any action" from the operator's
+             * chair. Say the total, and say the way out. */
+            int per = (BC_FRAME - 3) + (grp - 1) * (BC_FRAME - 2);
+            int groups = (g_bc_src_len - g_bc_src_off + per - 1) / per;
+            int total_s = (groups * air10 + 9) / 10;
+            p = bc_str(p, ", ~");
+            if (total_s >= 120) {
+                p = bc_num(p, (total_s + 59) / 60);
+                p = bc_str(p, " min total");
+            } else {
+                p = bc_num(p, total_s);
+                p = bc_str(p, " s total");
+            }
+            if (g_bc_rung == 0 && total_s >= 120)
+                p = bc_str(p, " -- idle link defaults to EXTREME: "
+                              "exchange a message first, or use -r");
+        }
         usb_modem_emit(&g_modem, UP_EVT_LOG, msg, (int)(p - msg));
     }
 }
@@ -763,8 +782,11 @@ static int bc_open_group(void)
         int flags = first ? BC_SYNC : 0;
         if (take > g_bc_src_len - g_bc_src_off)
             take = g_bc_src_len - g_bc_src_off;
-        if (g_bc_complete && g_bc_src_off + take >= g_bc_src_len)
+        if (g_bc_complete && g_bc_src_off + take >= g_bc_src_len) {
             flags |= BC_EOS;
+            usb_modem_emit(&g_modem, UP_EVT_LOG,
+                           "broadcast: last group keying now", 32);
+        }
         memset(payload, 0, sizeof(payload));
         payload[0] = (uint8_t)(flags | (g_bc_seq & BC_SEQ_MASK));
         payload[1] = (uint8_t)take;
