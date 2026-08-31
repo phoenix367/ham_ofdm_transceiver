@@ -127,4 +127,17 @@ ofdm_phy/
 └── fixed/          integer twin: fxp, fft, dsp, viterbi, tx, rx
 experiments/        validation suites and demos (see experiments.md)
 results/            generated figures, WAVs, JSON sweeps
+cport/              pure-C port of the fixed model: src/ (DSP, station,
+                    USB protocol/modem), usb/ (TinyUSB firmware, the
+                    flash-resident radio), target/ (STM32H743 startup +
+                    linker), bench/ (host harnesses: burst_repro,
+                    bc_repro, bc_fade, csense_test), tests/ (golden-
+                    vector suites)
+demoapp/            two-station console demo: ofdm_console (socket and
+                    USB modes), driver.py / sdr_driver.py channel
+                    drivers, board_console.py (see drivers.md,
+                    console.md)
+host/               Python host library for the USB modem
+                    (ofdm_modem.py) + udev rule
+tools/esp32-probe/  the ESP32 JTAG bitbang probe for the two-board stand
 ```

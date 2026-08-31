@@ -81,7 +81,17 @@ against) instead of counting fading swings as noise — equal-weight pooling
 was measured 5–15 dB pessimistic on faded EXTREME frames. Pure
 accumulators + a bit-length/LUT log2; no dividers. One global calibration
 constant (−7.2 dB); accuracy ≤1.5 dB across all modes/modulations,
-−17…+8 dB.
+−17…+8 dB. On top of the raw estimate sits a per-(mode, modulation)
+**output map** (`FixedReceiver.SNR_MAP`, emitted into `rom_modes.h` and
+applied by `rxd_snr_map` in both C receive paths): the raw estimate
+rails at a per-combo ceiling — LLRs saturate, then the tiling-gain
+subtraction spreads the ceilings up to 12 dB apart — so an EXTREME
+frame read +0.5 dB on a wire NORMAL frames read at +12, and every
+EXTREME decode whipsawed the rate ladder. The map is measured
+(fixed, float) pairs, so the integer twin reports what the float
+estimator — the reference the ladder was system-tested against — reads
+on the same waveform; post-map the twins agree to ~0.3 dB and
+`fixed_point.py` asserts that parity at −7/0/+15.
 
 **Gated two-stage frequency search** (first symbol): a quarter-length
 coarse pass (tiles/4 accumulation, 4× grid stride) ranks hypotheses; if

@@ -160,12 +160,15 @@ whole recording and a board never holds one. `cport/usb/usb_radio_main.c`
 builds **one group per keying** and walks the received group with
 `bc_advance()` over the *streaming* receiver — the same
 `rxs_continue_burst()` stepping burst ARQ uses, with the acknowledgment
-machinery absent rather than subtracted. The host drives it over the USB
-modem protocol: `UP_CMD_BCAST` (payload type, rung, ≤1022 B) out;
-`UP_EVT_BCAST` back, streaming the payload *as it decodes* — a start
-marker carrying the payload type, then data chunks, then an EOS frame
-with `frames_ok`, `frames_lost` and the mean SNR. In the console that is
-`bcast [-r <rung>] <text>`.
+machinery absent rather than subtracted. The host drives it over the
+[USB modem protocol](usb-protocol.md): `UP_CMD_BCAST` out — chunk-fed
+(bits 7/6 of the payload-type byte), so a file of any size streams
+through the board's 8 kB source buffer, paced against `bc_free` in the
+status stream; `UP_EVT_BCAST` back, streaming the payload *as it
+decodes* — one start marker per stream, then data chunks, then an EOS
+frame with `frames_ok`, `frames_lost` (head loss included) and the mean
+SNR. In the console that is `bcast [-r <rung>] <text>` and
+`bcastfile [-r <rung>] <path>`.
 
 Three things the firmware has to get right that no host model faced:
 

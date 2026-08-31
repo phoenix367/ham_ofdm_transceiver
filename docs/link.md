@@ -154,9 +154,12 @@ streaming receiver leaves `receive_burst` NULL by design.
 Why it mattered on the boards: at `ST_MSG_MAX` 256 a console part was
 two fragments, so a transfer paid one acknowledgment per 260 bytes —
 ~50 B/s at rung 12 against a raw ~1 kbit/s, and every ack one more
-exposure to the acquisition-miss rate. The boards now hold 2 kB
-messages (the station moved to DTCM to make room), which is an
-8-fragment window per part.
+exposure to the acquisition-miss rate. The boards now hold 3328-byte
+messages (the station struct lives in SRAM4 — the slowest RAM on the
+part, exactly right for a frame-cadence structure the ISR never
+touches), and the streamed window ceiling is 16: a window-aligned part
+is one acknowledgment per ~3.2 kB, measured at 114 B/s on the wire
+against 87 before — 87 % of the raw channel rate.
 
 ## AFC frequency netting
 

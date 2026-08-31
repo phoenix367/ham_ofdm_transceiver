@@ -58,6 +58,21 @@ EXTREME runs at 78% of Shannon capacity at −20 dB (theoretical wall −20.7 dB
 | `link_adaptation.png` | controller-level two-station adaptation over a fading timeline |
 | `ladder_recal.json` | full PER curves behind every ladder sensitivity |
 
+## The two-board stand (C port on silicon)
+
+Measured on two STM32H743 boards wired DAC→ADC (details and transcripts
+in the technical report, §12):
+
+| Result | Number |
+|---|---|
+| 68 kB file over burst ARQ, rung 12 | 114 B/s = 87 % of the raw channel rate (window-aligned 3.2 kB parts, window 16) |
+| The same file before the capability handshake era | 87 B/s (2 kB parts, window 8, 3 acks/part) |
+| Capability handshake | one second, three legs; unanswered probes forgiven, legacy peers get old defaults |
+| 73 kB broadcastfile (non-ARQ) | byte-identical in 22.3 min at rung 12, 3089 frames, 0 lost |
+| Adaptive broadcast under a deep fade (`make bcfade`, −5 dB floor) | +32 % delivered vs fixed rung; trajectory 12→10→8→4→12 |
+| SNR output map (fixed twin) | ladder climbs 0→11 in one exchange; EXTREME reads +16.2 dB where it read +0.5 |
+| 8 kB stress transfer after the hardening campaign | byte-exact in 241 s with burst defaults ON |
+
 ## Link budget context (EXTREME, −17.5 dB operating point)
 
 S/N₀ ≈ +20.3 dB-Hz ≈ −13.7 dB in the ham 2.5 kHz convention (≈7 dB shy of

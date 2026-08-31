@@ -35,6 +35,9 @@ flowchart TD
 | `stream_mode.py [--trials N] [--blocks N] [--resync N]` | streamed bursts vs per-frame preambles: delivery + goodput, fitted dB cost | ~5 min |
 | `cfo_unwrap.py [--trials N] [--replot]` | what the coarse-CFO unwrap is worth: timing outliers and frame delivery swept across one detection bin | ~6 min |
 | `broadcast_demo.py [--trials N]` | non-ARQ delivery vs SNR for speech and telemetry rungs, plus a late-joining receiver | ~6 min |
+| `broadcast_fading.py [--trials N]` | broadcast group size under fading: preamble amortization vs whole-group loss | ~6 min |
+| `burst_alpha_ab.py` | negative result kept as its harness: per-block LLR temperature refit is not worth it | ~3 min |
+| `viterbi_recal.py` · `ldpc_recal.py` · `llr_shape.py` · `fec_comparison.py` · `extreme_recal.py` · `qam16_recal.py` (all `[--trials N]`) | reproduction entry points for the report's calibration figures; 300 trials/point reference, JSON beside each PNG, non-default trial counts get suffixed filenames | ~5–20 min each |
 | `rf_channel.py` | RF layer validation (6 checks) | ~1 min |
 | `afc_netting.py` | AFC convergence + trim-budget/anchor scenarios | ~3 min |
 | `link_adaptation.py` | controller-level two-station sim over a fading timeline | ~2 min |
