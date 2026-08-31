@@ -95,6 +95,11 @@ Two rules earned by measurement (report §12.6):
   (`usbh_stale` reports how much).
 - The serial string read is retried 4×50 ms: a control transfer during
   bulk traffic transiently fails, and one failure is not "no board".
+- **Writes wait 5 s.** The board stops servicing USB for as long as its
+  worst blocking decode -- 2283 ms measured on the part -- so a shorter
+  deadline turns a healthy board mid-frame into a write error. A
+  timeout that moved zero bytes is retried once; a partial one never
+  is, because repeating a frame's head desyncs the device's parser.
 
 Device access needs the udev rule: `cport/usb/README.md` (install
 `host/99-ofdm-modem.rules`).
@@ -106,6 +111,10 @@ board over pyusb (`_UsbTransport`, same drain-don't-reset opening rule)
 or the hardware-free emulator as a subprocess (`_PipeTransport`,
 `emulate=`). `encode()/Parser` implement the framing;
 `decode_info()/decode_status()` the payloads; `events()` yields decoded
-frames as `(kind, payload)`. `demoapp/board_console.py` is its
+frames as `(kind, payload)`. Its `MAX_PAYLOAD` must track
+`UP_MAX_PAYLOAD` in `cport/src/usb_proto.h`: a frame declaring more
+than the cap is dropped as garbage, so a stale copy loses exactly the
+big frames (a file part) while everything small keeps working.
+`demoapp/board_console.py` is its
 reference user; `demoapp/test_board_console.py` pins its file envelope
 byte-for-byte against `app.c`.
