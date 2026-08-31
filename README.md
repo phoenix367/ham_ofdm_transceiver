@@ -58,6 +58,8 @@ sweep and off-air decode from a HackRF One + tinySA Ultra) — rebuild with `mak
 
 **Full documentation with architecture diagrams: [docs/](docs/README.md)** —
 [architecture](docs/architecture.md) · [PHY](docs/phy.md) ·
+[drivers](docs/drivers.md) · [console](docs/console.md) ·
+[USB protocol](docs/usb-protocol.md) · [modem protocol](docs/modem-protocol.md) ·
 [link layer](docs/link.md) · [RF](docs/rf.md) ·
 [fixed-point](docs/fixed-point.md) · [performance](docs/performance.md) ·
 [experiments](docs/experiments.md)

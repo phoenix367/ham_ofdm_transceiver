@@ -11,6 +11,10 @@ fixed-point RTL reference.
 | [phy.md](phy.md) | PHY: frame structure, TX/RX chains, synchronization, modes |
 | [link.md](link.md) | Link layer: rate ladder, ARQ/HARQ, QoS, simplex access, AFC |
 | [rf.md](rf.md) | RF layer: SSB chain, LO model, channel impairments |
+| [drivers.md](drivers.md) | Channel drivers: virtual channel, SDR, USB host transports |
+| [console.md](console.md) | `ofdm_console` and `board_console.py`: modes, commands, behaviors |
+| [usb-protocol.md](usb-protocol.md) | USB transport: enumeration, framing, frame types, payload layouts |
+| [modem-protocol.md](modem-protocol.md) | The modem's command/event model a host application implements |
 | [fixed-point.md](fixed-point.md) | Integer RTL reference model |
 | [c-port-plan.md](c-port-plan.md) | Plan: pure-C port of the fixed model + DSP/MCU feasibility gates |
 | [performance.md](performance.md) | All measured results in one place |
