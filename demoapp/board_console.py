@@ -54,7 +54,8 @@ import zlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "host"))
-from ofdm_modem import OfdmModem, VID, PID          # noqa: E402
+from ofdm_modem import (OfdmModem, VID, PID,        # noqa: E402
+                         USBTimeoutError)
 
 FILE_MAGIC = 0x01
 FILE_MAGIC_Z = 0x02
@@ -641,7 +642,7 @@ def main():
                   "it. 'help' for commands.")
         print("> ", end="", flush=True)
 
-        last_ping = 0.0
+        last_ping, ping_misses = 0.0, 0
         try:
             while True:
                 # one ping a second keeps the board's "host attached"
@@ -649,8 +650,21 @@ def main():
                 # not unmount the device, so the board cannot tell
                 now = time.monotonic()
                 if now - last_ping >= 1.0:
-                    modem.t.write(__import__("ofdm_modem").encode(
-                        0x04, int(now).to_bytes(4, "little")))
+                    # A write can time out on a HEALTHY board: it stops
+                    # servicing USB for as long as its worst blocking
+                    # decode (2.3 s measured). Losing one ping is
+                    # nothing -- the next is a second away -- but the
+                    # exception used to escape and end the session.
+                    try:
+                        modem.t.write(__import__("ofdm_modem").encode(
+                            0x04, int(now).to_bytes(4, "little")))
+                        ping_misses = 0
+                    except USBTimeoutError:
+                        ping_misses += 1
+                        if ping_misses >= 5:
+                            con.plain("the board has not accepted a write "
+                                      "in 5 tries -- detaching")
+                            break
                     last_ping = now
                 # events() yields the SHORT names from TYPE_NAME
                 # ("status", not "EVT_STATUS"), and poke=False because a
@@ -676,6 +690,12 @@ def main():
                     print("> ", end="", flush=True)
         except KeyboardInterrupt:
             print()
+        except USBTimeoutError:
+            # Reached only from a command's own write (the heartbeat
+            # above tolerates its own). Say so plainly rather than
+            # ending the session with a traceback.
+            con.plain("usb write timed out -- the board stopped accepting "
+                      "writes; detaching")
         con.rx.close()
     return 0
 

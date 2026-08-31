@@ -11,6 +11,7 @@
 #define PID 0x0001
 #define EP_OUT 0x01
 #define EP_IN 0x81
+#define USBH_WRITE_TIMEOUT_MS 5000
 
 struct usbh {
     libusb_context *ctx;
@@ -173,11 +174,26 @@ int usbh_read(usbh_t *u, void *buf, int cap, int timeout_ms)
     return -1;
 }
 
+/* The device stops servicing USB for as long as its worst blocking
+ * receive burst -- 2283 ms measured on the part (the end-of-frame commit
+ * that sizes the capture FIFO) -- so a healthy board mid-decode can miss
+ * a write deadline shorter than that. The old 2000 ms sat just under the
+ * measurement. 5 s clears it, and a timeout that moved NO bytes is
+ * retried once; a PARTIAL one never is, because repeating the head of a
+ * frame would desync the device's parser. */
 int usbh_write(usbh_t *u, const void *buf, int n)
 {
-    int done = 0;
-    return libusb_bulk_transfer(u->dev, EP_OUT, (unsigned char *)buf, n,
-                                &done, 2000) == 0 && done == n ? n : -1;
+    int attempt;
+    for (attempt = 0; attempt < 2; attempt++) {
+        int done = 0;
+        int rc = libusb_bulk_transfer(u->dev, EP_OUT, (unsigned char *)buf,
+                                      n, &done, USBH_WRITE_TIMEOUT_MS);
+        if (rc == 0 && done == n)
+            return n;
+        if (rc != LIBUSB_ERROR_TIMEOUT || done != 0)
+            break;
+    }
+    return -1;
 }
 
 const char *usbh_serial(usbh_t *u) { return u->serial; }

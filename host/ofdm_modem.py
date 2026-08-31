@@ -42,7 +42,15 @@ EP_OUT, EP_IN = 0x01, 0x81
 
 SYNC = b"\xA5\x5A"
 HDR = 5
-MAX_PAYLOAD = 1024
+# UP_MAX_PAYLOAD in cport/src/usb_proto.h -- sized so one whole station
+# message (ST_MSG_MAX 3328) plus its qos byte crosses in a single frame.
+# It MUST track that header: this constant was left at the protocol's
+# original 1024 when the message size grew, and the parser drops any
+# frame declaring more as garbage. The device stayed healthy and the
+# Python console simply never saw a file part (3185-byte EVT_MESSAGE),
+# while encode() refused to send one -- measured, both ends of a
+# transfer the C console completed fine.
+MAX_PAYLOAD = 3336
 
 CMD_INFO, CMD_SUBMIT, CMD_CONFIG, CMD_PING, CMD_RESET = 1, 2, 3, 4, 5
 RSP_INFO, EVT_MESSAGE, EVT_STATUS, EVT_DIAG, RSP_PONG, EVT_LOG, EVT_AUDIO = (
@@ -156,6 +164,24 @@ class _PipeTransport:
             self.p.kill()
 
 
+# The device can stop servicing USB for as long as its worst blocking
+# receive burst -- 2283 ms measured on the part, the end-of-frame commit
+# that sizes the capture FIFO. A write timeout below that turns a healthy
+# board that happens to be mid-decode into a hard error: at 1000 ms it
+# killed the console out of its once-a-second heartbeat, with a traceback,
+# mid-transfer. pyusb cannot report how much of a timed-out transfer
+# reached the device, so there is no safe retry at this layer -- a repeat
+# of a partial frame would desync the device's parser. The fix is a
+# timeout that clears the stall.
+WRITE_TIMEOUT_MS = 5000
+
+try:                       # pyusb is optional -- the emulator needs none
+    from usb.core import USBTimeoutError
+except ImportError:        # pragma: no cover - exercised without pyusb
+    class USBTimeoutError(Exception):
+        pass
+
+
 class _UsbTransport:
     def __init__(self, serial=None):
         import usb.core, usb.util          # imported late: only this path needs it
@@ -224,7 +250,7 @@ class _UsbTransport:
         return n
 
     def write(self, data):
-        self.dev.write(EP_OUT, data, timeout=1000)
+        self.dev.write(EP_OUT, data, timeout=WRITE_TIMEOUT_MS)
 
     def read(self, timeout):
         import usb.core

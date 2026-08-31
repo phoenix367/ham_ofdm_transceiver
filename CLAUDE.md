@@ -737,6 +737,25 @@ Cross-module invariants that are easy to break:
   transmitter reaches int16 full scale, so anything lower clips against
   the int8 rail and nothing decodes) and the time scale (the SDR path is
   ~20x the virtual channel's cost, so ~2x is the ceiling, not 25x).
+- The USB protocol's sizes live in TWO languages and both must move
+  together: `UP_MAX_PAYLOAD` (`cport/src/usb_proto.h`, 3336) and
+  `MAX_PAYLOAD` (`host/ofdm_modem.py`). The Python copy was left at the
+  protocol's original 1024 when messages grew to 3328, and the failure
+  is SILENT in the direction that matters: `Parser` treats a frame
+  declaring more than its cap as garbage and resyncs past it, so the
+  board acked a file part it had received perfectly while the Python
+  console never saw the `EVT_MESSAGE` (`encode()` refused to send one
+  too). The C console shares the header and was unaffected, which is
+  what made it look like a board-side problem. Same rule for
+  `USB_MSG_CAP` in `demoapp/app.c` vs `ST_MSG_MAX`.
+- Host WRITE timeouts must exceed the device's worst blocking receive
+  burst (2283 ms measured, the end-of-frame commit that sizes the
+  capture FIFO): a healthy board mid-decode simply is not reading its
+  OUT endpoint. Both hosts sat under it (Python 1000 ms, C 2000 ms) and
+  the Python one died out of its 1 Hz heartbeat with a traceback. Both
+  are 5000 ms now; only the C side retries, and only a timeout that
+  moved ZERO bytes -- repeating a partial frame would desync the
+  device's parser, and pyusb cannot report a partial count at all.
 - `Header.PACKET_SIZE`-style sizes count CRC bits; `Header.len` is the size of
   the *data packet bits including its CRC* (e.g. 90 for a Beacon). C-port
   exception: `PKT_TYP_EXT_DATA` (typ=5, `cport/` only) reinterprets `len` as
