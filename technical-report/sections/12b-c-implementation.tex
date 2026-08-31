@@ -2097,6 +2097,50 @@ link layer already follows for sequence numbers, where every value
     \label{fig:sendfileseq}
 \end{figure}
 
+\subsection{Writing the Interfaces Down}
+\label{sec:cport_docs}
+
+The board stopped being a program and became a \emph{device} once three
+consumers appeared for it --- the C console, the Python console and the
+host library --- each implementing the same protocol from the same
+header.  \texttt{cport/src/usb\_proto.h} is normative and always was,
+but a header states layouts, not rules: that the IN endpoint must be
+drained rather than reset (Section~\ref{sec:cport_usb}), that an empty
+\textsc{config} payload is a query, that broadcast chunks are paced
+against a field in the status frame, that a file part should be window
+aligned or pay an extra acknowledgment
+(Section~\ref{sec:cport_caps}).  Every one of those was found by
+measurement in this chapter, and each lived only in the firmware and
+the commit log.
+
+Four documents now carry them: the transport (framing, frame types,
+payload layouts, configuration keys), the modem's command/event model
+as a host application sees it --- submit, pace, configure, stay
+alive, and the envelopes that ride inside --- the channel drivers
+behind the single 12\,kHz audio interface everything else speaks, and
+the two consoles' commands together with the behaviours that cannot be
+guessed from them.  They are narrative, not normative: where a document
+and the code disagree, the code is right and the document is the bug.
+
+Which makes them worth checking rather than trusting, so all twelve
+were audited against the source.  The result is a fair picture of how
+documentation rots.  Nothing had gone wrong in the parts of the system
+that stopped changing; the drift was entirely where the measurement
+campaign had moved most recently.  The PHY document still described the
+broadcast command as one transfer of at most 1022\,bytes, true until
+the host began feeding it in chunks
+(Section~\ref{sec:cport_bcast}).  The link document had the station in
+DTCM holding 2\,kB messages --- three revisions behind SRAM4,
+3328\,bytes and the 114\,B/s those bought
+(Section~\ref{sec:cport_caps}).  The fixed-point document described
+the integer SNR estimator's raw output but not the measured output map
+since bolted on top of it (Section~\ref{sec:cport_snrcal}), which is
+the half with a behavioural contract.  The source-layout table predated
+\texttt{cport/} entirely.  And the freshly written diagnostic-event
+count said nineteen where the enumeration has seventeen --- a number
+that can only be got right by counting the code, which is the argument
+for auditing documentation rather than for writing it more carefully.
+
 \subsection{From Simulation to a Radio}
 \label{sec:cport_sdr}
 

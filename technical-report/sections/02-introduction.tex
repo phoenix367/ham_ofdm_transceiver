@@ -81,7 +81,12 @@ gap, and every subsequent extension.  All quantitative claims are
 backed by scripts in \texttt{experiments/} (Section~\ref{sec:results});
 the measured artefacts (curves, JSON sweeps, WAV recordings) live in
 \texttt{results/}.  Developer-oriented documentation with the same
-structure exists as Markdown with Mermaid diagrams in \texttt{docs/}.
+structure exists as Markdown with Mermaid diagrams in \texttt{docs/}:
+the layer documents (architecture, PHY, link, RF, fixed-point)
+alongside four interface documents written for whoever implements
+\emph{against} the system rather than inside it --- the channel
+drivers, the two consoles, the USB transport, and the modem's
+command/event model (Section~\ref{sec:cport_docs}).
 
 \subsection{Contributions}
 
