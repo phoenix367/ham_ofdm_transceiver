@@ -2231,6 +2231,86 @@ count said nineteen where the enumeration has seventeen --- a number
 that can only be got right by counting the code, which is the argument
 for auditing documentation rather than for writing it more carefully.
 
+\subsection{Speaking KISS, and Where That Belongs}
+\label{sec:cport_kiss}
+
+Everything above assumes software written for this modem.  The question
+of what it would take to run \emph{existing} packet-radio software over
+it has one cheap answer --- KISS, the framing every amateur TNC has
+spoken since 1987 --- and one design decision that is more interesting
+than the protocol.
+
+KISS is trivial: SLIP-style framing, one type byte, six configuration
+commands.  Implementing it in the firmware would take an afternoon, and
+would be a mistake.  The board already speaks a protocol that carries
+the rung, the SNR, the peer's declared capabilities, the die
+temperature, the broadcast pacing signal and a diagnostic stream; a
+KISS TNC has no way to express any of it, because it was designed for
+modems that have nothing to say.  Adding KISS to the firmware would
+duplicate the transport, add a fourth wire format to keep in step
+across the C, Python and board twins, and present an adaptive modem as
+a dumb one.  So the translation is a host program
+(\texttt{host/kiss\_bridge.py}), it presents either a TCP port or a pty
+for \texttt{kissattach}, and \texttt{cport/} does not change at all.
+
+The mapping is a KISS data frame to one station message, boundaries
+preserved, over the ARQ that already exists; a second mode sends each
+frame as one non-ARQ transmission, which is what AX.25's connectionless
+UI frames actually describe.  What the bridge does \emph{not} do is
+carry connected-mode AX.25: two retransmission engines with independent
+timers, one adapting the rung underneath the other, is a layering
+accident rather than a feature.
+
+The constraint that shapes everything is air time, not frame size.  The
+station's own estimator gives, for a full AX.25 frame:
+
+\begin{table}[H]
+    \centering
+    \caption{Air time for one AX.25 frame, from
+             \texttt{estimate\_air\_time}.  The rung, not the byte
+             count, decides whether a frame is sendable.}
+    \label{tab:kiss_air}
+    \small
+    \begin{tabular}{@{}lrrrrr@{}}
+    \toprule
+    \textbf{Payload} & \textbf{rung 0} & \textbf{rung 4} &
+    \textbf{rung 8} & \textbf{rung 10} & \textbf{rung 12} \\
+    \midrule
+    32\,B  & 48.3\,s  & 3.2\,s  & 1.3\,s & 1.1\,s & 1.0\,s \\
+    128\,B & 147.0\,s & 9.7\,s  & 2.9\,s & 2.2\,s & 1.7\,s \\
+    200\,B & 221.0\,s & 14.6\,s & 4.1\,s & 3.0\,s & 2.2\,s \\
+    256\,B & 278.6\,s & 18.4\,s & 5.1\,s & 3.6\,s & 2.6\,s \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+A 256-byte frame is 2.6\,s at the top of the ladder and four and a half
+minutes at the bottom --- past every carrier-sense constant the station
+has, and past the 45\,s fragment ceiling that already governs burst
+ARQ.  The bridge therefore admits frames by \emph{air time at the
+current rung} and refuses the rest with the reason, rather than keying
+a transmitter for four minutes; \texttt{paclen}~200 is the operating
+point, because a full frame is then $\approx$216\,bytes, inside the
+255-byte single-frame payload cap, and 3.0\,s at rung~10.
+
+One implementation detail earned its place in the tests.  The first
+version imported the model's \texttt{estimate\_air\_time} directly ---
+and would not start, because that import pulls in NumPy and SciPy while
+a bridge runs in a virtual environment that has \texttt{pyusb} and
+nothing else.  The air-time model is now a generated table, and the
+test asserts against the real function that it is never
+\emph{optimistic} (worst case 0.43\,s pessimistic, across every rung
+and every length), so an admission decision cannot be wrongly
+permissive.  It is the same rule the C port follows for compression:
+the dependency lives in the tool, not in the thing being reused.
+
+Measured end to end on the two boards: a 48-byte AX.25 UI frame ---
+shifted callsign addresses, control \texttt{0x03}, PID \texttt{0xF0},
+an APRS position --- entered a TCP KISS client, crossed the wire, and
+left the peer's bridge byte-identical 3.4\,s later, 1.4\,s of that
+being air at rung~12.  Twenty-one further checks cover the codec and
+every mapping decision without hardware.
+
 \subsection{From Simulation to a Radio}
 \label{sec:cport_sdr}
 
