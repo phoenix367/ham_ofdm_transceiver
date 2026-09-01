@@ -384,6 +384,19 @@ sanitize: $(GEN) | $(BUILD)
 	    src/usb_proto.c && printf '%-16s ' fuzz_usb && ./$(BUILD)/san_fuzz_usb
 	@echo "sanitize: clean"
 
+# The suites at the geometry that SHIPS, not only the default. UBSan
+# catches an out-of-bounds index at any message size, but ASan can only
+# see an underflow that LEAVES the object: at the default 256 a
+# pool[-1] lands inside the neighbouring controller struct (contained UB,
+# invisible to ASan), while at 3328/4096 it reads ~3 kB outside it.
+sanitize-ship: $(GEN) | $(BUILD)
+	@$(MAKE) --no-print-directory sanitize \
+	    SAN_CFLAGS="$(SAN_CFLAGS) -DST_MSG_MAX=3328 -DBURST_STREAM_MAX=16"
+	@$(MAKE) --no-print-directory sanitize \
+	    SAN_CFLAGS="$(SAN_CFLAGS) -DST_MSG_MAX=4096 -DST_ASM_MAX=8192 \
+	                -DBURST_STREAM_MAX=16"
+	@echo "sanitize-ship: clean at 3328 (radio) and 4096 (demoapp)"
+
 # Flash-resident firmware: boots on its own from 0x08000000 and survives
 # reset, unlike the RAM images (which inherit the resident firmware's
 # clock via the JTAG load). target/startup_flash.c brings up the 400 MHz
@@ -604,4 +617,4 @@ flash-probe: test-probe
 	 $(ARDUINO_CLI) compile --fqbn esp32:esp32:esp32 -u -p $(PROBE_PORT) \
 	   $(PROBE_DIR)/esp32_rbb | tail -3
 
-.PHONY: bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read radiofw flash-radio-a flash-radio-b burstrepro bcrepro cstest robust ledtest run-led
+.PHONY: sanitize-ship bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read radiofw flash-radio-a flash-radio-b burstrepro bcrepro cstest robust ledtest run-led

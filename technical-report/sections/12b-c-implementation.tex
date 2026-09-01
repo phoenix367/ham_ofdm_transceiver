@@ -2582,15 +2582,25 @@ an operator noticing a blinking LED rather than any instrument in the
 system --- and why the repairs that matter most are the ones that make a
 discarded frame say so.
 
-\emph{A test configuration can hide a real memory defect.}  The
+\emph{A sanitizer only sees the path a test walks.}  The
 out-of-bounds read has existed for as long as the burst path, and every
-suite runs under AddressSanitizer.  It was invisible because the tests
-build with the default \texttt{ST\_MSG\_MAX} of 256, where
-\texttt{pool[-1]} lands \emph{inside} the neighbouring controller
-struct: contained undefined behaviour that a sanitizer cannot see.  At
-the shipping 3328 and 4096 the same expression reads about 3\,kB outside
-the object.  Sanitizers check the configuration you give them, and the
-configuration under test was not the one that ships.
+suite runs under AddressSanitizer and UndefinedBehaviorSanitizer ---
+which do catch it: with the guard removed again as a check, UBSan
+reports the index at every message size tried, the default 256 and the
+shipping 3328 alike.  What hid it was that no test had ever released a
+message while a burst was still engaged, so nothing reached
+\texttt{msg\_data()} with a freed slot.  The instrument was sharp
+enough; the scenario was missing, and naming it took a review rather
+than a tool.
+
+The geometry matters too, but less than it first appears, and in a
+narrower way: at the default size that underflow lands \emph{inside} the
+neighbouring controller struct, so only UBSan objects and ASan sees
+nothing; at the shipping sizes the same expression reads about 3\,kB
+outside the object and both fire.  The suites therefore now run at the
+shipping geometries as well as the default (\texttt{make
+sanitize-ship}), because a gate should exercise the configuration that
+ships --- but the lesson that generalises is the first one.
 
 \subsection{From Simulation to a Radio}
 \label{sec:cport_sdr}

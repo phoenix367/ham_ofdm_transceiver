@@ -812,6 +812,14 @@ Cross-module invariants that are easy to break:
   the parity trace pins it (three asks at one instant, one answer).
   Any state a getter mutates must be idempotent -- prefer charging
   against a marker over recomputing from an event timestamp.
+- `make sanitize-ship` runs the suites at the SHIPPING geometries
+  (3328 radio, 4096 demoapp) as well as the default 256. UBSan catches
+  an out-of-bounds index at any size, but ASan only sees an underflow
+  that LEAVES the object: at the default, `pool[-1]` lands inside the
+  neighbouring controller struct. Note what actually hid the burst
+  read for so long, though -- not the geometry but the absence of a
+  test that released a message under an engaged burst. A sanitizer
+  only sees the path a test walks.
 - BURST STATE MUST NOT OUTLIVE ITS MESSAGE. `msg_data()` returned
   `st->pool[m->slot]` unguarded, and `slot` is -1 after `msg_release`:
   the burst transmit paths then memcpy'd `pool[-1]` into a packet and
