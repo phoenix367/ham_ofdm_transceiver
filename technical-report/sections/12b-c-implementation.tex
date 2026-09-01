@@ -2501,6 +2501,97 @@ TCP retransmit timer, an active queue manager's target delay.  Each was
 chosen sensibly for the hardware its author had in mind, and each is
 wrong here in the same direction.
 
+\subsection{Whose State Is It: a Review, and What It Found}
+\label{sec:cport_review}
+
+The operator noticed the boards were busy with nothing attached to
+drive them.  They were: one station was keying an acknowledgment-only
+frame every second --- 117 frames in 108\,s --- which its peer decoded
+and, correctly, never answered.  It had been doing so unattended.
+
+The cause is worth stating precisely, because six more defects turned
+out to share its shape.  \texttt{poll\_tx} begins with an early-out:
+return unless something is owed, queued, or a capability exchange is
+pending.  A flag called \texttt{caps\_kick} bypasses that gate.  But
+\texttt{caps\_probe\_wanted()} declines on its \emph{first} line for a
+peer whose record is already held --- so the block that would have sent
+the probe, and which is the only place that clears the kick, never ran.
+Execution fell through to the message path, found no fragment, and
+emitted a no-data frame.  Forever.
+
+One bug of that shape justifies looking for others, so the station and
+link layers were reviewed along four axes: state that is set and never
+cleared, timing and arithmetic, bounds and memory, and ARQ protocol
+logic.  Table~\ref{tab:review} is what came back, after each finding was
+re-derived against the code and, where possible, measured.
+
+\begin{table}[H]
+    \centering
+    \caption{Seven defects, and the observation that identifies each.
+             None of them announced itself: the counters were healthy,
+             or said the opposite.}
+    \label{tab:review}
+    \small
+    \begin{tabular}{@{}p{4.5cm}p{4.3cm}p{4.6cm}@{}}
+    \toprule
+    \textbf{Defect} & \textbf{Symptom} & \textbf{What it really was} \\
+    \midrule
+    Burst state outliving its message &
+    bytes from before the message pool, encoded and transmitted &
+    \texttt{msg\_data()} returned \texttt{pool[-1]} for a released slot \\
+    Rung request decaying per \emph{call} &
+    ladder collapses to EXTREME after a fade &
+    a getter that mutates, called twice per frame \\
+    Acks on CAPS / burst frames discarded &
+    a retransmission per frame the peer sends, uncounted &
+    three branches return before the ARQ retire \\
+    Broadcast hold not cleared &
+    the second \texttt{bcast} announces and never keys &
+    a flag whose only consumer a legitimate path skips \\
+    Burst falling through to stop-and-wait &
+    duplicate transmission; station busy forever &
+    two paths owning one message \\
+    Full store acknowledging a drop &
+    sender believes a lost message arrived &
+    \texttt{done} set before the delivery attempt \\
+    Window air time understated 23\,\% &
+    a 37\,s transmission under a 30\,s cap &
+    a model standing in for the builder \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Three observations generalise beyond this codebase.
+
+\emph{The recurring shape is ownership.}  Almost every entry is state
+with a single consumer that some other legitimate path walks around, or
+state owned by two things at once.  The repairs are correspondingly
+structural rather than local: the burst state is now dropped as a unit
+by one function instead of by clearing a flag; an engaged burst owns its
+message and the stop-and-wait path will not touch it; the
+silence decay is charged against a marker so that asking twice cannot
+decay twice; and the window's air time is asked of
+\texttt{tx\_burst\_len} rather than modelled from a subtraction that was
+never quite right.
+
+\emph{The failures were silent by construction.}  A no-data frame is
+never replied to, so the stuck transmitter provoked nothing.  A dropped
+message was acknowledged, so the sender saw success.  The doubled decay
+moved a number that no counter reports.  This is why the entry point was
+an operator noticing a blinking LED rather than any instrument in the
+system --- and why the repairs that matter most are the ones that make a
+discarded frame say so.
+
+\emph{A test configuration can hide a real memory defect.}  The
+out-of-bounds read has existed for as long as the burst path, and every
+suite runs under AddressSanitizer.  It was invisible because the tests
+build with the default \texttt{ST\_MSG\_MAX} of 256, where
+\texttt{pool[-1]} lands \emph{inside} the neighbouring controller
+struct: contained undefined behaviour that a sanitizer cannot see.  At
+the shipping 3328 and 4096 the same expression reads about 3\,kB outside
+the object.  Sanitizers check the configuration you give them, and the
+configuration under test was not the one that ships.
+
 \subsection{From Simulation to a Radio}
 \label{sec:cport_sdr}
 
