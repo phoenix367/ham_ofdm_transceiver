@@ -208,6 +208,38 @@ int main(void)
               out2.q_bulk == 3 && out2.busy == 1);
     }
 
+    /* ---- the status frame fits the buffer callers are told to use --
+     * this is the regression for a field appended to up_status_t while
+     * a caller still sized its buffer from the old literal: encode
+     * refused, and the board stopped pushing status altogether. ---- */
+    {
+        up_status_t in;
+        uint8_t exact[UP_HDR_LEN + UP_STATUS_LEN];
+        uint8_t tight[UP_HDR_LEN + UP_STATUS_LEN - 1];
+        up_status_t out3;
+        memset(&in, 0, sizeof(in));
+        in.temp_q8 = (int16_t)(37 * 256);
+        n = up_encode_status(&in, exact, (int)sizeof(exact));
+        memset(&out3, 0, sizeof(out3));
+        check("status encodes into UP_HDR_LEN + UP_STATUS_LEN exactly",
+              n == (int)sizeof(exact));
+        check("a status frame one byte short is refused, not truncated",
+              up_encode_status(&in, tight, (int)sizeof(tight)) < 0);
+        reset();
+        up_parser_init(&par);
+        up_parser_push(&par, exact, n, sink, 0);
+        check("die temperature survives the round trip",
+              g_n == 1 &&
+              up_decode_status(g_f[0].data, g_f[0].len, &out3) == 0 &&
+              out3.temp_q8 == (int16_t)(37 * 256));
+        /* an older firmware's 40-byte status must still decode, with
+         * the temperature reported ABSENT rather than as 0 C */
+        memset(&out3, 0, sizeof(out3));
+        check("a 40-byte status decodes, temperature absent",
+              up_decode_status(g_f[0].data, 40, &out3) == 0 &&
+              out3.temp_q8 == UP_TEMP_NONE);
+    }
+
     /* ---- truncated fixed payloads are refused, not read past ---- */
     {
         up_info_t o;

@@ -291,6 +291,18 @@ static const char *snr_str(char *buf, size_t n, double db, const char *none)
     return buf;
 }
 
+/* Die temperature from the board's own sensor, or "n/a": the status
+ * frame carries UP_TEMP_NONE when there is no reading, and 0 C is a
+ * real temperature that must not stand in for a missing one. */
+static const char *temp_str(char *buf, size_t n, int q8)
+{
+    if (q8 == UP_TEMP_NONE)
+        snprintf(buf, n, "n/a");
+    else
+        snprintf(buf, n, "%.1f C", q8 / 256.0);
+    return buf;
+}
+
 /* Same defect one field to the right: link.c stamps "never happened" as
  * -1e9, so a station that has heard nothing reports an age of a billion
  * seconds.  The staleness TESTS already ask whether it ever happened;
@@ -1149,11 +1161,12 @@ static int usb_command(char *line)
             printf("no status yet -- the board pushes one every 0.5 s\n");
         } else {
             {
-                char sb[32];
-                printf("%s [%s] rung %d  SNR %s  %s%s\n", tstamp(),
+                char sb[32], tb[16];
+                printf("%s [%s] rung %d  SNR %s  die %s  %s%s\n", tstamp(),
                        g_name, g_ust.rung,
                        snr_str(sb, sizeof(sb), g_ust.snr_q8 / 256.0,
                                "-- (none in 60 s)"),
+                       temp_str(tb, sizeof(tb), g_ust.temp_q8),
                        g_ust.busy ? "BUSY" : "idle",
                        g_ust.pending ? "  pending-ack" : "");
             }

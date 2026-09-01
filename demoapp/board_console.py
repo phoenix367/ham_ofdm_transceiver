@@ -128,6 +128,12 @@ def snr_str(db, none="-- (none in 60 s)"):
     return none if db <= -90.0 else f"{db:+.1f} dB"
 
 
+def temp_str(c):
+    """Die temperature, or "n/a" -- the board reports no reading as a
+    sentinel and 0 C is a real temperature."""
+    return "n/a" if c is None else f"{c:.1f} C"
+
+
 def ts():
     return time.strftime("%H:%M:%S")
 
@@ -502,6 +508,7 @@ class Console:
             return
         q = st["queues"]
         self.plain(f"rung {st['rung']}  SNR {snr_str(st['snr_db'])}  "
+                   f"die {temp_str(st.get('temp_c'))}  "
                    f"{'BUSY' if st['busy'] else 'idle'}"
                    f"{'  pending-ack' if st['pending'] else ''}")
         self.plain(f"queues: ctl {q[0]}  inter {q[1]}  bulk {q[2]}"

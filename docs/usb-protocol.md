@@ -88,7 +88,7 @@ SUBMIT (0 from older firmware ⇒ assume 256, and the host's own buffer
 must actually match what it advertises). `caps` bits: LDPC(0),
 EXT_FRAMES(1), BURST(2), AUDIO_TAP(3), BCAST(4).
 
-## `up_status_t` (40 B)
+## `up_status_t` (42 B)
 
 `rung:i32, snr_q8:i32, tx_frames:u32, rx_frames:u32, timeouts:u32,
 retransmissions:u32, q_ctl:u16, q_inter:u16, q_bulk:u16, busy:u8,
@@ -96,8 +96,19 @@ pending:u8`, then the peer's capability record as learned over the air
 (`peer_state:u8` 0 unknown / 1 legacy / 2 held / 3 confirmed,
 `peer_caps:u8, peer_msg_max:u16, peer_win_max:u8,
 peer_max_rung1:u8` = ceiling+1, 0 unspecified), then `bc_free:u16` —
-free bytes in the broadcast source buffer, the chunk-pacing signal.
-Older firmware sends 32 B; decoders default the extras to zero.
+free bytes in the broadcast source buffer, the chunk-pacing signal,
+then `temp_q8:i16` — the die temperature in Q8 °C from the part's own
+sensor, or `UP_TEMP_NONE` (−32768) where there is none. Older firmware
+sends 32 or 40 B; decoders default the peer record and `bc_free` to
+zero and the temperature to `UP_TEMP_NONE` — never to 0 °C, which is a
+real temperature.
+
+**Size the buffer from `UP_STATUS_LEN`, not from a literal.** The
+payload grows as fields are appended: the temperature turned a
+hardcoded `UP_HDR_LEN + 40` in the encoder's caller into a buffer two
+bytes short, `up_encode` refused the frame, and the board stopped
+pushing status entirely while enumeration and every command still
+worked.
 
 ## Config keys
 

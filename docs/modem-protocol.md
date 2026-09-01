@@ -12,7 +12,8 @@ all the DSP run in firmware. The host is a thin terminal that
 
 1. **submits messages** (`CMD_SUBMIT` with a QoS class — 0 control,
    1 interactive, 2 bulk) and receives delivered ones (`EVT_MESSAGE`);
-2. **paces itself against the status stream** (`EVT_STATUS`, 2 Hz):
+2. **paces itself against the status stream** (`EVT_STATUS`, 2 Hz,
+   which also carries the board's die temperature):
    queue depths for file parts, `bc_free` for broadcast chunks. Pacing
    is self-correcting by construction — the board reports true depths,
    so a dropped submit simply shows up as room again;

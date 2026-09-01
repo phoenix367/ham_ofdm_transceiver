@@ -66,6 +66,7 @@
 #include "broadcast.h"
 #include "packets.h"
 #include "led.h"
+#include "temp.h"
 
 void ofdm_usb_bsp_init(int rhport);
 int  ofdm_usb_bsp_supply_ready(void);
@@ -139,6 +140,7 @@ enum { ST_ENTER = 1, ST_SUPPLY, ST_ANALOG, ST_RXS, ST_TUSB, ST_LOOP,
 #define IRQ_TIM6_DAC 54
 
 static volatile uint32_t g_ms;
+static uint32_t g_temp_next_ms;   /* next die-temperature reading */
 static dcblock_t g_dcb;
 static csense_t g_cs;
 
@@ -1295,6 +1297,9 @@ int main(void)
     dcblock_init(&g_dcb);
     cs_init(&g_cs);
     g_beacon.adc_ready = (uint32_t)adc_init();
+    /* after adc_init: the ADC kernel-clock select is common to all
+     * three converters and adc_init owns it (src/temp.h) */
+    temp_init();
     ADC_CR |= (1u << 2);              /* prime the first conversion */
     tim6_init();
 
@@ -1648,6 +1653,12 @@ int main(void)
             }
             g_modem.bcast_free =
                 (uint16_t)(BC_TX_CAP - (g_bc_src_len - g_bc_src_off));
+            /* die temperature: one ADC3 pair a second, from the main
+             * loop -- ~200 us, and never from the ISR (src/temp.h) */
+            if ((int32_t)(g_ms - g_temp_next_ms) >= 0) {
+                g_temp_next_ms = g_ms + 1000u;
+                g_modem.temp_q8 = (int16_t)temp_read_q8();
+            }
             follow_rung(t);
             /* the cable being plugged in is not a host: the console
              * announces itself with a command, and an unplug takes the

@@ -49,6 +49,9 @@ typedef struct {
      * by the owner of that buffer; reported in the status frame so a
      * host can pace a chunked broadcastfile against it */
     uint16_t bcast_free;
+    int16_t  temp_q8;       /* die temperature the board last read, Q8;
+                             * UP_TEMP_NONE on anything without the
+                             * sensor (host builds, demoapp) */
 } usb_modem_t;
 
 void usb_modem_init(usb_modem_t *m, station_t *st, const uint8_t uid[12],

@@ -42,7 +42,7 @@ Configuration and diagnostics:
 | `config` | ask the board for its current settings (the settings live there) |
 | `config <key> <val>` | set one: `rung_ceiling burst_window burst_stream freq_trim_mhz audio_tap anchor diag_stream win_max` |
 | `debug [on\|off]` | the board's diagnostic event stream + printing (one command does both) |
-| `status` | rung, SNR, queues, peer capabilities, broadcastfile feed progress |
+| `status` | rung, SNR, die temperature, queues, peer capabilities, broadcastfile feed progress |
 | `stats` | frame counters |
 
 ## Behaviors worth knowing

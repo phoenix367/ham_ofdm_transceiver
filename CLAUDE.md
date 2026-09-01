@@ -737,6 +737,32 @@ Cross-module invariants that are easy to break:
   transmitter reaches int16 full scale, so anything lower clips against
   the int8 rail and nothing decodes) and the time scale (the SDR path is
   ~20x the virtual channel's cost, so ~2x is the ceiling, not 25x).
+- The DIE TEMPERATURE (`src/temp.h`, in the status frame) is read on
+  **ADC3**, not the audio converter: on this part VSENSE is bonded to
+  ADC3_INP18 (VBAT/4 on INP17, VREFINT on INP19) and ADC1/2 cannot
+  reach it. ADC3 is in D3 behind its own AHB4 gate, so it costs the
+  12 kHz capture nothing, but the kernel-clock select (D3CCIPR ADCSEL)
+  is COMMON to all three converters and `adc_init()` owns it -- call
+  `temp_init()` after it. The conversion runs once a second from the
+  MAIN LOOP (~200 us for the sensor + VREFINT pair at 810.5 cycles
+  each); the ISR's budget is 83 us. The calibration words were read
+  off these boards over JTAG rather than assumed -- TS_CAL1 12420 (30
+  C) at 0x1FF1E820, TS_CAL2 16374 (110 C) at 0x1FF1E840, VREFINT_CAL
+  24275 at 0x1FF1E860, i.e. 49.4 LSB/C at 16 bits -- and `temp_init`
+  refuses a pair that is not ordered and plausible, because a wrong
+  address otherwise yields a confident wrong number. The raw count is
+  referred back to the calibration's 3.3 V through VREFINT, not
+  assumed. Measured idle on the stand: 44.4 C and 46.4 C, +0.3-0.4 C
+  under a transfer, i.e. sensor accuracy (+-2 C) dominates, so treat
+  it as a die temperature and not as a load meter.
+- Every buffer holding a status frame is sized from `UP_STATUS_LEN`,
+  never a literal. Appending `temp_q8` left one caller at
+  `UP_HDR_LEN + 40`, `up_encode` refused the frame, and the boards
+  stopped pushing STATUS ALTOGETHER while INFO, commands and
+  enumeration still worked -- it looks like a wedged firmware and is
+  arithmetic. `test_usb.c` now pins the exact fit, the one-byte-short
+  refusal, and that a 40-byte status still decodes with the
+  temperature ABSENT rather than 0 C.
 - The USB protocol's sizes live in TWO languages and both must move
   together: `UP_MAX_PAYLOAD` (`cport/src/usb_proto.h`, 3336) and
   `MAX_PAYLOAD` (`host/ofdm_modem.py`). The Python copy was left at the

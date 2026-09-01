@@ -128,12 +128,26 @@ def decode_status(p):
          # the peer's declared capabilities (capability handshake):
          # peer_state 0 unknown, 1 legacy, 2 held, 3 held + confirmed
          "peer_state": 0, "peer_caps": 0, "peer_msg_max": 0,
-         "peer_win_max": 0}
+         "peer_win_max": 0,
+         # free bytes in the board's broadcast source buffer -- the
+         # chunk-pacing signal a broadcastfile feeds against. It was
+         # never decoded here, so board_console.py's pacing loop read
+         # a default of 0 and the command fed nothing, forever.
+         "bc_free": 0,
+         # die temperature in C, or None when the board has no reading
+         # (older firmware, emulator, a part whose calibration words
+         # did not check out). None, not a number: 0 is a plausible
+         # temperature and must not stand in for "no sensor".
+         "temp_c": None}
     if len(p) >= 40:
         d["peer_state"], d["peer_caps"] = p[32], p[33]
         d["peer_msg_max"] = struct.unpack_from("<H", p, 34)[0]
         d["peer_win_max"] = p[36]
         d["peer_max_rung1"] = p[37]
+        d["bc_free"] = struct.unpack_from("<H", p, 38)[0]
+    if len(p) >= 42:
+        q8 = struct.unpack_from("<h", p, 40)[0]
+        d["temp_c"] = None if q8 == -32768 else q8 / 256.0
     return d
 
 

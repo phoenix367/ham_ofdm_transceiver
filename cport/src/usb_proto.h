@@ -137,7 +137,26 @@ typedef struct {
                               * unspecified (an older record) */
     uint16_t bc_free;        /* free bytes in the broadcast source
                               * buffer (chunked broadcastfile pacing) */
+    int16_t  temp_q8;        /* die temperature, degrees C in Q8, from
+                              * the part's internal sensor (src/temp.h).
+                              * UP_TEMP_NONE when there is no sensor:
+                              * every host build, and a board whose
+                              * calibration words did not check out.
+                              * Absent from an older firmware's frame;
+                              * decoders default it to UP_TEMP_NONE. */
 } up_status_t;
+
+/* "no reading" -- must equal TEMP_Q8_NONE in src/temp.h */
+#define UP_TEMP_NONE ((int16_t)-32768)
+
+/* Wire size of the status payload. It GROWS as fields are appended, so
+ * every buffer that must hold one is sized from this and never from a
+ * literal: the temperature field turned a hardcoded `out[UP_HDR_LEN +
+ * 40]` in usb_modem.c into a buffer two bytes too small, up_encode
+ * refused the frame, and the board simply stopped pushing status --
+ * enumeration and commands all still worked, which is what made it
+ * look like a firmware hang rather than an arithmetic slip. */
+#define UP_STATUS_LEN 42
 
 /* --- encoding ------------------------------------------------------- */
 

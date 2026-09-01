@@ -174,6 +174,10 @@ void usb_modem_init(usb_modem_t *m, station_t *st, const uint8_t uid[12],
                     uint16_t fw_ver, uint32_t caps)
 {
     memset(m, 0, sizeof(*m));
+    /* NOT zero: zero is a perfectly plausible 0.0 C, and a build with
+     * no sensor (the emulator, any host build) must say "no reading"
+     * rather than report a cold board. */
+    m->temp_q8 = UP_TEMP_NONE;
     m->st = st;
     up_parser_init(&m->parser);
     m->info.proto_ver = 1;
@@ -227,7 +231,7 @@ void usb_modem_tick(usb_modem_t *m, double now, int status)
 
     if (status) {
         up_status_t s;
-        uint8_t out[UP_HDR_LEN + 40];
+        uint8_t out[UP_HDR_LEN + UP_STATUS_LEN];
         int n;
         memset(&s, 0, sizeof(s));
         s.rung = m->st->stats.last_rung;
@@ -251,6 +255,7 @@ void usb_modem_tick(usb_modem_t *m, double now, int status)
                                      && m->st->peer.max_rung >= 0
                                          ? m->st->peer.max_rung + 1 : 0);
         s.bc_free = m->bcast_free;
+        s.temp_q8 = m->temp_q8;
         n = up_encode_status(&s, out, (int)sizeof(out));
         if (n > 0)
             txq_push(m, out, n);
