@@ -2847,10 +2847,7 @@ link: the classic amateur speech codecs start around 700\,bit/s
 (Codec2 700C, what FreeDV uses on HF), and rung~12 carries a measured
 102\,B/s $=$ 816\,bit/s of \emph{goodput}, leaving no room for framing,
 acknowledgements or a fade.  Neural codecs have since moved the floor.
-LSCodec-25\,Hz\footnote{Guo \emph{et al.}, ``LSCodec: Low-Bitrate and
-Speaker-Decoupled Discrete Speech Codec'', Interspeech 2025;
-inference code and weights at
-\texttt{github.com/X-LANCE/LSCodec-Inference}, MIT licensed.}
+LSCodec-25\,Hz~\cite{guo2025lscodec} (MIT licensed)
 emits 25 tokens per second, each a 10-bit index into a 1024-entry
 codebook: \textbf{250\,bit/s}, or 31.25\,B/s.  That is a quarter of
 what the top rung carries.
@@ -3048,6 +3045,241 @@ needs a second, conventional codec for enrolment alone.  And each
 station must hold WavLM-Large (1.2\,GB) locally to turn received
 prompt audio into features; the cached result is about 198\,kB per
 correspondent.
+
+\subsubsection{How the prompt reaches the vocoder}
+\label{sec:voice_arch}
+
+The prompt is not a speaker vector but a \emph{time series}:
+WavLM-Large~\cite{chen2022wavlm} layer-6 features, $T' \times 1024$ at $\sim$50\,Hz, with
+$T' = \lfloor (n-400)/320 \rfloor + 1$ for $n$ input samples --- 99
+frames for the 2\,s enrolment above.  Figure~\ref{fig:voice_codec_paths}
+shows where it enters.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth,height=0.80\textheight,keepaspectratio]{images/voice_codec_paths.png}
+    \caption{The decode path and the prompt path.  The prompt is
+             \textbf{cross-attention memory} for both Conformer stages,
+             not a concatenated or pooled input --- which is why its
+             length is independent of the content's, and why 99 prompt
+             frames can condition a 640-frame message.}
+    \label{fig:voice_codec_paths}
+\end{figure}
+
+Two details cost time to establish and are recorded here because neither
+is discoverable from the configuration.  The vocoder for LSCodec-25\,Hz
+was trained at 50\,Hz, so the token sequence must be
+\texttt{repeat\_interleave}d by two before the codebook lookup; the only
+trace of this is the \texttt{repeat\_input\_tokens} flag, and omitting it
+yields speech at half speed.  And the frontend's own docstring describes
+the prompt as a ``mel-spectrogram prompt'' --- inherited text from
+CTX-vec2wav.  It is not mel: it is 1024-dimensional WavLM, and feeding
+mel produces confident nonsense with no error raised.
+
+\subsubsection{Can the prompt be made smaller?}
+\label{sec:voice_promptsize}
+
+At 200\,kB per second of prompt audio, the enrolment is $\sim$6400
+times the speech bitrate, which is what makes it the awkward part of the
+design.  Three families of compression were measured against a single
+metric: mean absolute log-mel distance between the decode under a
+degraded prompt and the decode under the exact one, on the same token
+stream.  The scale is anchored at both ends --- 0\,dB is the correct
+prompt, and \textbf{8.88\,dB is a different real speaker's prompt},
+i.e.\ the point at which the speaker is simply wrong.
+
+Pruning is ruled out by the distribution before any decode: only
+3.3\,\% of values fall below 0.1 in magnitude, and \emph{zero} of the
+1024 channels have low variance.  There is nothing to prune.  The
+distribution is also heavily outlier-dominated --- kurtosis 52.6, range
+$-35.6\ldots+57.4$ while 98\,\% of values lie within $\pm 8$, with
+per-channel offsets whose median magnitude is 0.74 and maximum 47 ---
+which decides how quantisation must be applied.
+
+\begin{table}[H]
+    \centering
+    \caption{Prompt compression, all on the same 400-byte token stream.
+             Per-channel affine quantisation is essential: at 4 bits it
+             costs 0.35\,dB, while a single global scale costs 2.36\,dB
+             for the same storage.}
+    \label{tab:voice_quant}
+    \small
+    \begin{tabular}{@{}lrrl@{}}
+    \toprule
+    \textbf{Prompt representation} & \textbf{Bytes} & \textbf{mel dB} &
+    \textbf{Verdict} \\
+    \midrule
+    fp32 (reference)              & 406\,kB & 0.00 & --- \\
+    fp16 (as cached)              & 203\,kB & 0.00 & free \\
+    \textbf{int8, per-channel}    & \textbf{105\,kB} & \textbf{0.03} &
+                                    \textbf{free; use this} \\
+    int6, per-channel             &  80\,kB & 0.09 & free \\
+    int4, per-channel             &  55\,kB & 0.35 & small \\
+    int2, per-channel             &  29\,kB & 1.50 & audible \\
+    \midrule
+    int8, per-tensor              & 101\,kB & 0.16 & $5\times$ worse, same size \\
+    int4, per-tensor              &  51\,kB & 2.36 & ruined by outliers \\
+    low-rank $k=20$               &  47\,kB & 0.89 & loses to int4 \\
+    every 2nd frame               & 102\,kB & 1.31 & loses to int4 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+The interesting failure is vector quantisation, because it is the only
+scheme that could plausibly beat sending audio.  A \emph{shared}
+codebook --- trained once and shipped with the software, so only indices
+cross the air --- was fitted on 280\,s of speech from other speakers,
+with the test speaker held out.
+
+\begin{table}[H]
+    \centering
+    \caption{Vector-quantising the prompt against a shared codebook.
+             Every variant is at or past the point where the speaker is
+             simply wrong (8.88\,dB), including the ones that would beat
+             2\,s of Opus audio on size.}
+    \label{tab:voice_vq}
+    \small
+    \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    \textbf{Scheme} & \textbf{Bytes} & \textbf{vs 4\,kB Opus} &
+    \textbf{mel dB} \\
+    \midrule
+    int4 per-channel (best scalar) & 54.8\,kB & $13\times$ worse & 0.35 \\
+    PQ, 32 blocks $\times$ 256     &  3168\,B & about equal      & 7.87 \\
+    PQ, 8 blocks $\times$ 256      &   792\,B & $5\times$ better & 9.88 \\
+    full-frame VQ, $K=1024$        &   123\,B & $33\times$ better & 10.34 \\
+    \midrule
+    \emph{a different real speaker} & --- & --- & \emph{8.88} \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+This is a rate limit, not a codebook-quality limit, and the distinction
+matters because only the latter would be fixed by more training data.
+The k-means converged (identical at 12 and 60 iterations) with zero dead
+centroids out of 8192.  In feature space, PQ at 0.25\,bits per dimension
+reaches a relative $L_2$ error of 0.593, against 0.072 for int4 at
+4\,bits per dimension --- and 0.764 for simply substituting the
+per-channel mean.  Three-quarters of a bit short of that baseline is not
+a codebook that needs more speakers.  The features are also not
+redundant enough to escape through rank: 90\,\% of the variance still
+needs 40 of 99 components, and adjacent frames correlate only 0.79.
+
+The reason is worth stating plainly, because it generalises past this
+codec.  \textbf{WavLM features are an expansion of the audio, not a
+compression of it}: 2\,s of speech is 32\,000 samples and 101\,376
+feature values, $3.2\times$ more data.  Opus reaches 4\,kB by coding the
+audio, which is a far more redundant signal.  Coding the expanded
+representation instead cannot win, and the conclusion is that
+\textbf{the enrolment goes over the air as audio and every station keeps
+WavLM locally}.  Quantisation is a storage decision --- int8
+per-channel, 105\,kB per correspondent --- not an architectural one.
+
+A secondary observation, unexpected and useful for anyone tempted by
+this: the vocoder tolerates a \emph{valid but wrong} prompt better than
+a \emph{correct but corrupted} one.  Quantised prompts land off the
+feature manifold and decode worse than a constant.
+
+\subsubsection{Borrowing a purpose-built speaker encoder}
+\label{sec:voice_facodec}
+
+If the prompt cannot be compressed, the alternative is to replace it.
+Several codecs represent the speaker as a small \emph{time-invariant}
+code rather than a sequence: TiCodec~\cite{ren2024ticodec} splits speech
+into time-dependent and time-invariant parts and quantises the latter
+into eight discrete tokens per utterance; FreeCodec~\cite{zheng2024freecodec}
+takes an ECAPA-TDNN speaker embedding and quantises it with group VQ,
+eight groups against a 1024-entry codebook --- \textbf{80 bits, ten
+bytes, for the whole utterance}; FACodec, the codec inside
+NaturalSpeech~3~\cite{ju2024naturalspeech3}, factorises speech into
+content, prosody, acoustic detail and timbre, extracting timbre with a
+Transformer encoder.  A recent review~\cite{guo2025tokenreview} maps the
+space.
+
+Ten bytes instead of four kilobytes would remove the enrolment exchange
+\emph{and} the 1.2\,GB WavLM dependency, so it is worth knowing how far
+apart the representations are.  FACodec's timbre extractor was run
+against LSCodec's vocoder directly: 69 utterances from 23 LibriTTS
+test-clean speakers, 2\,s each, both representations computed, and a
+ridge adapter fitted from the 256-dimensional timbre vector to the
+1024-dimensional prompt, evaluated on speakers it never saw.
+
+\begin{table}[H]
+    \centering
+    \caption{FACodec timbre driving LSCodec's vocoder.  Two losses are
+             separable, and the first one bounds the whole approach.}
+    \label{tab:voice_facodec}
+    \small
+    \begin{tabular}{@{}lr@{}}
+    \toprule
+    \textbf{Prompt fed to the vocoder} & \textbf{mel dB} \\
+    \midrule
+    true prompt, full sequence (reference)      & 0.00 \\
+    \textbf{true prompt's own mean, broadcast --- the CEILING}
+                                                & \textbf{3.64} \\
+    FACodec timbre $\rightarrow$ ridge $\rightarrow$ broadcast & 7.18 \\
+    a different real speaker, full sequence     & 8.88 \\
+    corpus mean, timbre ignored (null)          & 10.16 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+The adapter carries real information --- held-out cosine $+0.36$ and
+$R^2$ $+0.12$ on the speaker-discriminative component, and its decode
+beats both the null and a different real speaker --- but it lands at
+7.18\,dB against a ceiling of 3.64.  That ceiling is the finding.  It is
+what \emph{any} time-invariant code scores with this vocoder, even given
+the true prompt's own mean, because the two Conformer stages cross-attend
+over 99 frames and genuinely use their temporal detail.  A constant
+memory throws that away before the speaker question is even reached.
+
+So the answer is not a better adapter, and not more speakers: the
+vocoder's prompt path would have to be retrained to consume a global
+code.  That is precisely what TiCodec and FreeCodec do from scratch, and
+why eight tokens suffice for them.  The adapter figure is a floor --- 69
+samples fitting a $257 \times 1024$ map is data-starved, and a nonlinear
+head with thousands of speakers would do better --- but the ceiling
+comes from the architecture and no amount of data moves it.
+
+\subsubsection{A proposed voice mode}
+\label{sec:voice_design}
+
+Figure~\ref{fig:voice_mode_design} is what the measurements above
+support.  Every component is host-side; \texttt{cport/} does not change,
+and neither does the wire format.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{images/voice_mode_design.png}
+    \caption{The proposed voice mode.  The tokens are an opaque payload
+             of exactly the size the streaming burst machinery already
+             carries, and enrolment is a one-off exchange on the same
+             link.}
+    \label{fig:voice_mode_design}
+\end{figure}
+
+The design commits to four things the measurements decided.  Enrolment
+is \emph{audio}, not features, and happens once per correspondent
+(\S\ref{sec:voice_promptsize}).  The cached prompt is int8 per-channel,
+105\,kB.  The mode is available from rung~7 upward and is
+store-and-forward below it, which forfeits the link's sensitivity
+advantage and is not negotiable (\S\ref{sec:cport_voice}).  And the
+speaker's identity travels in the prompt, never in the payload, so a
+station that has not enrolled a peer cannot render that peer's voice at
+all --- which is a feature for the identification question and a
+constraint on the protocol.
+
+Two paths lead off this design, and they differ in what they cost the
+wire.  Fine-tuning the \textbf{vocoder} on in-domain or Russian speech
+changes no bitstream: a peer with stock weights still decodes, a peer
+with tuned weights decodes better, and there is no capability bit.
+Adopting a \textbf{global speaker token} in place of the prompt would
+collapse enrolment to about ten bytes, but requires retraining the
+prompt path and therefore matching models at both ends --- and, per
+LSCodec's own comparison, would trade away some of the speaker
+similarity that made this codec attractive: LSCodec reaches 0.853 SECS
+at 0.25\,kbps where TiCodec reaches 0.714 at 0.75\,kbps, precisely
+because it spends no bits on identity.
 
 \subsubsection{A non-English trial}
 

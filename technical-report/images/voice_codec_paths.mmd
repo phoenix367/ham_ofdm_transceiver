@@ -1,0 +1,19 @@
+flowchart TB
+    subgraph DEC["decode: 250 bit/s to speech"]
+        direction TB
+        IN["tokens off the air<br/>25/s, 10 bit"] --> L["codebook lookup<br/>repeat x2, 64-dim"]
+        L --> C1["Conformer decoder 1"]
+        C1 --> C2["Conformer decoder 2"]
+        C2 --> HG["HiFiGAN backend"]
+        HG --> OUT["24 kHz speech"]
+    end
+    subgraph PR["prompt: ONCE per correspondent"]
+        direction TB
+        PA["2 s enrolment audio"] --> WL["WavLM-Large, layer 6<br/>315.5 M params"]
+        WL --> PF["99 x 1024 features<br/>203 kB fp16, cached"]
+        PF --> PN["ConvPromptPrenet"]
+    end
+    PN -.->|"cross-attention memory"| C1
+    PN -.->|"cross-attention memory"| C2
+    style IN fill:#e8f4f5,stroke:#0E7C82,stroke-width:2px
+    style PF fill:#f6eddd,stroke:#A96A00

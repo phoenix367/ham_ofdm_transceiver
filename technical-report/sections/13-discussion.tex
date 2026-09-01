@@ -62,7 +62,10 @@ better); pilot reduction or 2-D channel estimation to reclaim carrier
 capacity; per-carrier bit-loading on the measured channel estimate;
 frame aggregation in the ARQ to amortise preamble overhead at high
 rungs; a host-side voice mode over the 250\,bit/s codec evaluated in
-\S\ref{sec:cport_voice}, whose remaining question is a failure rate
-rather than a bitrate; a 46.875\,Hz-spacing variant for very stable channels; and
+\S\ref{sec:cport_voice} (design in \S\ref{sec:voice_design}), whose
+remaining question is a failure rate rather than a bitrate, and whose
+enrolment cost would collapse from kilobytes to tens of bytes if the
+vocoder's prompt path were retrained to take a global speaker code
+(\S\ref{sec:voice_facodec}); a 46.875\,Hz-spacing variant for very stable channels; and
 shrinking EXTREME's frequency-search range after AFC netting
 converges (compute reduction on embedded targets).

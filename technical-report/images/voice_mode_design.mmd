@@ -1,0 +1,10 @@
+flowchart LR
+    A["<b>host A</b> -- new program<br/>record 16 kHz<br/>LSCodec encoder<br/>14.3x real time on 1 core<br/>output 31.25 B/s<br/>106 s fits one 3328 B message"]
+    A --> W(["<b>boards A and B</b><br/><b>firmware UNCHANGED</b><br/>opaque station message<br/>streamed burst ARQ, 200 B fragments<br/><br/>rung 7 and above<br/>13 s of speech = 3.9 s of air at rung 12"])
+    W --> C{"prompt for A<br/>cached at B?"}
+    C -->|"no -- first contact only"| R["<b>enrolment</b>, over the same link<br/>2 s of Opus, ~4 kB, ~40 s of air<br/>WavLM-Large computes the prompt<br/>B caches 203 kB for this correspondent"]
+    C -->|"yes"| D
+    R --> D["<b>host B</b> -- new program<br/>vocoder + cached prompt<br/>3x real time<br/>24 kHz speech"]
+    style W fill:#eef1f3,stroke:#5A6A76,stroke-width:2px
+    style R fill:#f6eddd,stroke:#A96A00
+    style D fill:#e8f4f5,stroke:#0E7C82
