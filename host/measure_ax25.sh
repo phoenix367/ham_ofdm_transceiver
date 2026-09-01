@@ -35,7 +35,7 @@ trap 'rm -f "$WORK_PING"' EXIT
 MODE=${1:-}
 shift || true
 COUNT=5
-SIZE=200
+SIZE=150
 BYTES=2048
 TIMEOUT=900
 
@@ -84,8 +84,9 @@ else:
 print(f"  air: {txp} frame(s) out ({txb} B on the interface), "
       f"{rxp} in ({rxb} B)")
 if txp:
-    print(f"  {txb / max(n, 1):.2f}x interface bytes per payload byte "
-          f"(AX.25 headers, and anything retransmitted)")
+    if n:
+        print(f"  {txb / n:.2f}x interface bytes per payload byte "
+              f"(AX.25 headers, and anything retransmitted)")
     lost = txp - rxp
     if lost > 0:
         print(f"  {lost} of {txp} frames did not come back "
@@ -98,6 +99,14 @@ ping)
     check_setup
     read -r TXP0 TXB0 <<<"$(counters "$LOCAL_IF" TX)"
     read -r RXP0 RXB0 <<<"$(counters "$LOCAL_IF" RX)"
+    MTU=$(cat "/sys/class/net/$LOCAL_IF/mtu" 2>/dev/null || echo 0)
+    if [ "$MTU" -gt 0 ] && [ "$((SIZE + 28))" -gt "$MTU" ]; then
+        echo "measure-ax25: -s $SIZE makes a $((SIZE + 28)) B packet, over"
+        echo "              the $MTU B MTU: it would be sent as two IP"
+        echo "              fragments and BOTH must survive for a reply."
+        echo "              Use -s $((MTU - 28)) or less."
+        exit 1
+    fi
     echo "measure-ax25: $COUNT pings of $SIZE B to $REMOTE_IP"
     echo "              (each is one frame out and one back; seconds per"
     echo "               round trip is normal here)"
@@ -183,6 +192,14 @@ check)
         echo "     sudo ip netns exec $NS arp -H ax25 -i $REMOTE_IF \\"
         echo "          -s <local ip> <local callsign>"
         echo "     or just re-run: sudo ./ax25_ip.sh up)"; }
+    echo "does the far side's IP stack see them?"
+    ip netns exec "$NS" netstat -s 2>/dev/null \
+        | grep -iE "echo request|echo replies|ICMP messages received" \
+        | sed 's/^/  /' || echo "  (netstat unavailable)"
+    echo "  interface drops/errors:"
+    ip netns exec "$NS" ip -s -s link show "$REMOTE_IF" \
+        | awk '/RX:/{getline h; getline v; print "    rx", v}
+               /TX:/{getline h; getline v; print "    tx", v}'
     echo "counters:"
     echo "  $LOCAL_IF  tx $(counters "$LOCAL_IF" TX)   rx $(counters "$LOCAL_IF" RX)"
     echo "  $REMOTE_IF  tx $(counters "$REMOTE_IF" TX "$NS")   rx $(counters "$REMOTE_IF" RX "$NS")"
