@@ -46,6 +46,7 @@ payload cap, and costs 3.0 s at rung 10.
 """
 import argparse
 import atexit
+from collections import deque
 import os
 import signal
 import select
@@ -87,6 +88,11 @@ FEND, FESC, TFEND, TFESC = 0xC0, 0xDB, 0xDC, 0xDD
 # KISS command codes (low nibble of the type byte)
 CMD_DATA, CMD_TXDELAY, CMD_P, CMD_SLOT = 0, 1, 2, 3
 CMD_TXTAIL, CMD_DUPLEX, CMD_SETHW, CMD_RETURN = 4, 5, 6, 0xFF
+
+# Shortest thing that can be an AX.25 frame: two addresses and a control
+# byte. Anything shorter came from this bridge's own link probe, not from
+# a stack, and must not be pushed at the peer's kernel.
+MIN_AX25 = 15
 
 UP_CMD_BCAST = 0x06
 BC_PT_OPAQUE = 0x0F
@@ -153,6 +159,14 @@ class Bridge:
         self.msg_max = 256
         self.bc_buf = None                 # broadcast reassembly, rx side
         self.sent = self.rcvd = self.refused = 0
+        # Frames too long for the CURRENT rung wait here rather than
+        # being dropped. An idle link decays to rung 0, where nothing
+        # bigger than 28 bytes fits -- so every AX.25 frame is refused,
+        # nothing is transmitted, and the ladder that would fix it never
+        # moves. The firmware solves the same deadlock for broadcast by
+        # holding the payload and probing (bc_poll_link); so does this.
+        self.held = deque()                # (frame, deadline)
+        self.next_probe = 0.0
 
     # -- host side ------------------------------------------------------
     def add_client(self, obj):
@@ -179,7 +193,7 @@ class Bridge:
             if not self._write_client(obj, wire):
                 self.drop_client(fd)
         self.rcvd += 1
-        self.log(f"rx {len(frame)} B -> host")
+        self.say(f"rx {len(frame)} B -> host")
 
     def drop_client(self, fd):
         obj, _ = self.clients.pop(fd, (None, None))
@@ -224,11 +238,26 @@ class Bridge:
             return
         air = self.air_time(len(payload))
         if air > self.args.max_air:
-            self.refused += 1
-            self.log(f"frame of {len(payload)} B refused: {air:.0f}s of air "
-                     f"at rung {self.rung()} (limit {self.args.max_air:.0f}s)"
-                     f" -- lower paclen or wait for the ladder")
+            if self.args.hold <= 0:        # holding disabled: say why
+                self.refused += 1
+                self.say(f"frame of {len(payload)} B refused: {air:.0f}s of "
+                         f"air at rung {self.rung()} exceeds "
+                         f"{self.args.max_air:.0f}s")
+                return
+            if len(self.held) >= 8:
+                dropped, _ = self.held.popleft()
+                self.refused += 1
+                self.say(f"queue full -- dropped a held {len(dropped)} B "
+                         f"frame")
+            self.held.append((payload, time.monotonic() + self.args.hold))
+            self.say(f"holding {len(payload)} B: {air:.0f}s of air at rung "
+                     f"{self.rung()} exceeds {self.args.max_air:.0f}s. "
+                     f"Probing to bring the ladder up "
+                     f"({len(self.held)} held)")
             return
+        self.transmit(payload, air)
+
+    def transmit(self, payload, air):
         try:
             if self.args.mode == "broadcast":
                 # one frame = one non-ARQ broadcast; bits 7/6 clear = a
@@ -243,7 +272,40 @@ class Bridge:
                      "(busy decoding); the host will retry if it cares")
             return
         self.sent += 1
-        self.log(f"tx {len(payload)} B, {air:.1f}s at rung {self.rung()}")
+        self.say(f"tx {len(payload)} B, {air:.1f}s at rung {self.rung()}")
+        return True
+
+    def flush_held(self):
+        """Send what now fits, expire what waited too long, and probe
+        while anything is waiting -- the ladder only moves on exchanges,
+        so a held queue with no traffic would wait forever."""
+        now = time.monotonic()
+        keep = deque()
+        while self.held:
+            frame, deadline = self.held.popleft()
+            air = self.air_time(len(frame))
+            if air <= self.args.max_air:
+                self.say(f"releasing {len(frame)} B at rung {self.rung()} "
+                         f"({air:.1f}s)")
+                self.transmit(frame, air)
+            elif now >= deadline:
+                self.refused += 1
+                self.say(f"dropping {len(frame)} B: still {air:.0f}s of air "
+                         f"at rung {self.rung()} after {self.args.hold:.0f}s "
+                         f"of probing")
+            else:
+                keep.append((frame, deadline))
+        self.held = keep
+        if self.held and now >= self.next_probe:
+            self.next_probe = now + 30.0
+            # one byte, purely to make the peer answer: an answered frame
+            # is what moves the ladder. The peer's bridge discards
+            # anything shorter than an AX.25 frame.
+            try:
+                self.m.submit(b"\x00", qos=0)
+                self.log("probe sent")
+            except USBTimeoutError:
+                pass
 
     def on_bcast(self, payload: bytes):
         """Reassemble a received broadcast into exactly one frame."""
@@ -264,15 +326,28 @@ class Bridge:
         if self.args.verbose:
             print(f"{time.strftime('%H:%M:%S')} [kiss] {msg}", flush=True)
 
+    def say(self, msg):
+        """Always printed. A frame that did not go out is exactly what
+        the operator must not have to run with -v to discover."""
+        print(f"{time.strftime('%H:%M:%S')} [kiss] {msg}", flush=True)
+
     def pump_modem(self):
         for kind, payload in self.m.events(timeout=0.05, poke=False):
             if kind == "status" and payload:
+                had = self.rung()
                 self.status = payload
+                if self.held and self.rung() != had:
+                    self.flush_held()
                 mm = payload.get("peer_msg_max") or 0
                 if mm:
                     self.msg_max = min(self.msg_max, mm)
             elif kind == "message" and self.args.mode == "message":
-                self.to_hosts(payload["data"])
+                data = payload["data"]
+                if len(data) < MIN_AX25:
+                    self.log(f"ignoring a {len(data)} B message -- too "
+                             f"short to be an AX.25 frame (a link probe)")
+                else:
+                    self.to_hosts(data)
             elif kind == "0x88" and self.args.mode == "broadcast":
                 self.on_bcast(payload)
             elif kind == "log":
@@ -319,6 +394,8 @@ class Bridge:
                 for port, cmd, payload in dec.push(data):
                     self.from_host(port, cmd, payload)
             self.pump_modem()
+            if self.held:
+                self.flush_held()
 
 
 def main():
@@ -338,7 +415,10 @@ def main():
     ap.add_argument("--qos", type=int, default=2, choices=(0, 1, 2),
                     help="0 control, 1 interactive, 2 bulk (message mode)")
     ap.add_argument("--max-air", type=float, default=45.0,
-                    help="refuse frames longer than this many seconds of air")
+                    help="hold frames longer than this many seconds of air")
+    ap.add_argument("--hold", type=float, default=120.0,
+                    help="how long a held frame waits for the ladder "
+                         "before it is dropped (0 disables holding)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 

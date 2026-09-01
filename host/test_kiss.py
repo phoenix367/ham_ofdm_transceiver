@@ -32,6 +32,7 @@ class FakeArgs:
     mode = "message"
     qos = 2
     max_air = 45.0
+    hold = 120.0
     verbose = False
 
 
@@ -133,8 +134,9 @@ def test_mapping():
 
     # air time, not byte count, is the limit
     b = bridge(rung=0)
+    b.args.hold = 0                       # holding disabled: refuse outright
     b.from_host(0, CMD_DATA, bytes(256))
-    check("256 B at rung 0 (278 s of air) is refused",
+    check("256 B at rung 0 (278 s of air) does not go out",
           b.m.submitted == [] and b.refused == 1)
     b = bridge(rung=12)
     b.from_host(0, CMD_DATA, bytes(256))
@@ -145,6 +147,7 @@ def test_mapping():
     check("a short frame still fits at rung 0", len(b.m.submitted) == 1)
 
     b = bridge()
+    b.args.hold = 0
     b.msg_max = 200
     b.from_host(0, CMD_DATA, bytes(256))
     check("a frame over the board's msg_max is refused",
@@ -178,6 +181,88 @@ def test_mapping():
           b.sent_frames == [])
 
 
+def test_hold_and_probe():
+    """The deadlock this exists to prevent: at rung 0 nothing bigger
+    than 28 B fits, so every AX.25 frame is refused, nothing is sent,
+    and the ladder that would fix it never moves."""
+    import time as _t
+
+    class HoldArgs(FakeArgs):
+        hold = 120.0
+
+    def held_bridge(rung):
+        args = HoldArgs()
+        b = Bridge(FakeModem(), args)
+        b.status = {"rung_now": rung, "rung": rung}
+        b.msg_max = 3328
+        b.sent_frames = []
+        b.to_hosts = lambda f: b.sent_frames.append(f)
+        return b
+
+    frame = bytes(35)                       # a small AX.25 UI frame
+    b = held_bridge(0)
+    b.from_host(0, CMD_DATA, frame)
+    check("a frame too long for rung 0 is HELD, not dropped",
+          b.m.submitted == [] and len(b.held) == 1)
+
+    b.flush_held()
+    check("holding sends a probe so the ladder can move",
+          b.m.submitted == [(b"\x00", 0)])
+
+    b.status = {"rung_now": 8, "rung": 8}   # the peer answered; ladder up
+    b.flush_held()
+    check("the held frame is released when the rung improves",
+          any(d == frame for d, _ in b.m.submitted) and not b.held)
+
+    b = held_bridge(0)
+    b.from_host(0, CMD_DATA, frame)
+    b.held = type(b.held)([(f, _t.monotonic() - 1) for f, _ in b.held])
+    b.flush_held()
+    check("a frame the ladder never rescues is dropped, once",
+          not b.held and b.refused == 1
+          and all(d != frame for d, _ in b.m.submitted))
+
+    b = held_bridge(0)
+    for i in range(10):
+        b.from_host(0, CMD_DATA, frame)
+    check("the hold queue is bounded", len(b.held) == 8 and b.refused == 2)
+
+    # a link probe must not reach the peer's AX.25 stack
+    b = held_bridge(12)
+    b.pump = None
+    b.to_hosts(b"x" * 20)
+    check("a full-length frame does reach the host", b.sent_frames == [b"x" * 20])
+
+
+def test_pty_write():
+    """A frame off the air must actually reach a pty client -- the half
+    that carries traffic INTO the AX.25 stack, and the half a fake
+    to_hosts() in the other tests deliberately does not exercise."""
+    import os as _os
+    import tty as _tty
+    master, slave = _os.openpty()
+    # kissattach puts the line into raw mode when it opens it; a fresh
+    # pty is CANONICAL, where the discipline eats and reorders the
+    # binary a KISS frame is made of. Without this the test fails for a
+    # reason that has nothing to do with the bridge.
+    _tty.setraw(slave)
+    args = FakeArgs()
+    b = Bridge(FakeModem(), args)
+    b.add_client(master)
+    frame = b"\x82\xa0\x40\x40\x40\x40\x60hello world"
+    b.to_hosts(frame)
+    _os.set_blocking(slave, False)
+    try:
+        got = _os.read(slave, 4096)
+    except BlockingIOError:
+        got = b""
+    dec = KissDecoder()
+    check("a received frame is KISS-framed onto the pty",
+          dec.push(got) == [(0, CMD_DATA, frame)])
+    _os.close(master)
+    _os.close(slave)
+
+
 def test_air_time_parity():
     """The bridge's table must track the model it was generated from."""
     try:
@@ -204,6 +289,8 @@ def test_air_time_parity():
 def main():
     test_codec()
     test_mapping()
+    test_hold_and_probe()
+    test_pty_write()
     test_air_time_parity()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
