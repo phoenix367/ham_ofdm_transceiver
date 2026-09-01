@@ -737,6 +737,19 @@ Cross-module invariants that are easy to break:
   transmitter reaches int16 full scale, so anything lower clips against
   the int8 rail and nothing decodes) and the time scale (the SDR path is
   ~20x the virtual channel's cost, so ~2x is the ceiling, not 25x).
+- Reading a board's SERIAL STRING must be retried, and the retry must
+  clear pyusb's cache. Two separate failures, both measured with two
+  boards attached: a control transfer issued while the device pushes
+  bulk transiently fails (3 opens in 12 raised
+  `ValueError: no langid`, which reads like a permission problem and is
+  not), and pyusb caches a FAILED langid fetch as `()` so every later
+  `get_string` on that device object raises instantly -- a retry that
+  does not reset `dev._langids` is a no-op, which is why a first fix
+  still failed the first open in twelve. The budget (10 x 300 ms in
+  both hosts) is sized by the board's worst blocking decode, 2283 ms,
+  the same figure that sizes the write timeout. `host/_read_serial` and
+  `usb_host.c`'s loop are the two places; `host/test_modem.py` pins the
+  behaviour without hardware.
 - KISS (`host/kiss_bridge.py`) is a HOST program and stays one: the
   board's own protocol already carries rung, SNR, capabilities,
   temperature and broadcast pacing, none of which a KISS TNC can

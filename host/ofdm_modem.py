@@ -201,6 +201,42 @@ except ImportError:        # pragma: no cover - exercised without pyusb
         pass
 
 
+def _read_serial(dev, get_string=None, tries=10, delay=0.3):
+    """The device's serial string, or None -- retried, and un-poisoned.
+
+    Two failure modes, both measured on the two-board stand:
+
+    The string is a CONTROL transfer, and one issued while the device is
+    pushing bulk transiently fails; these boards push status at 2 Hz
+    forever, so there is always traffic. One failure is not "no board":
+    3 opens in 12 raised ValueError("no langid"), an error that reads
+    like a permission problem and is not. usb_host.c has retried this
+    since the first two-board session; this side did not, and let the
+    exception out of a list comprehension.
+
+    And pyusb CACHES a failed langid fetch as (), after which get_string
+    raises immediately, forever, on that device object -- so a retry
+    that does not clear the cache can never succeed, which is why a
+    first version still failed the first open in twelve. `_langids` is
+    the attribute the public langids property reads; there is no public
+    way to reset it.
+
+    The budget outlasts the board's worst blocking decode: 2283 ms
+    measured on the part, the same figure that sizes the write timeout.
+    """
+    if get_string is None:
+        import usb.util
+        get_string = usb.util.get_string
+    for attempt in range(tries):
+        try:
+            return get_string(dev, dev.iSerialNumber)
+        except Exception:
+            dev._langids = None
+            if attempt + 1 < tries:
+                time.sleep(delay)
+    return None
+
+
 class _UsbTransport:
     def __init__(self, serial=None):
         # imported late: only this path needs it, so the emulator and the
@@ -224,12 +260,19 @@ class _UsbTransport:
                 "Check the cable, and that the udev rule in "
                 "host/99-ofdm-modem.rules is installed.")
         if serial:
-            matches = [d for d in matches
-                       if usb.util.get_string(d, d.iSerialNumber) == serial]
+            seen = [(d, _read_serial(d)) for d in matches]
+            matches = [d for d, s in seen if s == serial]
             if not matches:
-                raise RuntimeError(f"no modem with serial {serial}")
+                mute = sum(1 for _, s in seen if s is None)
+                raise RuntimeError(
+                    f"no modem with serial {serial}"
+                    + (f" ({mute} attached device(s) did not answer the "
+                       f"serial-string request even after retries -- "
+                       f"unplug and replug, or check the udev rule)"
+                       if mute else
+                       f" (attached: {[s for _, s in seen]})"))
         if len(matches) > 1:
-            have = [usb.util.get_string(d, d.iSerialNumber) for d in matches]
+            have = [_read_serial(d) or "?" for d in matches]
             raise RuntimeError(
                 "several modems attached; choose one with --serial "
                 "(or serial= from Python). "

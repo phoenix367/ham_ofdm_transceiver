@@ -93,8 +93,16 @@ Two rules earned by measurement (report §12.6):
   armed desynchronizes TinyUSB from the hardware and wedges the
   endpoint. `usbh_open` reads until 150 ms of quiet and discards
   (`usbh_stale` reports how much).
-- The serial string read is retried 4×50 ms: a control transfer during
-  bulk traffic transiently fails, and one failure is not "no board".
+- **The serial string read is retried, on a budget that outlasts a
+  decode.** It is a control transfer, and one issued while the device
+  is pushing bulk transiently fails — these boards push status at 2 Hz
+  forever. The budget is 10 × 300 ms because the board stops servicing
+  USB for as long as its worst blocking decode, 2283 ms measured; the
+  original 4 × 50 ms could not outlast one. The Python host had no
+  retry at all (3 opens in 12 failed) and, worse, pyusb caches a failed
+  langid fetch as `()` so every later call raises instantly — a retry
+  there must clear `dev._langids` or it is a no-op. `host/test_modem.py`
+  pins both.
 - **Writes wait 5 s.** The board stops servicing USB for as long as its
   worst blocking decode -- 2283 ms measured on the part -- so a shorter
   deadline turns a healthy board mid-frame into a write error. A

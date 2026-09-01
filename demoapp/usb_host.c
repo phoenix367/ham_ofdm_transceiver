@@ -32,14 +32,21 @@ static int get_serial(libusb_device_handle *h, char *out, int cap)
      * or freshly enumerated -- measured as an intermittent
      * "<unreadable>" in --list while the peer console was streaming.
      * The serial is factory-constant, so a retry costs nothing and
-     * cannot return a stale answer. */
-    for (tries = 0; tries < 4; tries++) {
+     * cannot return a stale answer.
+     *
+     * The BUDGET is not arbitrary: the board stops servicing USB for as
+     * long as its worst blocking decode, 2283 ms measured on the part,
+     * so 4 x 50 ms of retrying could not outlast one. 10 x 300 ms can.
+     * (The Python host had no retry at all and raised ValueError("no
+     * langid") on 3 opens in 12 -- an error that reads like a
+     * permission problem and is not.) */
+    for (tries = 0; tries < 10; tries++) {
         if (libusb_get_string_descriptor_ascii(h, d.iSerialNumber,
                                                (unsigned char *)out,
                                                cap) > 0)
             return 0;
         {
-            struct timespec ts = { 0, 50 * 1000 * 1000 };
+            struct timespec ts = { 0, 300 * 1000 * 1000 };
             nanosleep(&ts, 0);
         }
     }
