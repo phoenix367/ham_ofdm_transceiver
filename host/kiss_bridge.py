@@ -89,6 +89,19 @@ FEND, FESC, TFEND, TFESC = 0xC0, 0xDB, 0xDC, 0xDD
 CMD_DATA, CMD_TXDELAY, CMD_P, CMD_SLOT = 0, 1, 2, 3
 CMD_TXTAIL, CMD_DUPLEX, CMD_SETHW, CMD_RETURN = 4, 5, 6, 0xFF
 
+# mkiss (the Linux KISS line discipline) probes the TNC for checksum
+# support on attach: its FIRST frame is marked SMACK (bit 7 of the type
+# byte) and its SECOND FLEX (bit 5), each with a 2-byte CRC appended,
+# after which it falls back to plain KISS for good. Those bits sit in
+# the type byte's high nibble -- where the port number also lives -- so
+# reading that nibble as a port makes the first two frames after every
+# `kissattach` look like traffic for ports 8 and 2. Dropping them means
+# the first thing anyone sends never goes out; measured exactly that,
+# on a live attach: "frame for port 8 dropped -- one port only".
+SMACK, FLEX = 0x80, 0x20
+CRC_BITS = SMACK | FLEX
+PORT_BITS = 0x50            # what is left of the port nibble
+
 # Shortest thing that can be an AX.25 frame: two addresses and a control
 # byte. Anything shorter came from this bridge's own link probe, not from
 # a stack, and must not be pushed at the peer's kernel.
@@ -131,8 +144,9 @@ class KissDecoder:
         for b in data:
             if b == FEND:
                 if self.in_frame and self.buf:
-                    out.append((self.buf[0] >> 4, self.buf[0] & 15,
-                                bytes(self.buf[1:])))
+                    # the raw type byte: its high nibble is port AND
+                    # CRC-mode flags, which only the caller can untangle
+                    out.append((self.buf[0], bytes(self.buf[1:])))
                 self.buf.clear()
                 self.in_frame = True
                 self.escape = False
@@ -215,7 +229,8 @@ class Bridge:
         r = self.rung()
         return estimate_air_time(r if r >= 0 else 0, n)
 
-    def from_host(self, port, cmd, payload):
+    def from_host(self, typ, payload):
+        cmd = typ & 0x0F
         if cmd != CMD_DATA:
             # TXDELAY/P/SlotTime/TXtail/FullDuplex/SetHardware: a smart
             # TNC owns its own timing, and this one's carrier sense and
@@ -226,9 +241,20 @@ class Bridge:
             self.log(f"ignoring KISS {names.get(cmd, cmd)} "
                      f"({'exit' if cmd == CMD_RETURN else 'we own our timing'})")
             return
-        if port != 0:
-            self.log(f"frame for port {port} dropped -- one port only")
+        if typ & PORT_BITS:
+            self.say(f"frame for KISS port {(typ >> 4) & 0x0F} dropped "
+                     f"-- one port only")
             return
+        if typ & CRC_BITS:
+            # mkiss's attach-time checksum probe. This is a plain-KISS
+            # TNC: strip the CRC it appended and answer plain, and it
+            # falls back by its third frame. Dropping these instead
+            # loses the first two frames after every attach.
+            if len(payload) <= 2:
+                return
+            self.log(f"stripping the {'SMACK' if typ & SMACK else 'FLEX'} "
+                     f"CRC from an mkiss probe frame")
+            payload = payload[:-2]
         if not payload:
             return
         if len(payload) > self.msg_max:
@@ -391,8 +417,8 @@ class Bridge:
                     self.log("client detached")
                     self.drop_client(fd)
                     continue
-                for port, cmd, payload in dec.push(data):
-                    self.from_host(port, cmd, payload)
+                for typ, payload in dec.push(data):
+                    self.from_host(typ, payload)
             self.pump_modem()
             if self.held:
                 self.flush_held()

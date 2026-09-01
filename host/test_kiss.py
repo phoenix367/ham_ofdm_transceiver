@@ -86,7 +86,7 @@ def test_codec():
     dec = KissDecoder()
     got = dec.push(kiss_encode(payload))
     check("every byte value survives the round trip",
-          got == [(0, CMD_DATA, payload)])
+          got == [(CMD_DATA, payload)])
 
     # a stream, split at every possible boundary, must decode identically
     wire = kiss_encode(b"one") + kiss_encode(b"two", cmd=CMD_TXDELAY)
@@ -94,68 +94,80 @@ def test_codec():
     for cut in range(len(wire) + 1):
         d = KissDecoder()
         out = d.push(wire[:cut]) + d.push(wire[cut:])
-        if out != [(0, CMD_DATA, b"one"), (0, CMD_TXDELAY, b"two")]:
+        if out != [(CMD_DATA, b"one"), (CMD_TXDELAY, b"two")]:
             ok = False
     check("frames decode the same however the stream is split", ok)
 
     d = KissDecoder()
     check("leading garbage before the first FEND is discarded",
-          d.push(b"junk" + kiss_encode(b"hi")) == [(0, CMD_DATA, b"hi")])
+          d.push(b"junk" + kiss_encode(b"hi")) == [(CMD_DATA, b"hi")])
     d = KissDecoder()
     check("repeated FENDs and empty frames are tolerated",
           d.push(bytes([FEND, FEND, FEND]) + kiss_encode(b"x"))
-          == [(0, CMD_DATA, b"x")])
+          == [(CMD_DATA, b"x")])
     d = KissDecoder()
-    check("the port nibble is decoded",
-          d.push(kiss_encode(b"p", port=3)) == [(3, CMD_DATA, b"p")])
+    check("the type byte is passed through whole",
+          d.push(kiss_encode(b"p", port=3)) == [(0x30 | CMD_DATA, b"p")])
 
 
 # ---------------- mapping ----------------
 
 def test_mapping():
     b = bridge()
-    b.from_host(0, CMD_DATA, b"\x82\xa0\x40hello")
+    b.from_host(CMD_DATA, b"\x82\xa0\x40hello")
     check("a data frame becomes one station message, bytes unchanged",
           b.m.submitted == [(b"\x82\xa0\x40hello", 2)])
 
     b = bridge()
     for cmd in (CMD_TXDELAY, 2, 3, 4, 5, 6, CMD_RETURN):
-        b.from_host(0, cmd, b"\x20")
+        b.from_host(cmd, b"\x20")
     check("TXDELAY/P/SlotTime/TXtail/duplex/hardware/Return send nothing",
           b.m.submitted == [] and b.m.written == [])
 
     b = bridge()
-    b.from_host(1, CMD_DATA, b"x")
+    b.from_host(0x50 | CMD_DATA, b"x")
     check("a frame for another KISS port is dropped", b.m.submitted == [])
 
+    # mkiss marks its first two frames after an attach as checksum
+    # probes; the flags live in the port nibble, and dropping them as
+    # "port 8"/"port 2" loses the first thing anyone sends
+    for name, flag in (("SMACK", 0x80), ("FLEX", 0x20)):
+        b = bridge()
+        b.from_host(flag | CMD_DATA, b"\x82\xa0\x40hello" + b"\xAB\xCD")
+        check(f"an mkiss {name} probe frame is accepted, CRC stripped",
+              b.m.submitted == [(b"\x82\xa0\x40hello", 2)])
     b = bridge()
-    b.from_host(0, CMD_DATA, b"")
+    b.from_host(0x80 | CMD_DATA, b"\x01\x02")     # CRC only, no payload
+    check("a CRC-only probe frame transmits nothing", b.m.submitted == [])
+
+    b = bridge()
+    b.from_host(CMD_DATA, b"")
     check("an empty frame is not transmitted", b.m.submitted == [])
 
     # air time, not byte count, is the limit
     b = bridge(rung=0)
     b.args.hold = 0                       # holding disabled: refuse outright
-    b.from_host(0, CMD_DATA, bytes(256))
+    b.from_host(CMD_DATA, bytes(256))
     check("256 B at rung 0 (278 s of air) does not go out",
           b.m.submitted == [] and b.refused == 1)
     b = bridge(rung=12)
-    b.from_host(0, CMD_DATA, bytes(256))
+    b.from_host(CMD_DATA, bytes(256))
     check("the same frame at rung 12 (2.6 s) goes out",
           len(b.m.submitted) == 1 and b.refused == 0)
     b = bridge(rung=0)
-    b.from_host(0, CMD_DATA, bytes(16))
+    b.from_host(CMD_DATA, bytes(16))
     check("a short frame still fits at rung 0", len(b.m.submitted) == 1)
 
     b = bridge()
     b.args.hold = 0
     b.msg_max = 200
-    b.from_host(0, CMD_DATA, bytes(256))
+    b.from_host(CMD_DATA, bytes(256))
     check("a frame over the board's msg_max is refused",
           b.m.submitted == [] and b.refused == 1)
 
     # broadcast mode: one frame -> one one-shot UP_CMD_BCAST, ptype OPAQUE
     b = bridge(mode="broadcast")
-    b.from_host(0, CMD_DATA, b"UI!")
+    b.from_host(CMD_DATA, b"UI!")
     ok = len(b.m.written) == 1
     if ok:
         f = b.m.written[0]
@@ -201,7 +213,7 @@ def test_hold_and_probe():
 
     frame = bytes(35)                       # a small AX.25 UI frame
     b = held_bridge(0)
-    b.from_host(0, CMD_DATA, frame)
+    b.from_host(CMD_DATA, frame)
     check("a frame too long for rung 0 is HELD, not dropped",
           b.m.submitted == [] and len(b.held) == 1)
 
@@ -215,7 +227,7 @@ def test_hold_and_probe():
           any(d == frame for d, _ in b.m.submitted) and not b.held)
 
     b = held_bridge(0)
-    b.from_host(0, CMD_DATA, frame)
+    b.from_host(CMD_DATA, frame)
     b.held = type(b.held)([(f, _t.monotonic() - 1) for f, _ in b.held])
     b.flush_held()
     check("a frame the ladder never rescues is dropped, once",
@@ -224,7 +236,7 @@ def test_hold_and_probe():
 
     b = held_bridge(0)
     for i in range(10):
-        b.from_host(0, CMD_DATA, frame)
+        b.from_host(CMD_DATA, frame)
     check("the hold queue is bounded", len(b.held) == 8 and b.refused == 2)
 
     # a link probe must not reach the peer's AX.25 stack
@@ -258,7 +270,7 @@ def test_pty_write():
         got = b""
     dec = KissDecoder()
     check("a received frame is KISS-framed onto the pty",
-          dec.push(got) == [(0, CMD_DATA, frame)])
+          dec.push(got) == [(CMD_DATA, frame)])
     _os.close(master)
     _os.close(slave)
 

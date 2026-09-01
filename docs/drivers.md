@@ -181,6 +181,16 @@ Three rules it enforces, all from the air-time arithmetic:
   independent timers, one adapting the rung underneath the other, is a
   layering accident. Send UI frames and let this link do reliability.
 
+**mkiss marks its first two frames after an attach.** The Linux KISS
+line discipline probes the TNC for checksum support: the first frame it
+sends carries the SMACK flag (bit 7 of the type byte) and the second
+FLEX (bit 5), each with a 2-byte CRC appended, after which it falls
+back to plain KISS permanently. Those bits live in the same nibble as
+the port number, so a bridge that reads that nibble as a port sees
+traffic for "port 8" and "port 2" and drops the first thing anyone
+sends — measured on a live attach. The bridge strips the CRC, answers
+plain, and only rejects genuine other-port traffic.
+
 TXDELAY/P/SlotTime/TXtail/FullDuplex/SetHardware are accepted and
 ignored: the station's carrier sense and turnaround are measured, not
 configured from the host. `host/test_kiss.py` covers the codec and
