@@ -107,6 +107,15 @@ PORT_BITS = 0x50            # what is left of the port nibble
 # a stack, and must not be pushed at the peer's kernel.
 MIN_AX25 = 15
 
+# How many of our frames may sit in the board's queue at once. The board
+# holds 8 per QoS class, but queueing more than a couple is pointless
+# when the link is the bottleneck: at rung 3 a 100-byte frame is 16.5 s
+# of air, so two are already half a minute of backlog, and a datagram
+# that waits minutes is not worth sending. Without this the bridge
+# stuffed the queue until the board answered "submit refused: queue or
+# store full" -- while reporting every one of those frames as sent.
+QUEUE_HIGH = 2
+
 UP_CMD_BCAST = 0x06
 BC_PT_OPAQUE = 0x0F
 BC_START, BC_EOS = 0x80, 0x40
@@ -181,6 +190,7 @@ class Bridge:
         # holding the payload and probing (bc_poll_link); so does this.
         self.held = deque()                # (frame, deadline)
         self.next_probe = 0.0
+        self.last_said = (None, 0)         # (message, repeat count)
 
     # -- host side ------------------------------------------------------
     def add_client(self, obj):
@@ -225,6 +235,13 @@ class Bridge:
             r = self.status.get("rung", -1)
         return r
 
+    def board_full(self):
+        """Is our QoS class already holding as much as it should?"""
+        q = self.status.get("queues")
+        if not q:
+            return False
+        return q[min(self.args.qos, 2)] >= QUEUE_HIGH
+
     def air_time(self, n):
         r = self.rung()
         return estimate_air_time(r if r >= 0 else 0, n)
@@ -263,6 +280,11 @@ class Bridge:
                      f"{self.msg_max}-byte limit")
             return
         air = self.air_time(len(payload))
+        if self.board_full() and self.args.hold > 0:
+            self.hold(payload, f"the board is carrying "
+                                f"{self.status['queues'][min(self.args.qos, 2)]}"
+                                f" already")
+            return
         if air > self.args.max_air:
             if self.args.hold <= 0:        # holding disabled: say why
                 self.refused += 1
@@ -270,18 +292,18 @@ class Bridge:
                          f"air at rung {self.rung()} exceeds "
                          f"{self.args.max_air:.0f}s")
                 return
-            if len(self.held) >= 8:
-                dropped, _ = self.held.popleft()
-                self.refused += 1
-                self.say(f"queue full -- dropped a held {len(dropped)} B "
-                         f"frame")
-            self.held.append((payload, time.monotonic() + self.args.hold))
-            self.say(f"holding {len(payload)} B: {air:.0f}s of air at rung "
-                     f"{self.rung()} exceeds {self.args.max_air:.0f}s. "
-                     f"Probing to bring the ladder up "
-                     f"({len(self.held)} held)")
+            self.hold(payload, f"{air:.0f}s of air at rung {self.rung()} "
+                               f"exceeds {self.args.max_air:.0f}s")
             return
         self.transmit(payload, air)
+
+    def hold(self, payload, why):
+        if len(self.held) >= 8:
+            dropped, _ = self.held.popleft()
+            self.refused += 1
+            self.say(f"backlog full -- dropped a held {len(dropped)} B frame")
+        self.held.append((payload, time.monotonic() + self.args.hold))
+        self.say(f"holding {len(payload)} B: {why} ({len(self.held)} held)")
 
     def transmit(self, payload, air):
         try:
@@ -310,7 +332,7 @@ class Bridge:
         while self.held:
             frame, deadline = self.held.popleft()
             air = self.air_time(len(frame))
-            if air <= self.args.max_air:
+            if air <= self.args.max_air and not self.board_full():
                 self.say(f"releasing {len(frame)} B at rung {self.rung()} "
                          f"({air:.1f}s)")
                 self.transmit(frame, air)
@@ -353,8 +375,18 @@ class Bridge:
             print(f"{time.strftime('%H:%M:%S')} [kiss] {msg}", flush=True)
 
     def say(self, msg):
-        """Always printed. A frame that did not go out is exactly what
-        the operator must not have to run with -v to discover."""
+        """Always printed -- a frame that did not go out is exactly what
+        the operator must not need -v to discover -- but repeats are
+        collapsed: a ping at one per second against a 16-second link
+        produced a hundred identical lines."""
+        prev, n = self.last_said
+        if msg == prev:
+            self.last_said = (prev, n + 1)
+            if n + 1 in (2, 5, 10) or (n + 1) % 25 == 0:
+                print(f"{time.strftime('%H:%M:%S')} [kiss] ... same, "
+                      f"x{n + 1}", flush=True)
+            return
+        self.last_said = (msg, 1)
         print(f"{time.strftime('%H:%M:%S')} [kiss] {msg}", flush=True)
 
     def pump_modem(self):
@@ -377,7 +409,15 @@ class Bridge:
             elif kind == "0x88" and self.args.mode == "broadcast":
                 self.on_bcast(payload)
             elif kind == "log":
-                self.log(f"board: {payload}")
+                if "refused" in payload:
+                    # arrives AFTER we reported the frame as sent, which
+                    # is the only way to learn a submit did not take
+                    self.sent = max(0, self.sent - 1)
+                    self.refused += 1
+                    self.say(f"the board refused a frame ({payload}) -- "
+                             f"it did not go out")
+                else:
+                    self.log(f"board: {payload}")
 
     def run(self, listener):
         info = self.m.info()

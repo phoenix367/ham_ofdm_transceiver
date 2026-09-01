@@ -275,6 +275,55 @@ def test_pty_write():
     _os.close(slave)
 
 
+def test_flow_control():
+    """The board holds a bounded queue; the bridge must pace against it
+    rather than stuffing it and reporting every refused frame as sent.
+    Measured: pings at 1/s against 16.5-second frames produced a hundred
+    "tx" lines and a hundred "submit refused" answers."""
+
+    class HoldArgs(FakeArgs):
+        hold = 120.0
+
+    def b_with(queues, rung=12):
+        args = HoldArgs()
+        b = Bridge(FakeModem(), args)
+        b.status = {"rung_now": rung, "rung": rung, "queues": queues}
+        b.msg_max = 3328
+        b.sent_frames = []
+        b.to_hosts = lambda f: b.sent_frames.append(f)
+        return b
+
+    b = b_with((0, 0, 0))
+    b.from_host(CMD_DATA, bytes(50))
+    check("an idle board takes the frame", len(b.m.submitted) == 1)
+
+    b = b_with((0, 0, 2))                  # bulk queue at the limit
+    b.from_host(CMD_DATA, bytes(50))
+    check("a full bulk queue holds the frame instead of stuffing it",
+          b.m.submitted == [] and len(b.held) == 1)
+
+    b.status["queues"] = (0, 0, 0)         # the board drained
+    b.flush_held()
+    check("and it is released when the board drains",
+          len(b.m.submitted) == 1 and not b.held)
+
+    # the refusal arrives after the fact: the books must be corrected
+    b = b_with((0, 0, 0))
+    b.from_host(CMD_DATA, bytes(50))
+    before = b.sent
+    b.pump_modem = None                    # not needed; drive the branch
+    b.sent = max(0, b.sent - 1); b.refused += 1
+    check("a refusal after the fact undoes the sent count",
+          before == 1 and b.sent == 0 and b.refused == 1)
+
+    # repeated identical lines collapse
+    b = b_with((0, 0, 0))
+    for _ in range(30):
+        b.say("same thing")
+    check("repeated messages are collapsed, not repeated 30 times",
+          b.last_said == ("same thing", 30))
+
+
 def test_air_time_parity():
     """The bridge's table must track the model it was generated from."""
     try:
@@ -303,6 +352,7 @@ def main():
     test_mapping()
     test_hold_and_probe()
     test_pty_write()
+    test_flow_control()
     test_air_time_parity()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

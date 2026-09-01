@@ -177,6 +177,12 @@ Three rules it enforces, all from the air-time arithmetic:
   can reach the board.
 - **`paclen` 200 is the sweet spot**: a full AX.25 frame is then ~216 B,
   inside the 255-byte single-frame payload cap, and 3.0 s at rung 10.
+- **It paces against the board's own queue.** At most two frames sit in
+  the board's QoS queue at a time; the rest wait in the bridge. Without
+  this, a `ping` at one per second against a link carrying one frame
+  per 16 s stuffed the queue until the board answered "submit refused"
+  — and the bridge had already reported every one of those frames as
+  sent. A refusal that arrives after the fact now corrects the count.
 - **Connected-mode AX.25 is not supported.** Two ARQ engines with
   independent timers, one adapting the rung underneath the other, is a
   layering accident. Send UI frames and let this link do reliability.
