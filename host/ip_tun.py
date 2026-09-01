@@ -180,8 +180,18 @@ class Tunnel:
         print(f"{time.strftime('%H:%M:%S')} [tun] {msg}", flush=True)
 
     def on_status(self, st):
+        was = self.rung()
         self.status = st
         self.inflight = 0          # the report now accounts for them
+        now = self.rung()
+        if now != was:
+            # Announced, not verbose-only: on a cold link this is the
+            # difference between "nothing works" and "the ladder is
+            # still climbing, wait". A 64-byte ping is 110 s of air at
+            # rung 0 and 1.5 s at rung 12.
+            fits = estimate_air_time(now, self.args.mtu)
+            self.say(f"rung {was} -> {now} "
+                     f"(an MTU-sized packet is {fits:.0f}s of air)")
 
 
 def main():

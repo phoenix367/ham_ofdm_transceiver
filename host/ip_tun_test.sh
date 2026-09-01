@@ -86,9 +86,29 @@ echo "ip_tun_test: both ends up"
 ip -br addr show "$DEV" | sed 's/^/  /'
 ip netns exec "$NS" ip -br addr show "$DEV" | sed 's/^/  /'
 
+# A cold link sits at rung 0, where a 64-byte ping is 110 s of air and
+# the tunnel drops it. The tunnels probe the ladder up on their own, but
+# that takes a round trip or two of 17-second frames -- so WAIT for it
+# rather than measuring a link that has not started yet. (Measured: four
+# pings over 37 s all dropped, because the first probe exchange had not
+# finished.)
 echo
-echo "ip_tun_test: ping (a cold link starts at rung 0 -- the first may be"
-echo "             dropped while the tunnel probes the ladder up)"
+echo "ip_tun_test: warming the link -- the tunnels probe, the ladder climbs"
+WARM_OK=0
+for i in $(seq 1 ${WARM:-24}); do
+    sleep 5
+    R=$(grep -ao "rung [0-9-]* -> [0-9]*" "$WORK/a.log" | tail -1 \
+        | awk '{print $NF}')
+    [ -n "$R" ] && echo "  t+$((i*5))s: rung $R"
+    if [ -n "$R" ] && [ "$R" -ge 4 ]; then WARM_OK=1; break; fi
+done
+if [ "$WARM_OK" = 0 ]; then
+    echo "  the ladder did not reach a usable rung -- measuring anyway,"
+    echo "  expect drops (tunnel A's own log is printed at the end)"
+fi
+
+echo
+echo "ip_tun_test: ping"
 ping -c 4 -i 12 -W 90 -s 64 "$REMOTE" || true
 
 echo
