@@ -652,6 +652,48 @@ static void caps_case(int a_caps, int b_caps, int b_answers,
           && memcmp(station_delivered(B, 0), big, 250) == 0);
 }
 
+/* A capability kick that no probe will honour must not keep the
+ * transmitter running. Found on the stand: 117 frames in 108 seconds
+ * with nothing attached to either board -- an ack-only frame every air
+ * time, forever, because the kick survived a caps_probe_wanted() that
+ * declines on its first line for a peer already known. */
+static void test_caps_kick_orphan(void)
+{
+    station_phy_t p = { 0, phy_build, phy_receive, phy_build_burst,
+                        phy_receive_burst };
+    static station_t S;
+    /* rung 0 is EXTREME: one frame is ~456 000 samples, and the build
+     * stub refuses a buffer that cannot hold it */
+    static int16_t out[600000];
+    double t = 100.0;
+    int n, i, frames = 0;
+
+    station_init(&S, &p, 7777);
+    S.peer.valid = 1;                 /* the handshake already happened */
+    S.peer.t = t;
+    S.caps_kick = 1;                  /* ... and a stale kick survived it */
+
+    for (i = 0; i < 20; i++) {
+        n = station_poll_tx(&S, t, 0, out,
+                            (int)(sizeof(out) / sizeof(out[0])));
+        if (n > 0)
+            frames++;
+        t += 1.0;
+    }
+    check("an orphaned caps kick transmits nothing", frames == 0);
+    check("and is cleared rather than left to fire again", !S.caps_kick);
+
+    /* the same station still answers a frame that carried data */
+    S.last_rx_seq = 1;
+    S.reply_due = 1;
+    n = station_poll_tx(&S, t, 0, out,
+                        (int)(sizeof(out) / sizeof(out[0])));
+    check("but a genuinely owed acknowledgment still goes out", n > 0);
+    n = station_poll_tx(&S, t + 1.0, 0, out,
+                        (int)(sizeof(out) / sizeof(out[0])));
+    check("and only once", n == 0);
+}
+
 static void test_caps(void)
 {
     static station_t A, B;
@@ -989,6 +1031,7 @@ int main(void)
     test_session();
     test_burst_stream();
     test_caps();
+    test_caps_kick_orphan();
     test_rto();
     test_burst_window();
     test_peer_stream_memory();

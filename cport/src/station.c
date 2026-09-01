@@ -917,6 +917,7 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
     static uint8_t pkt_bits[2600]; /* EXT frames: up to 2076 bits */
     uint8_t payload[256];
     int payload_len, pkt_n, rung_idx, qos, flags, seq, expects_reply, n;
+    int owes_ack;
     st_frag_t *frag;
     double freq_req = 0.0;
 
@@ -994,9 +995,8 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
         return 0;
     }
 
+    owes_ack = (st->last_rx_seq >= 0 && st->reply_due) || st->brx.ack_due;
     {
-        int owes_ack = (st->last_rx_seq >= 0 && st->reply_due)
-                       || st->brx.ack_due;
         /* a kicked or owed capability exchange is a reason to transmit
          * even with every queue empty -- the kick path carried no
          * traffic and this early-out silently swallowed it: a held
@@ -1073,6 +1073,17 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
         st->reply_len_guess = CAPS_LEN;
         return n;
     }
+
+    /* A kick that no probe will honour must not keep the transmitter
+     * running. caps_probe_wanted() returns 0 on its FIRST line for a
+     * peer we already know, and a kick -- set by the broadcast
+     * hold-and-probe while that peer was still a stranger -- is then
+     * moot. It used to survive, pass the early-out above, fall through
+     * to the message path and emit a no-data frame every air time
+     * forever: measured on the stand at 117 frames in 108 s with
+     * nothing attached, the peer decoding every one and correctly
+     * answering none. */
+    st->caps_kick = 0;
 
     /* burst transmit: up to window_left back-to-back fragments, the last
      * one carrying the ack request */
@@ -1184,6 +1195,12 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
         seq = frag->seq;
         expects_reply = 1;
     } else {
+        /* No fragment, and nothing owed: a no-data frame here would
+         * acknowledge something already acknowledged. Silence is the
+         * right output, and this is the backstop for any future flag
+         * that gets us past the early-out with nothing to send. */
+        if (!owes_ack)
+            return 0;
         payload[0] = 0;
         payload_len = 1;
         flags = FLAG_NO_DATA;

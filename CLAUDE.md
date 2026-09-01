@@ -750,6 +750,21 @@ Cross-module invariants that are easy to break:
   the same figure that sizes the write timeout. `host/_read_serial` and
   `usb_host.c`'s loop are the two places; `host/test_modem.py` pins the
   behaviour without hardware.
+- `poll_tx`'s early-out gate and the paths behind it must AGREE. A flag
+  that gets past `if (!owes_ack && !station_has_traffic && !caps_kick
+  && !caps_reply_due) return 0;` but that no later block acts on leaves
+  the function falling through to the message path, where an empty
+  fragment queue produces a NO-DATA frame -- and the station then keys
+  that frame every air time, forever. Measured on the stand with
+  nothing attached: 117 frames in 108 s, the peer decoding every one
+  and correctly answering none (a no-data frame is never replied to).
+  The instance was `caps_kick`: `caps_probe_wanted()` returns 0 on its
+  FIRST line for a peer already known, so a kick set by the broadcast
+  hold-and-probe while that peer was a stranger became permanent. The
+  kick is now cleared when the CAPS block declines it, and the message
+  path refuses to transmit at all when nothing is owed --
+  `test_caps_kick_orphan` pins both. Add the same clear for any future
+  flag added to that gate.
 - KISS (`host/kiss_bridge.py`) is a HOST program and stays one: the
   board's own protocol already carries rung, SNR, capabilities,
   temperature and broadcast pacing, none of which a KISS TNC can
