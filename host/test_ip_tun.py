@@ -138,6 +138,24 @@ def test_queue_depth():
     check("a rung change recomputes it", t.qlen_wanted == d4)
 
 
+def test_codel():
+    """CoDel's defaults (5 ms target) are meaningless on a link whose
+    packets take seconds: it drops the moment anything is queued, which
+    is where a measured 130-second mid-transfer stall came from."""
+    t = tunnel(rung=12)
+    t.args.queue_s = 20.0
+    tgt, itv = t.wanted_codel()
+    check(f"target exceeds one packet's air time ({tgt}s vs 8.6s)",
+          tgt > 8.6)
+    check("interval is a multiple of the target", itv == round(tgt * 4, 1))
+
+    t = tunnel(rung=4)
+    t.args.queue_s = 20.0
+    tgt4, _ = t.wanted_codel()
+    check(f"a slower rung needs a longer target ({tgt4}s at rung 4)",
+          tgt4 > tgt)
+
+
 def test_probe():
     t = tunnel(rung=0)
     check("no probe while nothing is blocked", not t.probe_due(1000.0))
@@ -168,6 +186,7 @@ def main():
     test_pacing()
     test_read_gating()
     test_queue_depth()
+    test_codel()
     test_probe()
     test_receive()
     print(f"\n{PASS} passed, {FAIL} failed")

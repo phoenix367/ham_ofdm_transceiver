@@ -96,6 +96,25 @@ class Tunnel:
         depth = q[min(self.args.qos, 2)] if q else 0
         return depth + self.inflight >= QUEUE_HIGH
 
+    def wanted_codel(self):
+        """fq_codel target and interval, in seconds, for this rung.
+
+        The kernel's default qdisc is fq_codel with target 5 ms and
+        interval 100 ms -- sized for links where a packet takes
+        microseconds. Here one packet is 8.6 SECONDS of air, so CoDel
+        sees a standing queue the instant anything is buffered and drops
+        it, invisibly to this program: measured, a 4 kB transfer stalled
+        130 s in the middle with zero drops recorded at either tunnel,
+        because the losses were the qdisc's.
+
+        The target has to exceed one packet's serialisation time or the
+        queue can never be under it, so it is the larger of the
+        operator's budget and 1.2x an MTU-sized packet.
+        """
+        air = estimate_air_time(self.rung(), self.args.mtu)
+        target = round(max(self.args.queue_s / 4.0, air * 1.2), 1)
+        return target, round(target * 4.0, 1)
+
     def wanted_qlen(self):
         """Interface queue depth, in packets, for the CURRENT rung.
 
@@ -287,7 +306,8 @@ def main():
     fd = tun_open(args.dev)
     ip("addr", "add", args.local, "dev", args.dev)
     ip("link", "set", args.dev, "mtu", str(args.mtu), "up")
-    ip("link", "set", args.dev, "txqueuelen", "2")   # resized per rung
+    # fq_codel does the managing; txqueuelen is only the hard bound
+    ip("link", "set", args.dev, "txqueuelen", "16")
     if args.peer:
         # explicit host route: with both ends on one host in different
         # namespaces, this is what sends the packet to the radio
@@ -337,7 +357,14 @@ def main():
             if t.qlen_wanted and t.qlen_wanted != qlen_now:
                 qlen_now = t.qlen_wanted
                 subprocess.run(["ip", "link", "set", args.dev,
-                                "txqueuelen", str(qlen_now)], check=False)
+                                "txqueuelen", str(max(qlen_now, 4))],
+                               check=False)
+                tgt, itv = t.wanted_codel()
+                subprocess.run(["tc", "qdisc", "replace", "dev", args.dev,
+                                "root", "fq_codel", "limit", "16",
+                                "target", f"{tgt}s", "interval", f"{itv}s"],
+                               check=False)
+                t.log(f"qdisc: fq_codel target {tgt}s interval {itv}s")
     except (KeyboardInterrupt, SystemExit):
         print(f"\n[tun] {t.sent} packet(s) sent, {t.rcvd} received, "
               f"{t.dropped} dropped", flush=True)
