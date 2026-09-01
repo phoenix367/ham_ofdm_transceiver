@@ -2373,8 +2373,51 @@ Measured end to end on the two boards: a 48-byte AX.25 UI frame ---
 shifted callsign addresses, control \texttt{0x03}, PID \texttt{0xF0},
 an APRS position --- entered a TCP KISS client, crossed the wire, and
 left the peer's bridge byte-identical 3.4\,s later, 1.4\,s of that
-being air at rung~12.  Twenty-one further checks cover the codec and
-every mapping decision without hardware.
+being air at rung~12.
+
+The same path through the operating system's own AX.25 stack took two
+further defects to open, and both are worth the space because neither
+was visible from the radio.
+
+The first was self-inflicted.  The air-time gate refuses what will not
+fit the current rung --- and an idle link decays to rung~0, where it
+admits 28\,bytes, less than an AX.25 header.  So every frame was
+refused, nothing was transmitted, and the ladder whose recovery would
+have fixed it never moved: a gate that deadlocks what it protects.  The
+repair is the one the firmware already uses for a broadcast of unknown
+rung (Section~\ref{sec:cport_bcast}): hold the frame, probe with
+something small, release when the rung improves, give up loudly after a
+deadline.  The negotiation belongs where the payload waits, on either
+side of the USB cable.
+
+The second was an interoperability detail that no amount of measuring
+the link would have found.  Frames entered the bridge and never reached
+the air, while the boards' own counters showed a frame crossing on
+\emph{some} attempts --- because Linux's KISS line discipline probes
+its TNC for checksum support: the first frame after an attach carries
+the \textsc{smack} flag, bit 7 of the type byte, the second carries
+\textsc{flex}, bit 5, each with a CRC appended, after which it settles
+into plain KISS for good.  Those bits share the nibble that carries the
+port number.  Reading that nibble as a port turned the first two frames
+of every attach into traffic for ``port 8'' and ``port 2'', which the
+bridge dropped as foreign; only the third frame --- plain KISS ---
+survived, which is exactly the intermittency the board counters showed.
+Three rounds of on-target measurement confirmed the air path each time
+and could not have found this, because the loss was one layer above the
+radio.  What found it was a single line of the bridge's own log,
+\texttt{frame for port 8 dropped}, once the operator pasted it.  That
+is the argument for the other half of the repair: refusals, holds,
+drops and every frame in each direction are now printed
+unconditionally, because a tool that discards work silently makes its
+own diagnosis impossible.
+
+With both fixed, the stack works as a stack: two bridges, two
+\texttt{kissattach}, \texttt{ax0} and \texttt{ax1}, and a
+\texttt{beacon} on one interface arrives on the other --- including the
+first frame after an attach, the case that had never once worked.  A
+second, 51-byte frame followed in under 15\,s.  Thirty-one checks cover
+the codec and every mapping decision without hardware, the two probe
+flavours among them.
 
 \subsection{From Simulation to a Radio}
 \label{sec:cport_sdr}
