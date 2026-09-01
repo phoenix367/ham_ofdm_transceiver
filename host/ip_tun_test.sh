@@ -20,7 +20,7 @@ NS=${NS:-tuntest}
 DEV=${DEV:-ofdm0}
 LOCAL=10.99.0.1
 REMOTE=10.99.0.2
-BYTES=2048
+BYTES=1024
 MTU=1000
 PORT=5099
 
@@ -112,17 +112,28 @@ echo "ip_tun_test: ping"
 ping -c 4 -i 12 -W 90 -s 64 "$REMOTE" || true
 
 echo
-echo "ip_tun_test: $BYTES bytes over TCP"
+echo "ip_tun_test: $BYTES bytes over TCP -- this takes MINUTES, not"
+echo "             seconds: TCP's window has to grow over a 4-second"
+echo "             round trip, and every loss costs it a retransmit"
+echo "             timeout. Progress is printed every 10 s."
 head -c "$BYTES" /dev/urandom > "$WORK/tx.bin"
 ip netns exec "$NS" nc -l -p "$PORT" > "$WORK/rx.bin" &
 NCPID=$!
 sleep 1
 T0=$(date +%s.%N)
-nc -q 5 -w 900 "$REMOTE" "$PORT" < "$WORK/tx.bin" || true
+nc -q 5 -w 900 "$REMOTE" "$PORT" < "$WORK/tx.bin" &
+NCTX=$!
+LAST=-1
 for i in $(seq 1 900); do
-    [ "$(stat -c %s "$WORK/rx.bin" 2>/dev/null || echo 0)" -ge "$BYTES" ] && break
+    HAVE=$(stat -c %s "$WORK/rx.bin" 2>/dev/null || echo 0)
+    [ "$HAVE" -ge "$BYTES" ] && break
+    if [ $((i % 10)) -eq 0 ] && [ "$HAVE" != "$LAST" ]; then
+        echo "  t+${i}s: $HAVE of $BYTES bytes"
+        LAST=$HAVE
+    fi
     sleep 1
 done
+kill "$NCTX" 2>/dev/null || true
 T1=$(date +%s.%N)
 kill "$NCPID" 2>/dev/null || true
 

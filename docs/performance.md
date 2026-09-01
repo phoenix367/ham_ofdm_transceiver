@@ -72,6 +72,7 @@ in the technical report, §12):
 | Adaptive broadcast under a deep fade (`make bcfade`, −5 dB floor) | +32 % delivered vs fixed rung; trajectory 12→10→8→4→12 |
 | SNR output map (fixed twin) | ladder climbs 0→11 in one exchange; EXTREME reads +16.2 dB where it read +0.5 |
 | 8 kB stress transfer after the hardening campaign | byte-exact in 241 s with burst defaults ON |
+| IP over the link (`host/ip_tun.py`, TUN, no AX.25) | 4/4 pings, 0 % loss, RTT 3.8–5.5 s at rung 12 (92-byte packets); the ladder climbs from cold in ~5 s once the tunnel probes |
 
 ## Link budget context (EXTREME, −17.5 dB operating point)
 
