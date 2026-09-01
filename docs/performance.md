@@ -65,7 +65,7 @@ in the technical report, §12):
 
 | Result | Number |
 |---|---|
-| 68 kB file over burst ARQ, rung 12 | 114 B/s = 87 % of the raw channel rate (window-aligned 3.2 kB parts, window 16) |
+| 68 kB file over burst ARQ, rung 12 | 114 B/s = 87 % of the raw channel rate (window-aligned 3.2 kB parts, window 16) — reproduce with `host/measure_sendfile.sh` |
 | The same file before the capability handshake era | 87 B/s (2 kB parts, window 8, 3 acks/part) |
 | Capability handshake | one second, three legs; unanswered probes forgiven, legacy peers get old defaults |
 | 73 kB broadcastfile (non-ARQ) | byte-identical in 22.3 min at rung 12, 3089 frames, 0 lost |
