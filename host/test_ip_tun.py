@@ -29,6 +29,7 @@ class Args:
     max_air = 45.0
     msg_max = 3328
     mtu = 1000
+    queue_s = 20.0
     verbose = False
 
 
@@ -98,14 +99,43 @@ def test_read_gating():
           t.wants_read() is False)
     check("and that is congestion, not the ladder", t.stuck is False)
 
-    t = tunnel(rung=0)
-    check("a rung too low for an MTU-sized packet: stop reading",
-          t.wants_read() is False)
-    check("and that IS the ladder, so it will probe", t.stuck is True)
+    t = tunnel(rung=4)
+    check("a low rung does NOT stop reading: small packets still cross "
+          "(a 92 B ping is 8 s at rung 4 where an MTU packet is 69)",
+          t.wants_read() is True)
+    t.on_packet(bytes(1000))
+    check("but an MTU-sized packet at that rung is dropped, per packet",
+          t.m.submitted == [] and t.stuck is True)
+    t.on_packet(bytes(60))
+    check("while a small one goes", len(t.m.submitted) == 1)
 
     t = tunnel(rung=12)
     t.inflight = 2
     check("in-flight credit also stops the reading", t.wants_read() is False)
+
+
+def test_queue_depth():
+    """The queue is sized in seconds of air, not packets: 8 packets was
+    a minute at rung 12 and nearly two at rung 4, where the measured
+    ping round trips were 87-117 SECONDS."""
+    t = tunnel(rung=12)
+    t.args.queue_s = 20.0
+    d12 = t.wanted_qlen()
+    t = tunnel(rung=4)
+    t.args.queue_s = 20.0
+    d4 = t.wanted_qlen()
+    t = tunnel(rung=0)
+    t.args.queue_s = 20.0
+    d0 = t.wanted_qlen()
+    check(f"a slower rung gets a shorter queue ({d12} at 12, {d4} at 4, "
+          f"{d0} at 0)", d12 > d4 >= d0)
+    check("never zero -- that would stall the interface", d0 >= 1)
+    check("and bounded above", d12 <= 8)
+
+    t = tunnel(rung=12)
+    t.args.queue_s = 20.0
+    t.on_status({"rung_now": 4, "rung": 4, "queues": (0, 0, 0)})
+    check("a rung change recomputes it", t.qlen_wanted == d4)
 
 
 def test_probe():
@@ -137,6 +167,7 @@ def main():
     test_send_and_drop()
     test_pacing()
     test_read_gating()
+    test_queue_depth()
     test_probe()
     test_receive()
     print(f"\n{PASS} passed, {FAIL} failed")

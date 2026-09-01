@@ -79,6 +79,7 @@ class Tunnel:
         self.drops_said = 0.0
         self.next_probe = 0.0
         self.stuck = False         # last drop was the ladder, not the queue
+        self.qlen_wanted = 0       # applied by the loop, which owns `ip`
 
     # -- what the board is doing ---------------------------------------
     def rung(self):
@@ -94,6 +95,22 @@ class Tunnel:
         q = self.status.get("queues")
         depth = q[min(self.args.qos, 2)] if q else 0
         return depth + self.inflight >= QUEUE_HIGH
+
+    def wanted_qlen(self):
+        """Interface queue depth, in packets, for the CURRENT rung.
+
+        A queue must be sized in TIME, not packets. txqueuelen 8 was
+        chosen as "about a minute at rung 12" and then met rung 4, where
+        each MTU-sized packet is four times slower: measured ping round
+        trips of 87-117 SECONDS, every one of it queueing. Meanwhile the
+        useful depth is tiny -- this link's bandwidth-delay product is
+        about 440 bytes, well under one packet -- so a couple of packets
+        buys all the throughput a deeper queue would, at a fraction of
+        the latency.
+        """
+        air = estimate_air_time(self.rung(), self.args.mtu)
+        n = int(self.args.queue_s / max(air, 0.1))
+        return max(1, min(n, 8))
 
     def wants_read(self):
         """Should the tunnel take another packet from the kernel now?
@@ -111,11 +128,13 @@ class Tunnel:
         rather than a black hole. Bound the queue (txqueuelen) so this
         does not become bufferbloat.
         """
+        # ONLY congestion. Judging by an MTU-sized packet would stop
+        # reading at rung 4, where an MTU packet is 69 s of air -- and
+        # block the 92-byte pings and 52-byte TCP acks that cross that
+        # rung perfectly well. Size is a per-packet question, answered
+        # in on_packet where the size is known.
         if self.board_full():
             self.stuck = False
-            return False
-        if self.air_time(self.args.mtu) > self.args.max_air:
-            self.stuck = True          # the ladder, not congestion
             return False
         return True
 
@@ -211,13 +230,14 @@ class Tunnel:
         self.inflight = 0          # the report now accounts for them
         now = self.rung()
         if now != was:
+            self.qlen_wanted = self.wanted_qlen()
             # Announced, not verbose-only: on a cold link this is the
             # difference between "nothing works" and "the ladder is
             # still climbing, wait". A 64-byte ping is 110 s of air at
             # rung 0 and 1.5 s at rung 12.
             fits = estimate_air_time(now, self.args.mtu)
-            self.say(f"rung {was} -> {now} "
-                     f"(an MTU-sized packet is {fits:.0f}s of air)")
+            self.say(f"rung {was} -> {now} (an MTU-sized packet is "
+                     f"{fits:.0f}s of air, queue {self.qlen_wanted})")
 
 
 def main():
@@ -233,9 +253,10 @@ def main():
                     help="bigger is more efficient and slower per packet: "
                          "1000 B is ~9 s of air at rung 12 (default 1000)")
     ap.add_argument("--qos", type=int, default=2, choices=(0, 1, 2))
-    ap.add_argument("--qlen", type=int, default=8,
-                    help="interface queue, in packets: the backpressure "
-                         "TCP needs, bounded so it is not bufferbloat")
+    ap.add_argument("--queue-s", type=float, default=20.0,
+                    help="how many seconds of air may sit in the "
+                         "interface queue; the depth in packets follows "
+                         "the rung (default 20)")
     ap.add_argument("--max-air", type=float, default=45.0,
                     help="drop packets that would take longer than this")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -266,10 +287,7 @@ def main():
     fd = tun_open(args.dev)
     ip("addr", "add", args.local, "dev", args.dev)
     ip("link", "set", args.dev, "mtu", str(args.mtu), "up")
-    # Eight packets is about a minute of air at rung 12 -- enough for
-    # TCP to keep a window in flight, short enough that a queued packet
-    # is still worth delivering when it reaches the front.
-    ip("link", "set", args.dev, "txqueuelen", str(args.qlen))
+    ip("link", "set", args.dev, "txqueuelen", "2")   # resized per rung
     if args.peer:
         # explicit host route: with both ends on one host in different
         # namespaces, this is what sends the packet to the radio
@@ -288,7 +306,7 @@ def main():
         print(f"[tun] try: ping -c 3 -i 10 -W 60 -s 64 {args.peer}",
               flush=True)
 
-    last_ping = 0.0
+    last_ping, qlen_now = 0.0, 2
     try:
         while True:
             now = time.monotonic()
@@ -316,6 +334,10 @@ def main():
                     t.log(f"board: {payload}")
             if t.probe_due(time.monotonic()):
                 t.send_probe()
+            if t.qlen_wanted and t.qlen_wanted != qlen_now:
+                qlen_now = t.qlen_wanted
+                subprocess.run(["ip", "link", "set", args.dev,
+                                "txqueuelen", str(qlen_now)], check=False)
     except (KeyboardInterrupt, SystemExit):
         print(f"\n[tun] {t.sent} packet(s) sent, {t.rcvd} received, "
               f"{t.dropped} dropped", flush=True)
