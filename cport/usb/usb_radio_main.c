@@ -756,9 +756,16 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
      * carrier at 1.1e8 and decoded nothing, twice, with every
      * counter healthy. A broadcast nobody can hear is worse than a
      * slow one, and the group air cap keeps the slow case honest. */
-    g_bc_rung = (rung >= 0 && rung <= 12)
+    /* station_tx_rung, not ctl_tx_rung: the controller's answer still has
+     * to pass the operator's ceiling (config rung_ceiling) and the
+     * peer's DECLARED maximum. Calling the controller directly ignored
+     * both, so a peer that had said "nothing above rung 6" got a rung-10
+     * QAM16 broadcast train it could not decode -- with every counter
+     * healthy on both boards, which is the failure this whole subsystem
+     * was built to avoid. */
+    g_bc_rung = (rung >= 0 && rung <= ladder_n() - 1)
                     ? rung
-                    : ctl_tx_rung(&g_st.ctl, g_modem.now);
+                    : station_tx_rung(&g_st, g_modem.now);
     if (rung > 12) {
         /* the default is only trustworthy while the peer's request is
          * FRESH: the staleness decay walks a remembered rung 12 down

@@ -721,6 +721,32 @@ static void test_burst_outlives_message(void)
  * branches used to return before the ARQ retire, so an ack riding on
  * one of them was discarded -- while the sender had already cleared its
  * own reply_due and believed it had answered. */
+/* A completed message that cannot be stored must not be acknowledged
+ * as delivered: the sender can never detect that failure. The burst
+ * path gives the fragment back so the bitmap tells the truth. */
+static void test_full_store_does_not_lie(void)
+{
+    static station_t A, B;
+    static uint8_t msg[120];
+    int i, frames;
+    double t = 100.0;
+
+    for (i = 0; i < (int)sizeof(msg); i++)
+        msg[i] = (uint8_t)(i * 7 + 1);
+
+    caps_case(CAP_STREAM | CAP_EXT | CAP_LDPC | CAP_BURST,
+              CAP_STREAM | CAP_EXT | CAP_LDPC | CAP_BURST, 1, &A, &B,
+              &frames);
+    /* fill B's delivered log so the next completion cannot be stored */
+    B.delivered_n = ST_DELIVERED_MAX;
+    station_submit(&A, msg, (int)sizeof(msg), QOS_BULK);
+    pump(&A, &B, &t, 600.0, 0);
+    check("a completed transfer the receiver cannot store is NOT marked "
+          "done", !B.brx.done);
+    check("and the sender still holds the message rather than believing "
+          "it arrived", A.cur_bulk.active || A.qcount[QOS_BULK] > 0);
+}
+
 static void test_ack_on_any_frame(void)
 {
     station_phy_t p = { 0, phy_build, phy_receive, phy_build_burst,
@@ -1190,6 +1216,7 @@ int main(void)
     test_caps();
     test_caps_kick_orphan();
     test_burst_outlives_message();
+    test_full_store_does_not_lie();
     test_ack_on_any_frame();
     test_burst_owns_its_message();
     test_rto();

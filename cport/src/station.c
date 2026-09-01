@@ -522,14 +522,28 @@ static int burst_candidates_left(const station_t *st)
  * once, then n_blocks data blocks. (estimate_air_time charges the fixed
  * cost per frame, so subtract it back out for the blocks after the
  * first -- that saving is the whole point of streaming.) */
+/* Air time of one streamed window, from the BUILDER rather than a model.
+ *
+ * The model this replaces was wrong three ways, all in the same
+ * direction: estimate_air_time(rung, 0) is not the fixed cost (a 36-bit
+ * packet still fills data symbols, so those were subtracted from every
+ * block), the callers pass the FRAGMENT size while a block carries
+ * BURST_SUBHDR + fragment, and the ZC resync symbols were not counted at
+ * all. Measured against tx_burst_len, a window the model called 28.6 s
+ * was really 37.0 s -- so BURST_WIN_MAX_AIR_S, whose whole purpose is
+ * "a single transmission must never outlast a plausible fade", was
+ * being enforced against a number 23 % short.
+ *
+ * payload_len is the fragment size, as the callers have it. */
 static double stream_air_time(int rung_idx, int payload_len, int n_blocks)
 {
-    double one = estimate_air_time(rung_idx, payload_len);
-    double fixed = estimate_air_time(rung_idx, 0);
-    double data = one - fixed;
-    if (data < 0.0)
-        data = 0.0;
-    return fixed + data * (double)n_blocks;
+    int pkt_n = 36 + 8 * (BURST_SUBHDR + payload_len);
+    int samples = tx_burst_len(ladder_mode(rung_idx), pkt_n,
+                               ladder_mod(rung_idx), ladder_spd(rung_idx),
+                               n_blocks, BURST_STREAM_RESYNC);
+    if (samples <= 0)          /* bad argument: refuse by over-reporting */
+        return 1e9;
+    return (double)samples / 12000.0;
 }
 
 double stream_air_time_pub(int rung_idx, int payload_len, int n_blocks)
@@ -1446,6 +1460,14 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
     if (st->rto_pending) {
         if (!st->rto_ambiguous && !(st->btx.active && st->btx.streamed_n > 0))
             rto_sample(st, (t - st->tx_end_t) - st->rto_air_est);
+        else if (!st->rto_ambiguous)
+            /* A streamed window's timing is not a usable sample, but the
+             * exchange was still CLEAN -- and rto_sample was the only
+             * place that reset the backoff, so a single timed-out window
+             * ratcheted it to the 8x ceiling and left it there for the
+             * rest of the transfer, costing ~30 s of dead air per lost
+             * ack instead of ~2. */
+            st->rto_backoff = 1.0;
         st->rto_ambiguous = 0;
         st->rto_pending = 0;
     }
@@ -1624,8 +1646,7 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
                 if (all) {
                     int mlen = (total - 1) * st->brx.frag_size
                                + st->brx.last_len;
-                    diag(st, ST_EV_BURST_DONE, 1, st->brx.id, 0, 0, t);
-                    st->brx.done = 1;
+                    int stored = 0;
                     if (st->delivered_n < ST_DELIVERED_MAX
                         && mlen <= ST_MSG_MAX) {
                         int ds = pool_alloc(st);
@@ -1635,8 +1656,27 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
                             st->delivered_slot[st->delivered_n] = ds;
                             st->delivered_len[st->delivered_n] = mlen;
                             st->delivered_n++;
+                            stored = 1;
                         }
                     }
+                    if (!stored) {
+                        /* Nowhere to put it: the delivered log is full,
+                         * the host has not drained, or the store is out
+                         * of slots. Marking the transfer done here and
+                         * acking the full bitmap told the sender it had
+                         * arrived -- the one failure it can never
+                         * detect. Give the fragment back instead, so the
+                         * bitmap says what is true and the sender
+                         * retransmits once the host catches up. */
+                        st->brx.have[idx >> 3] &=
+                            (uint8_t)~(1 << (idx & 7));
+                        st->brx.ack_due = 1;
+                        diag(st, ST_EV_BURST_DONE, 2, st->brx.id, mlen,
+                             st->delivered_n, t);
+                        return 0;
+                    }
+                    diag(st, ST_EV_BURST_DONE, 1, st->brx.id, 0, 0, t);
+                    st->brx.done = 1;
                     return 1;
                 }
             }
@@ -1658,6 +1698,7 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
             }
             st->assembly_len[stream] = alen;
             if (lc.flags & FLAG_LAST_FRAGMENT) {
+                int stored = 0;
                 if (st->delivered_n < ST_DELIVERED_MAX
                     && alen <= ST_MSG_MAX) {
                     int ds = pool_alloc(st);
@@ -1667,10 +1708,19 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
                         st->delivered_slot[st->delivered_n] = ds;
                         st->delivered_len[st->delivered_n] = alen;
                         st->delivered_n++;
+                        stored = 1;
                     }
                 }
+                /* The stop-and-wait path has already acknowledged the
+                 * fragments, so unlike the burst path it cannot ask for
+                 * them again -- but a message dropped here must at
+                 * least be VISIBLE rather than counted as delivered. */
+                if (!stored)
+                    diag(st, ST_EV_RX, -1, alen, st->delivered_n,
+                         st->pool_used, t);
                 st->assembly_len[stream] = 0;
-                done++;
+                if (stored)
+                    done++;
             }
         }
         st->last_rx_seq = lc.seq;

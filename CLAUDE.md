@@ -750,6 +750,29 @@ Cross-module invariants that are easy to break:
   the same figure that sizes the write timeout. `host/_read_serial` and
   `usb_host.c`'s loop are the two places; `host/test_modem.py` pins the
   behaviour without hardware.
+- `stream_air_time` comes from `tx_burst_len`, the BUILDER, not from a
+  model. The model it replaces was wrong three ways, all in the same
+  direction: `estimate_air_time(rung, 0)` is not the fixed cost (a
+  36-bit packet still fills data symbols, and those were subtracted from
+  every block), callers pass the FRAGMENT size while a block carries
+  `BURST_SUBHDR + fragment`, and the ZC resync symbols were not counted.
+  A window it called 28.6 s was really 37.0 s, so
+  `BURST_WIN_MAX_AIR_S` -- whose entire purpose is "a single
+  transmission must never outlast a plausible fade" -- was enforced
+  against a figure 23 % short. Rung 12 with 200-byte fragments and
+  window 16 is 26.2 s and still passes; rung 10 at window 16 is 39.2 s
+  and is now correctly cut down.
+- The broadcast default rung goes through `station_tx_rung()`, never
+  `ctl_tx_rung()` directly: the controller's answer still has to pass
+  the operator's ceiling and the PEER'S DECLARED maximum. Calling the
+  controller directly ignored both, so a peer that declared "nothing
+  above rung 6" got a rung-10 QAM16 broadcast train it could not decode,
+  with every counter healthy on both boards.
+- `rto_backoff` is reset by any CLEAN exchange, not only by one that
+  produces a usable timing sample. `rto_sample` was its only reset and
+  it is skipped for streamed windows, so one timed-out window ratcheted
+  the backoff to the 8x ceiling and left it there for the rest of the
+  transfer -- ~30 s of dead air per lost ack instead of ~2.
 - A new `bcast` CLEARS `g_bc_waiting`. The hold belongs to the command
   that armed it, and its branch only runs when no rung was given -- so
   the operator following the board's own advice ("held ... use -r")
