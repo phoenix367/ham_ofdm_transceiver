@@ -191,6 +191,15 @@ class Bridge:
         self.held = deque()                # (frame, deadline)
         self.next_probe = 0.0
         self.last_said = (None, 0)         # (message, repeat count)
+        # Submits made since the last status frame. The status arrives at
+        # 2 Hz and a submit takes microseconds, so a queue depth read
+        # from it is stale the moment a frame is released: flushing a
+        # backlog against one reading dumped eight frames into a queue
+        # gated at two, and the board answered "refused". Counting our
+        # own submits between updates bounds the overshoot to the gate.
+        self.inflight = 0
+        self.drops = 0
+        self.drops_said = 0.0
 
     # -- host side ------------------------------------------------------
     def add_client(self, obj):
@@ -236,11 +245,14 @@ class Bridge:
         return r
 
     def board_full(self):
-        """Is our QoS class already holding as much as it should?"""
+        """Is our QoS class already carrying as much as it should?
+
+        Counts what the board last reported PLUS what has been sent
+        since, because that report is up to half a second old.
+        """
         q = self.status.get("queues")
-        if not q:
-            return False
-        return q[min(self.args.qos, 2)] >= QUEUE_HIGH
+        depth = q[min(self.args.qos, 2)] if q else 0
+        return depth + self.inflight >= QUEUE_HIGH
 
     def air_time(self, n):
         r = self.rung()
@@ -299,11 +311,27 @@ class Bridge:
 
     def hold(self, payload, why):
         if len(self.held) >= 8:
-            dropped, _ = self.held.popleft()
+            self.held.popleft()
             self.refused += 1
-            self.say(f"backlog full -- dropped a held {len(dropped)} B frame")
+            self.note_drop()
         self.held.append((payload, time.monotonic() + self.args.hold))
-        self.say(f"holding {len(payload)} B: {why} ({len(self.held)} held)")
+        msg = f"holding {len(payload)} B: {why} ({len(self.held)} held)"
+        # ordinary backpressure is not news; a link too slow for the
+        # frame at all is
+        (self.log if "carrying" in why else self.say)(msg)
+
+    def note_drop(self):
+        """Steady-state overload is one fact, not one line per frame:
+        offering 1 packet/s to a link that carries one per 1.8 s must
+        drop about half of them, and saying so 30 times a minute buries
+        everything else."""
+        self.drops += 1
+        now = time.monotonic()
+        if now - self.drops_said >= 10.0:
+            self.drops_said = now
+            self.say(f"dropping frames -- the offered rate is more than "
+                     f"the link carries ({self.drops} so far). Slow the "
+                     f"source, or send smaller frames")
 
     def transmit(self, payload, air):
         try:
@@ -320,6 +348,7 @@ class Bridge:
                      "(busy decoding); the host will retry if it cares")
             return
         self.sent += 1
+        self.inflight += 1
         self.say(f"tx {len(payload)} B, {air:.1f}s at rung {self.rung()}")
         return True
 
@@ -329,11 +358,13 @@ class Bridge:
         so a held queue with no traffic would wait forever."""
         now = time.monotonic()
         keep = deque()
+        stuck_on_rung = False              # blocked by AIR TIME, not by
+                                           # a busy board
         while self.held:
             frame, deadline = self.held.popleft()
             air = self.air_time(len(frame))
             if air <= self.args.max_air and not self.board_full():
-                self.say(f"releasing {len(frame)} B at rung {self.rung()} "
+                self.log(f"releasing {len(frame)} B at rung {self.rung()} "
                          f"({air:.1f}s)")
                 self.transmit(frame, air)
             elif now >= deadline:
@@ -341,10 +372,17 @@ class Bridge:
                 self.say(f"dropping {len(frame)} B: still {air:.0f}s of air "
                          f"at rung {self.rung()} after {self.args.hold:.0f}s "
                          f"of probing")
+                self.drops_said = time.monotonic()   # this one said it
             else:
+                if air > self.args.max_air:
+                    stuck_on_rung = True
                 keep.append((frame, deadline))
         self.held = keep
-        if self.held and now >= self.next_probe:
+        # Probe only when the LADDER is the problem. A backlog caused by
+        # a busy board on a link already at rung 12 needs less traffic,
+        # not more: probing there put an extra frame into a congested
+        # channel every 30 s and could not have helped.
+        if stuck_on_rung and now >= self.next_probe:
             self.next_probe = now + 30.0
             # one byte, purely to make the peer answer: an answered frame
             # is what moves the ladder. The peer's bridge discards
@@ -394,6 +432,7 @@ class Bridge:
             if kind == "status" and payload:
                 had = self.rung()
                 self.status = payload
+                self.inflight = 0          # the report now includes them
                 if self.held and self.rung() != had:
                     self.flush_held()
                 mm = payload.get("peer_msg_max") or 0

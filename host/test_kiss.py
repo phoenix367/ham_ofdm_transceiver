@@ -316,6 +316,24 @@ def test_flow_control():
     check("a refusal after the fact undoes the sent count",
           before == 1 and b.sent == 0 and b.refused == 1)
 
+    # the release burst: a backlog flushed against a status that is up
+    # to half a second old dumped 8 frames into a queue gated at 2, and
+    # the board answered "refused"
+    b = b_with((0, 0, 2))
+    for _ in range(8):
+        b.from_host(CMD_DATA, bytes(50))
+    check("a backlog builds while the board is busy", len(b.held) == 8)
+    b.status["queues"] = (0, 0, 0)          # the board drained
+    b.flush_held()                          # ... and the flush must not
+    check("releasing a backlog stops at the gate, not at the backlog",
+          len(b.m.submitted) == 2 and len(b.held) == 6)
+    check("and no probe is sent -- the ladder is not the problem here",
+          all(d != b"\x00" for d, _ in b.m.submitted))
+    check("in-flight credit is what stops it", b.inflight == 2)
+    b.flush_held()
+    check("and no more go out until a status refreshes the credit",
+          len(b.m.submitted) == 2)
+
     # repeated identical lines collapse
     b = b_with((0, 0, 0))
     for _ in range(30):
