@@ -844,6 +844,71 @@ that is TinyUSB's clear-stall path rather than this project's, so the
 contract is stated instead --- any client for this device must drain,
 not reset.
 
+\subsubsection{The host side, and the 2.3-second stall}
+\label{sec:cport_hosttiming}
+
+The drain-not-reset rule above is one instance of a wider mistake, and
+the rest of it surfaced only once the boards were doing real work.  A
+host naturally assumes the device is always ready to talk.  This one is
+not: a single \texttt{rxs\_push} can occupy the processor for
+2283\,ms at the end-of-frame commit (Section~\ref{sec:cport_radio}, the
+same measurement that sizes the capture FIFO), and for that whole
+window USB is simply not serviced.  Every host-side defect found after
+the two-board stand came up is a deadline shorter than that number.
+
+\begin{table}[H]
+    \centering
+    \caption{Host timeouts against the device's worst blocking decode.
+             Each was chosen before that figure was measured, and each
+             failed in a way that looked like something else.}
+    \label{tab:host_timeouts}
+    \small
+    \begin{tabular}{@{}lllp{4.6cm}@{}}
+    \toprule
+    \textbf{Operation} & \textbf{Was} & \textbf{Now} &
+    \textbf{Symptom} \\
+    \midrule
+    Bulk write, Python & 1000\,ms & 5000\,ms &
+    console died mid-transfer with a traceback out of its 1\,Hz
+    heartbeat \\
+    Bulk write, C & 2000\,ms & 5000\,ms &
+    ``usb write failed'', frame lost \\
+    Serial string, C & $4\times50$\,ms & $10\times300$\,ms &
+    intermittent \texttt{<unreadable>} in \texttt{--list} \\
+    Serial string, Python & none & $10\times300$\,ms &
+    \texttt{ValueError: no langid}, 3 opens in 12 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+The last of those is worth more than its size, because the obvious fix
+did not work.  Adding retries left the \emph{first} open in twelve
+still failing, and failing in 3.7\,s --- which is 3.7\,s of not
+touching the bus, because pyusb caches a failed language-ID fetch as an
+empty tuple and every subsequent string request then raises
+immediately, forever, on that device object.  A retry that does not
+clear the cache is decoration.  With the cache reset between attempts:
+60 opens of both boards, no failures, and a cold open after fifteen
+idle minutes --- the reported case --- takes 0.17\,s.  The
+distinguishing evidence was the shape of the failure rather than its
+message: the \emph{first} open failed and the next eleven succeeded in
+0.16\,s each, which is a cache being poisoned, not a bus being busy.
+The error text says ``permission issue'', and it is not one.
+
+Two further host defects were not about timing at all, and both are the
+same shape as the sentinel family of Section~\ref{sec:cport_sentinel}:
+a value that had drifted from its definition.  The Python host's
+maximum frame size was still 1024\,bytes, the protocol's original,
+while \texttt{UP\_MAX\_PAYLOAD} had grown to 3336 for whole-message
+transfers --- so its parser discarded every frame declaring more, and
+the Python console received small traffic perfectly while file parts
+vanished, from a board that had decoded and acknowledged them.  And
+\texttt{pyusb} was never in \texttt{requirements.txt}, only in a README
+line, so the environment the project is normally run from could not
+talk to a board at all.  Both are now pinned by tests
+(\texttt{host/test\_modem.py}), which is the only thing that keeps a
+constant duplicated across two languages honest.
+
 \subsection{Two Boards on a Wire}
 \label{sec:cport_twoboard}
 
