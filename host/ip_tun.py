@@ -36,6 +36,7 @@ import argparse
 import fcntl
 import os
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -201,6 +202,9 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
+    # a killed tunnel should say what it did, not disappear
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+
     if os.geteuid() != 0:
         print("ip_tun: needs root (it creates a network device) -- "
               "try sudo", file=sys.stderr)
@@ -230,10 +234,16 @@ def main():
                         "dev", args.dev], check=False)
 
     t = Tunnel(modem, args)
+    # flush=True everywhere: stdout redirected to a file is block
+    # buffered, so these lines sat in the buffer until something else
+    # flushed -- and a SIGTERM discards it. An empty log then looks
+    # exactly like a process that never started.
     print(f"[tun] {args.dev} up: {args.local} mtu {args.mtu}, "
-          f"board fw {info.get('fw', '?')}, {args.msg_max} B messages")
+          f"board fw {info.get('fw', '?')}, {args.msg_max} B messages",
+          flush=True)
     if args.peer:
-        print(f"[tun] try: ping -c 3 -i 10 -W 60 -s 64 {args.peer}")
+        print(f"[tun] try: ping -c 3 -i 10 -W 60 -s 64 {args.peer}",
+              flush=True)
 
     last_ping = 0.0
     try:
@@ -259,9 +269,9 @@ def main():
                     t.log(f"board: {payload}")
             if t.probe_due(time.monotonic()):
                 t.send_probe()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         print(f"\n[tun] {t.sent} packet(s) sent, {t.rcvd} received, "
-              f"{t.dropped} dropped")
+              f"{t.dropped} dropped", flush=True)
     finally:
         os.close(fd)
     return 0

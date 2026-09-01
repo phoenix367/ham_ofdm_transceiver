@@ -60,21 +60,28 @@ trap cleanup EXIT
 ip netns list | awk '{print $1}' | grep -qx "$NS" || ip netns add "$NS"
 
 echo "ip_tun_test: A=$A (this namespace)  B=$B (namespace $NS)  mtu $MTU"
-"$PY" "$HERE/ip_tun.py" --serial "$A" --dev "$DEV" \
+"$PY" -u "$HERE/ip_tun.py" --serial "$A" --dev "$DEV" \
       --local "$LOCAL/24" --peer "$REMOTE" --mtu "$MTU" -v \
       > "$WORK/a.log" 2>&1 &
 PIDA=$!
-ip netns exec "$NS" "$PY" "$HERE/ip_tun.py" --serial "$B" --dev "$DEV" \
+ip netns exec "$NS" "$PY" -u "$HERE/ip_tun.py" --serial "$B" --dev "$DEV" \
       --local "$REMOTE/24" --peer "$LOCAL" --mtu "$MTU" -v \
       > "$WORK/b.log" 2>&1 &
 PIDB=$!
 
-for i in $(seq 1 20); do
+# Judge readiness by the DEVICE existing, not by log text: a redirected
+# python buffers its output, and an empty log is not evidence of a dead
+# process (it looked exactly like one, once).
+up_a() { ip link show "$DEV" >/dev/null 2>&1; }
+up_b() { ip netns exec "$NS" ip link show "$DEV" >/dev/null 2>&1; }
+for i in $(seq 1 25); do
     sleep 1
-    grep -q "up:" "$WORK/a.log" && grep -q "up:" "$WORK/b.log" && break
+    up_a && up_b && break
+    kill -0 "$PIDA" 2>/dev/null || break
+    kill -0 "$PIDB" 2>/dev/null || break
 done
-grep -q "up:" "$WORK/a.log" || { cat "$WORK/a.log"; die "tunnel A did not start"; }
-grep -q "up:" "$WORK/b.log" || { cat "$WORK/b.log"; die "tunnel B did not start"; }
+up_a || { echo "--- A ---"; cat "$WORK/a.log"; die "tunnel A did not start"; }
+up_b || { echo "--- B ---"; cat "$WORK/b.log"; die "tunnel B did not start"; }
 echo "ip_tun_test: both ends up"
 ip -br addr show "$DEV" | sed 's/^/  /'
 ip netns exec "$NS" ip -br addr show "$DEV" | sed 's/^/  /'
