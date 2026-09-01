@@ -203,7 +203,19 @@ except ImportError:        # pragma: no cover - exercised without pyusb
 
 class _UsbTransport:
     def __init__(self, serial=None):
-        import usb.core, usb.util          # imported late: only this path needs it
+        # imported late: only this path needs it, so the emulator and the
+        # framing helpers work without pyusb. A missing pyusb is an
+        # install problem, not a bug -- say so instead of unwinding a
+        # ModuleNotFoundError out of a tool the user just started.
+        try:
+            import usb.core, usb.util
+        except ImportError:
+            raise RuntimeError(
+                "pyusb is not installed in this interpreter. It is in "
+                "requirements.txt:\n"
+                "    ./venv/bin/pip install -r requirements.txt\n"
+                "or run against the hardware-free emulator instead "
+                "(--emulate).") from None
         matches = list(usb.core.find(find_all=True, idVendor=VID,
                                      idProduct=PID))
         if not matches:
@@ -219,7 +231,8 @@ class _UsbTransport:
         if len(matches) > 1:
             have = [usb.util.get_string(d, d.iSerialNumber) for d in matches]
             raise RuntimeError(
-                "several modems attached; pass serial=... to choose. "
+                "several modems attached; choose one with --serial "
+                "(or serial= from Python). "
                 f"Found: {have}")
         self.dev = matches[0]
         self.dev.set_configuration()

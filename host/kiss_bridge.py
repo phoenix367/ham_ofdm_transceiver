@@ -336,8 +336,14 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
-    modem = (OfdmModem(emulate=args.emulate.split()) if args.emulate
-             else OfdmModem(serial=args.serial))
+    try:
+        modem = (OfdmModem(emulate=args.emulate.split()) if args.emulate
+                 else OfdmModem(serial=args.serial))
+    except RuntimeError as e:
+        # no board, no pyusb, no udev rule: all install-shaped problems
+        # with something useful to say. A traceback says none of it.
+        print(f"[kiss] {e}", file=sys.stderr)
+        return 1
     bridge = Bridge(modem, args)
 
     listener = None

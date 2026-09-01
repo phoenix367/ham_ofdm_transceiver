@@ -137,7 +137,8 @@ Three rules it enforces, all from the air-time arithmetic:
   The estimate comes from a table generated from
   `ofdm_phy.station.estimate_air_time` and is asserted never to be
   optimistic (`host/test_kiss.py`) — the model itself is not imported,
-  because a bridge must run in a venv that has pyusb and nothing else.
+  so the bridge needs only `pyusb` and starts in any environment that
+  can reach the board.
 - **`paclen` 200 is the sweet spot**: a full AX.25 frame is then ~216 B,
   inside the 255-byte single-frame payload cap, and 3.0 s at rung 10.
 - **Connected-mode AX.25 is not supported.** Two ARQ engines with

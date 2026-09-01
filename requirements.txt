@@ -1,3 +1,6 @@
 numpy
 scipy
 matplotlib
+# host tools that talk to a board over USB: board_console.py,
+# kiss_bridge.py, host/ofdm_modem.py. Pure Python, no build step.
+pyusb

@@ -744,8 +744,10 @@ Cross-module invariants that are easy to break:
   transport and hide the adaptation. Its air-time table is GENERATED
   from `ofdm_phy.station.estimate_air_time` and asserted never
   optimistic by `host/test_kiss.py` -- do not import the model in the
-  bridge, which must run in a pyusb-only venv (the first version did
-  and would not start). Frames are admitted by AIR TIME, not length
+  bridge: it must start wherever pyusb is, and the first version pulled
+  in NumPy and SciPy and would not start at all. `pyusb` is in
+  requirements.txt precisely so ONE venv serves the model and the host
+  tools. Frames are admitted by AIR TIME, not length
   (256 B is 2.6 s at rung 12 and 278.6 s at rung 0), and connected-mode
   AX.25 over the station's ARQ is deliberately unsupported.
 - The link-control word's 4-bit SNR field: **code 0 means "no
