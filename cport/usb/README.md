@@ -9,17 +9,32 @@ shared with the host driver, so device and host cannot drift apart.
     bsp_stm32h7.c      PWR / clocks / pins / NVIC, register level
     usb_main.c         RAM-resident bring-up image with a progress beacon
 
-## Dependencies, and why they are not vendored
+## Dependencies: submodules, checked out on demand
 
 TinyUSB's STM32 port needs ST's CMSIS device headers, which need ARM's
-CMSIS core headers. That is ~150 MB of third-party source to hold a
-dependency-free C port hostage, so they are fetched rather than
-committed:
+CMSIS core headers -- ~150 MB of third-party source. It is not copied
+into this repository's history, but it is not left to a clone in `/tmp`
+either: all three are **git submodules pinned by commit** under
+`cport/third_party/`, so the tree an image was built from is recorded
+in the commit that built it.
 
-    git clone --depth 1 https://github.com/hathach/tinyusb            /tmp/tinyusb
-    git clone --depth 1 https://github.com/STMicroelectronics/cmsis_device_h7 /tmp/cmsis_h7
-    git clone --depth 1 https://github.com/ARM-software/CMSIS_5       /tmp/cmsis5
-    make -C cport usbfw TINYUSB=/tmp/tinyusb CMSIS_H7=/tmp/cmsis_h7 CMSIS5=/tmp/cmsis5
+    make -C cport deps        # once per checkout
+    make -C cport usbfw
+
+`deps` is `git submodule update --init --depth 1` on those three paths
+and nothing else. A plain `git clone` deliberately leaves them
+uninitialised -- the Python model and the host tools need none of it --
+and every firmware target checks for a real header before compiling
+(`check-deps`), because an uninitialised submodule is an empty
+directory that exists, and the failure a hundred lines into TinyUSB
+reads like a broken port.
+
+The pins are shallow (`shallow = true` in `.gitmodules`): GitHub serves
+an exact SHA at depth 1, so one commit per tree is fetched, not
+CMSIS_5's gigabyte of history. To build against your own checkouts
+instead:
+
+    make -C cport usbfw TINYUSB=<path> CMSIS_H7=<path> CMSIS5=<path>
 
 Nothing else in `cport/` depends on any of it.
 
@@ -224,7 +239,7 @@ device flashed to 0x08000000, so the board is a USB OFDM modem on
 power-up with no debugger involved.
 
 ```bash
-make -C cport usbflash TINYUSB=/tmp/tinyusb CMSIS_H7=/tmp/cmsis_h7 CMSIS5=/tmp/cmsis5
+make -C cport usbflash
 openocd -f tools/esp32-probe/stm32h7-rbb.cfg -c init -c halt \
   -c "program cport/build/usb_flash.elf verify" -c exit
 ```

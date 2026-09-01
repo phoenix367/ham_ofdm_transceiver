@@ -171,12 +171,44 @@ zcab: $(GEN) | $(BUILD)
 	@echo
 	@./$(BUILD)/zcab_anchored $(TRIALS)
 
-# USB device firmware (TinyUSB). Third-party trees are fetched, not
-# vendored -- see usb/README.md.
-TINYUSB   ?= /tmp/tinyusb
-CMSIS_H7  ?= /tmp/cmsis_h7
-CMSIS5    ?= /tmp/cmsis5
+# USB device firmware (TinyUSB). The third-party trees are git
+# SUBMODULES pinned by commit under third_party/ -- what an image was
+# built from has to be recoverable from the repository, and a clone in
+# /tmp is not. A plain `git clone` does NOT check them out (~150 MB of
+# vendor source is not the price of reading the Python model): run
+# `make deps` once, or override these to point at trees you have.
+THIRD_PARTY ?= third_party
+TINYUSB   ?= $(THIRD_PARTY)/tinyusb
+CMSIS_H7  ?= $(THIRD_PARTY)/cmsis_device_h7
+CMSIS5    ?= $(THIRD_PARTY)/CMSIS_5
 USB_RHPORT ?= 0
+
+# One header from each tree. An UNINITIALISED submodule is an empty
+# directory that exists, so testing the directory proves nothing --
+# without this the firmware targets fail hundreds of lines later, as a
+# missing tusb_option.h, which reads like a broken port.
+DEP_PROBES = $(TINYUSB)/src/tusb.h $(CMSIS_H7)/Include/stm32h743xx.h \
+             $(CMSIS5)/CMSIS/Core/Include/core_cm7.h
+
+deps:
+	git -C .. submodule update --init --depth 1 -- \
+	    cport/third_party/tinyusb cport/third_party/cmsis_device_h7 \
+	    cport/third_party/CMSIS_5
+	@$(MAKE) --no-print-directory check-deps
+	@echo "third-party trees ready:"
+	@git -C .. submodule status -- cport/third_party | sed 's/^/  /'
+
+check-deps:
+	@missing=""; for f in $(DEP_PROBES); do \
+	    [ -f "$$f" ] || missing="$$missing $$f"; \
+	 done; \
+	 if [ -n "$$missing" ]; then \
+	    echo "the firmware's third-party trees are not checked out:" >&2; \
+	    for f in $$missing; do echo "    missing $$f" >&2; done; \
+	    echo "  run:  make -C cport deps" >&2; \
+	    echo "  (or:  make ... TINYUSB=<path> CMSIS_H7=<path> CMSIS5=<path>)" >&2; \
+	    exit 1; \
+	 fi
 
 USBFW_SRC = target/start.c usb/usb_main.c usb/usb_descriptors.c \
             usb/bsp_stm32h7.c src/usb_proto.c src/usb_modem.c \
@@ -188,7 +220,7 @@ USBFW_SRC = target/start.c usb/usb_main.c usb/usb_descriptors.c \
             $(TINYUSB)/src/portable/synopsys/dwc2/dcd_dwc2.c \
             $(TINYUSB)/src/portable/synopsys/dwc2/dwc2_common.c
 
-usbfw: | $(BUILD)
+usbfw: check-deps | $(BUILD)
 	$(QEMUCC) -std=c99 -O2 -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 \
 	    -mfloat-abi=hard -ffunction-sections -fdata-sections \
 	    -Isrc -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
@@ -447,7 +479,7 @@ RESYNC ?= 4
 USBRADIO_SRC = $(subst usb/usb_flash_main.c,usb/usb_radio_main.c,$(USBFLASH_SRC)) \
                src/rx_stream.c src/rx_detect.c src/rx_demod.c src/csense.c src/broadcast.c
 
-radiofw: $(GEN) | $(BUILD)
+radiofw: $(GEN) check-deps | $(BUILD)
 	$(FLASHCC) $(FLASHFLAGS) -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
 	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx -DMAX_LLRS=4416 \
 	    -DST_MSG_MAX=3328 -DBURST_STREAM_MAX=16 \
@@ -455,7 +487,7 @@ radiofw: $(GEN) | $(BUILD)
 	    $(USBRADIO_SRC) -lm -o $(BUILD)/usb_radio.elf
 	@$(QEMUSIZE) $(BUILD)/usb_radio.elf
 
-usbflash: $(GEN) | $(BUILD)
+usbflash: $(GEN) check-deps | $(BUILD)
 	$(FLASHCC) $(FLASHFLAGS) -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
 	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx \
 	    $(USBFLASH_SRC) -lm -o $(BUILD)/usb_flash.elf
@@ -617,4 +649,4 @@ flash-probe: test-probe
 	 $(ARDUINO_CLI) compile --fqbn esp32:esp32:esp32 -u -p $(PROBE_PORT) \
 	   $(PROBE_DIR)/esp32_rbb | tail -3
 
-.PHONY: sanitize-ship bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read radiofw flash-radio-a flash-radio-b burstrepro bcrepro cstest robust ledtest run-led
+.PHONY: deps check-deps sanitize-ship bench armsize qemu armmeas zcab usbfw analogfw sanitize heartbeat usbflash bridge bridge-stop reset flash-heartbeat flash-usb backup-flash restore-flash ids beacons flash-usb-a flash-usb-b test-probe probe-fw flash-probe linkfw link-run link-read radiofw flash-radio-a flash-radio-b burstrepro bcrepro cstest robust ledtest run-led

@@ -1,0 +1,23 @@
+# Third-party trees the STM32 firmware needs, pinned by commit.
+#
+# They are NOT initialised by a plain `git clone`: ~150 MB of vendor
+# source should not be the price of reading the Python model. The C
+# firmware targets need them, so `make -C cport deps` (or
+# `git submodule update --init --depth 1`) fetches them on demand.
+#
+# `shallow = true` keeps that to one commit each -- CMSIS_5's full
+# history alone is over a gigabyte -- and GitHub serves an exact SHA at
+# depth 1, so the pin below is still what gets checked out.
+
+[submodule "cport/third_party/tinyusb"]
+	path = cport/third_party/tinyusb
+	url = https://github.com/hathach/tinyusb
+	shallow = true
+[submodule "cport/third_party/cmsis_device_h7"]
+	path = cport/third_party/cmsis_device_h7
+	url = https://github.com/STMicroelectronics/cmsis_device_h7
+	shallow = true
+[submodule "cport/third_party/CMSIS_5"]
+	path = cport/third_party/CMSIS_5
+	url = https://github.com/ARM-software/CMSIS_5
+	shallow = true

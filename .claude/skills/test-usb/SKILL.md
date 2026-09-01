@@ -19,13 +19,18 @@ The emulator runs the actual `usb_modem.c`/`usb_proto.c`; a passing run
 exercises both ends of the protocol as shipped. It cannot exercise the
 USB peripheral driver, which is the only thing level 3 adds.
 
-## 2. Firmware builds (needs the fetched trees)
+## 2. Firmware builds (needs the third-party submodules)
 
 ```bash
-make -C cport usbfw TINYUSB=/tmp/tinyusb CMSIS_H7=/tmp/cmsis_h7 CMSIS5=/tmp/cmsis5
+make -C cport deps      # once per checkout; skip if third_party/ is populated
+make -C cport usbfw
 ```
 
-Not vendored -- `cport/usb/README.md` has the three `git clone` lines.
+TinyUSB and the two CMSIS trees are submodules pinned by commit under
+`cport/third_party/`, not initialised by a plain clone -- see
+`cport/usb/README.md`. The build stops with the `make deps` line if
+they are missing, so an empty `third_party/` cannot look like a broken
+port.
 
 ## 3. On the board
 

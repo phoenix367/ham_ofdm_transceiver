@@ -933,6 +933,23 @@ Cross-module invariants that are easy to break:
   `PKT_BITS_FROM_HDR(typ, len)` whenever turning a decoded header into a bit
   count; burst-ARQ fragment size rides these frames and scales with rung.
 
+- The firmware's third-party trees (TinyUSB, ST cmsis_device_h7, ARM
+  CMSIS_5) are git SUBMODULES pinned by commit under
+  `cport/third_party/`, NOT clones in `/tmp` -- an image whose
+  dependency is a scratch directory cannot be rebuilt from the
+  repository, and the trees it was built against are unknowable once
+  `/tmp` is cleared. They stay OUT of a plain `git clone` (`make -C
+  cport deps` = `git submodule update --init --depth 1` on those three
+  paths): ~150 MB should not be the price of reading the Python model,
+  and `shallow = true` keeps it to one commit each because GitHub
+  serves an exact SHA at depth 1. Every firmware target depends on
+  `check-deps`, which tests for a real HEADER in each tree, not the
+  directory -- an uninitialised submodule is an empty directory that
+  exists, and the resulting failure lands deep inside TinyUSB looking
+  like a broken port. Verified at the switch: the three images
+  (`radiofw`, `usbflash`, `usbfw`) are BYTE-IDENTICAL built from the
+  submodules and from the old `/tmp` trees.
+
 Known intentional deviations from the article (normalized ZC detection metric,
 tone-contrast Newman metric, preamble gain, Wiener estimator model) are listed
 in README.md "Known deviations" — keep that list updated.

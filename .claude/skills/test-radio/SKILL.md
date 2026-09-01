@@ -83,9 +83,11 @@ both boards.
 ## Rebuild / reflash
 
 ```bash
-cd cport && make flash-radio-a flash-radio-b \
-    TINYUSB=/tmp/tinyusb CMSIS_H7=/tmp/cmsis_h7 CMSIS5=/tmp/cmsis5
+cd cport && make deps && make flash-radio-a flash-radio-b
 ```
+
+(`make deps` checks out the pinned TinyUSB/CMSIS submodules; it is a
+no-op once they are there.)
 
 Flashing one board does not disturb the other (`ab_flash` halts only
 its target). AXI is full to within ~450 B -- the linker errors on
