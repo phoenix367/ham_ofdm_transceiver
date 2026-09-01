@@ -104,6 +104,52 @@ Two rules earned by measurement (report §12.6):
 Device access needs the udev rule: `cport/usb/README.md` (install
 `host/99-ofdm-modem.rules`).
 
+## `host/kiss_bridge.py` — KISS, for existing packet software
+
+A KISS TNC on one side, this modem on the other, so `kissattach`, APRS
+clients and anything else that speaks KISS can use the link:
+
+```bash
+./kiss_bridge.py --tcp 8001        # Dire Wolf-style KISS over TCP
+./kiss_bridge.py --pty             # prints a /dev/pts/N for kissattach
+./kiss_bridge.py --mode broadcast  # frames go out non-ARQ, like AX.25 UI
+```
+
+It is a **host program on purpose**. The board already speaks a richer
+protocol — rung, SNR, peer capabilities, die temperature, broadcast
+pacing, diagnostics — and a KISS TNC has no way to report any of it;
+putting KISS in the firmware would duplicate the transport, add a
+fourth wire format to keep in step, and present the board as a dumb
+TNC. Nothing in `cport/` changes for this.
+
+One KISS data frame is one AX.25 frame, boundaries preserved, in either
+of two mappings: `message` (default) rides the station's ARQ
+point-to-point, `broadcast` sends one non-ARQ transmission per frame —
+the connectionless case AX.25 UI actually describes.
+
+Three rules it enforces, all from the air-time arithmetic:
+
+- **Air time, not byte count, is the limit.** A 256-byte frame is 2.6 s
+  at rung 12, 5.1 s at rung 8, 18.4 s at rung 4 and **278.6 s at
+  rung 0** — past every carrier-sense constant the station has. Frames
+  over `--max-air` (45 s, the station's own fragment ceiling) are
+  refused with a line saying why, rather than keying for four minutes.
+  The estimate comes from a table generated from
+  `ofdm_phy.station.estimate_air_time` and is asserted never to be
+  optimistic (`host/test_kiss.py`) — the model itself is not imported,
+  because a bridge must run in a venv that has pyusb and nothing else.
+- **`paclen` 200 is the sweet spot**: a full AX.25 frame is then ~216 B,
+  inside the 255-byte single-frame payload cap, and 3.0 s at rung 10.
+- **Connected-mode AX.25 is not supported.** Two ARQ engines with
+  independent timers, one adapting the rung underneath the other, is a
+  layering accident. Send UI frames and let this link do reliability.
+
+TXDELAY/P/SlotTime/TXtail/FullDuplex/SetHardware are accepted and
+ignored: the station's carrier sense and turnaround are measured, not
+configured from the host. `host/test_kiss.py` covers the codec and
+every mapping decision without hardware; measured end to end, a 48-byte
+UI frame crossed the two boards byte-identically in 3.4 s at rung 12.
+
 ## `host/ofdm_modem.py` — the Python host library
 
 The same transport in Python (`OfdmModem`), with two backends: a real

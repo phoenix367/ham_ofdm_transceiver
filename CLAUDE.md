@@ -737,6 +737,17 @@ Cross-module invariants that are easy to break:
   transmitter reaches int16 full scale, so anything lower clips against
   the int8 rail and nothing decodes) and the time scale (the SDR path is
   ~20x the virtual channel's cost, so ~2x is the ceiling, not 25x).
+- KISS (`host/kiss_bridge.py`) is a HOST program and stays one: the
+  board's own protocol already carries rung, SNR, capabilities,
+  temperature and broadcast pacing, none of which a KISS TNC can
+  express, so putting KISS in the firmware would duplicate the
+  transport and hide the adaptation. Its air-time table is GENERATED
+  from `ofdm_phy.station.estimate_air_time` and asserted never
+  optimistic by `host/test_kiss.py` -- do not import the model in the
+  bridge, which must run in a pyusb-only venv (the first version did
+  and would not start). Frames are admitted by AIR TIME, not length
+  (256 B is 2.6 s at rung 12 and 278.6 s at rung 0), and connected-mode
+  AX.25 over the station's ARQ is deliberately unsupported.
 - The link-control word's 4-bit SNR field: **code 0 means "no
   measurement", not -24 dB** (`LC_SNR_NONE`, both twins). Real reports
   clamp into codes 1..15 = -22..+6 dB, so a genuine bad-channel report
