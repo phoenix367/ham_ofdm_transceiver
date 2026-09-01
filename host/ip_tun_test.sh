@@ -100,15 +100,25 @@ for i in $(seq 1 ${WARM:-24}); do
     R=$(grep -ao "rung [0-9-]* -> [0-9]*" "$WORK/a.log" | tail -1 \
         | awk '{print $NF}')
     [ -n "$R" ] && echo "  t+$((i*5))s: rung $R"
-    if [ -n "$R" ] && [ "$R" -ge 4 ]; then WARM_OK=1; break; fi
+    if [ -n "$R" ] && [ "$R" -ge "${WARM_RUNG:-8}" ]; then
+        WARM_OK=1; break
+    fi
 done
 if [ "$WARM_OK" = 0 ]; then
-    echo "  the ladder did not reach a usable rung -- measuring anyway,"
-    echo "  expect drops (tunnel A's own log is printed at the end)"
+    echo "  the ladder did not reach rung ${WARM_RUNG:-8} -- measuring"
+    echo "  anyway; the numbers will describe the rung it is at, not the"
+    echo "  link at its best (tunnel A's log is printed at the end)"
 fi
 
+# Which rung the ping is measured at decides what the number means: at
+# rung 6 a queued packet is tens of seconds, at rung 12 it is 8.6. A
+# run that pings while the ladder is still climbing produces round
+# trips that fall monotonically and describe nothing -- measured
+# 24.6 -> 14.6 -> 6.9 s in one such run.
+RUNG_AT_PING=$(grep -ao "rung [0-9-]* -> [0-9]*" "$WORK/a.log" | tail -1 \
+               | awk '{print $NF}')
 echo
-echo "ip_tun_test: ping"
+echo "ip_tun_test: ping (at rung ${RUNG_AT_PING:-?})"
 ping -c 4 -i 12 -W 90 -s 64 "$REMOTE" || true
 
 echo
