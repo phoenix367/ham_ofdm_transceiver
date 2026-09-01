@@ -294,8 +294,12 @@ void station_diag_format(int ev, int a, int b, int c, int d,
                  c ? " (first burst-ack miss, forgiven)" : "");
         break;
     case ST_EV_RUNG:
-        snprintf(out, (size_t)cap, "rung %d -> %d (losses %d, cap %d)",
-                 a, b, c, d);
+        if (d < 0)
+            snprintf(out, (size_t)cap, "rung %d -> %d (losses %d, no peer "
+                     "report -- request stands)", a, b, c);
+        else
+            snprintf(out, (size_t)cap, "rung %d -> %d (losses %d, cap %d)",
+                     a, b, c, d);
         break;
     case ST_EV_BURST_ENGAGE:
         snprintf(out, (size_t)cap, "burst engage: %d frag(s) x %d B, "

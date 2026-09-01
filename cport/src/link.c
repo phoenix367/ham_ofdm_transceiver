@@ -20,9 +20,12 @@ double ladder_rate(int r) { return LADDER_RATE[r]; }
 /* python round() = round-half-even = C rint() in the default mode */
 uint32_t lc_pack(const lc_word_t *lc)
 {
-    int snr_q = (int)rint((lc->snr_db + 24.0) / 2.0);
+    int snr_q = LC_SNR_IS_NONE(lc->snr_db)
+                    ? 0                       /* no measurement to report */
+                    : (int)rint((lc->snr_db + 24.0) / 2.0);
     int f_q = (int)rint(lc->freq_corr_hz / FREQ_STEP_HZ);
-    if (snr_q < 0) snr_q = 0;
+    if (snr_q < 1 && !LC_SNR_IS_NONE(lc->snr_db))
+        snr_q = 1;                            /* a real one is never code 0 */
     if (snr_q > 15) snr_q = 15;
     if (f_q < -15) f_q = -15;
     if (f_q > 15) f_q = 15;
@@ -38,7 +41,9 @@ void lc_unpack(uint32_t v, lc_word_t *lc)
     lc->seq = (int)((v >> 18) & 3);
     lc->ack = (int)((v >> 16) & 3);
     lc->req_rung = (int)((v >> 12) & 15);
-    lc->snr_db = (double)((v >> 8) & 15) * 2.0 - 24.0;
+    lc->snr_db = ((v >> 8) & 15) == 0
+                     ? LC_SNR_NONE
+                     : (double)((v >> 8) & 15) * 2.0 - 24.0;
     lc->freq_corr_hz = (double)((int)((v >> 3) & 31) - 15) * FREQ_STEP_HZ;
     lc->flags = (int)(v & 7);
 }
@@ -48,7 +53,7 @@ void ctl_init(link_ctl_t *c)
     memset(c, 0, sizeof(*c));
     c->last_rx_time = -1e9;
     c->peer_req_time = -1e9;
-    c->peer_report_db = -99.0;
+    c->peer_report_db = LC_SNR_NONE;
 }
 
 void ctl_on_rx_frame(link_ctl_t *c, double snr_db, const lc_word_t *lc,
@@ -142,12 +147,19 @@ int ctl_tx_rung(const link_ctl_t *c, double now)
     int rung = c->peer_req, cap = 0, i;
     double age;
 
-    for (i = 0; i < LADDER_N; i++)
-        if (c->peer_report_db
-            >= LADDER_SENS[i] + c->rung_offset_db[i] + MARGIN_KEEP)
-            cap = i;
-    if (cap < rung)
-        rung = cap;
+    /* The cap applies only to a report the peer actually made. "I heard
+     * you badly" and "I have not heard anything lately" are different
+     * facts: the first must slow us down, the second is what every gap
+     * in a conversation looks like. A peer that has really gone away is
+     * still caught by the staleness decay below. */
+    if (!LC_SNR_IS_NONE(c->peer_report_db)) {
+        for (i = 0; i < LADDER_N; i++)
+            if (c->peer_report_db
+                >= LADDER_SENS[i] + c->rung_offset_db[i] + MARGIN_KEEP)
+                cap = i;
+        if (cap < rung)
+            rung = cap;
+    }
 
     age = now - c->peer_req_time;
     if (age > STALE_S) {
@@ -170,11 +182,17 @@ void ctl_diag(const link_ctl_t *c, double now, link_diag_t *d)
     int i;
     d->rung = ctl_tx_rung(c, now);
     d->peer_req = c->peer_req;
-    d->cap = 0;
-    for (i = 0; i < LADDER_N; i++)
-        if (c->peer_report_db
-            >= LADDER_SENS[i] + c->rung_offset_db[i] + MARGIN_KEEP)
-            d->cap = i;
+    /* -1 = the peer reported no measurement, so no cap applies. It is
+     * NOT the same as a cap of 0, and printing it as one is what made
+     * this whole class of defect hard to read in the first place. */
+    d->cap = -1;
+    if (!LC_SNR_IS_NONE(c->peer_report_db)) {
+        d->cap = 0;
+        for (i = 0; i < LADDER_N; i++)
+            if (c->peer_report_db
+                >= LADDER_SENS[i] + c->rung_offset_db[i] + MARGIN_KEEP)
+                d->cap = i;
+    }
     d->losses = c->consecutive_losses;
     d->my_req = c->my_req;
     d->peer_report_db = c->peer_report_db;

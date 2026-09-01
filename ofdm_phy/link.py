@@ -60,18 +60,36 @@ LADDER = [
 FREQ_STEP_HZ = 8.0
 FREQ_MAX_HZ = 15 * FREQ_STEP_HZ  # +-120 Hz per frame
 
+# The 4-bit SNR field's code 0 means "I have no measurement to report",
+# not "-24 dB". Reporting a measurement one does not have is not a
+# harmless white lie: the peer caps its transmit rung on that number, so
+# a station that has simply been quiet for a minute used to tell its
+# peer "I hear you at -24 dB" and get 19-second EXTREME acks back on a
+# +20 dB link (measured on the two-board stand, 3 of 4 replies).
+# Genuine measurements therefore clamp into codes 1..15 = -22..+6 dB;
+# anything at or below -22 dB caps the peer to rung 0 either way, so the
+# lost code costs nothing. Old peers pack their "no measurement"
+# sentinel into this same code 0, so a patched receiver reads them
+# correctly too, and an unpatched receiver reads code 0 as -24 dB
+# exactly as before.
+LC_SNR_NONE = -99.0
+LC_SNR_NONE_MAX = -90.0    # anything this low means "no measurement"
+
 
 @dataclass
 class LinkControl:
     seq: int = 0
     ack: int = 0
     req_rung: int = 0
-    snr_db: float = -24.0
+    snr_db: float = LC_SNR_NONE   # nothing measured, until one is
     freq_corr_hz: float = 0.0  # "peer, shift your carrier by this much"
     flags: int = 0
 
     def pack(self) -> int:
-        snr_q = max(0, min(15, int(round((self.snr_db + 24.0) / 2))))
+        if self.snr_db <= LC_SNR_NONE_MAX:
+            snr_q = 0                       # no measurement to report
+        else:                               # a real one: never code 0
+            snr_q = max(1, min(15, int(round((self.snr_db + 24.0) / 2))))
         f_q = max(-15, min(15, int(round(self.freq_corr_hz / FREQ_STEP_HZ)))) + 15
         return ((self.seq & 3) << 18) | ((self.ack & 3) << 16) | \
                ((self.req_rung & 15) << 12) | (snr_q << 8) | \
@@ -81,7 +99,8 @@ class LinkControl:
     def unpack(cls, v: int) -> "LinkControl":
         return cls(seq=(v >> 18) & 3, ack=(v >> 16) & 3,
                    req_rung=(v >> 12) & 15,
-                   snr_db=((v >> 8) & 15) * 2.0 - 24.0,
+                   snr_db=(LC_SNR_NONE if ((v >> 8) & 15) == 0
+                           else ((v >> 8) & 15) * 2.0 - 24.0),
                    freq_corr_hz=(((v >> 3) & 31) - 15) * FREQ_STEP_HZ,
                    flags=v & 7)
 
@@ -187,17 +206,25 @@ class LinkController:
 
     def tx_rung(self, now: float) -> int:
         """Rung for my next outbound frame: the peer's request, capped by the
-        peer's fresh SNR report of my signal (the report reacts faster than
-        request decay when my frames stop arriving -- it clamps to the floor
-        as soon as the peer hears nothing), decayed by staleness, and cut by
-        the loss-fallback ladder."""
+        peer's SNR report of my signal, decayed by staleness, and cut by the
+        loss-fallback ladder.
+
+        The cap applies only when the peer actually reported a measurement.
+        "I heard you badly" and "I have not heard anything lately" are
+        different facts: the first must slow us down, the second is what
+        every gap in a conversation looks like, and treating it as a -24 dB
+        report collapsed the reply to EXTREME. A peer that has genuinely
+        gone away is still handled -- by the staleness decay below, which
+        walks the rung down one step per stale_s."""
         rung = self.peer_req
 
-        cap = 0
-        for i, r in enumerate(LADDER):
-            if self.peer_report_db >= r.sens_db + self.rung_offset_db[i] + self.margin_keep:
-                cap = i
-        rung = min(rung, cap)
+        if self.peer_report_db > LC_SNR_NONE_MAX:
+            cap = 0
+            for i, r in enumerate(LADDER):
+                if self.peer_report_db >= r.sens_db + self.rung_offset_db[i] \
+                        + self.margin_keep:
+                    cap = i
+            rung = min(rung, cap)
 
         age = now - self.peer_req_time
         if age > self.stale_s:

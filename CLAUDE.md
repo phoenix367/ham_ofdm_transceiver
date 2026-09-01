@@ -737,6 +737,23 @@ Cross-module invariants that are easy to break:
   transmitter reaches int16 full scale, so anything lower clips against
   the int8 rail and nothing decodes) and the time scale (the SDR path is
   ~20x the virtual channel's cost, so ~2x is the ceiling, not 25x).
+- The link-control word's 4-bit SNR field: **code 0 means "no
+  measurement", not -24 dB** (`LC_SNR_NONE`, both twins). Real reports
+  clamp into codes 1..15 = -22..+6 dB, so a genuine bad-channel report
+  stays distinguishable from an absent one; `ctl_tx_rung` applies the
+  peer-report CAP only when the peer actually reported. Why it matters:
+  `lc.snr_db` is `ctl_filtered_snr()` at BUILD time, which returns the
+  -99 sentinel once every sample has aged past SNR_MAX_AGE_S (60 s) --
+  and the old pack clamped that into the wire's low rail, where the
+  peer read it as a real -24 dB and capped ITS transmit rung to 0.
+  Measured on the stand: 3 of 4 replies to a 75-s-spaced chat went out
+  as 19-second EXTREME acks on a +20 dB wire. A peer that has really
+  gone away is still caught by the request's staleness decay (1 rung
+  per 90 s), which is the mechanism that was doing the real work all
+  along. Backward compatible in both directions: an old sender's
+  sentinel lands in the same code 0 (so a patched receiver fixes the
+  exchange unilaterally), and an old receiver reads code 0 exactly as
+  it always did.
 - The DIE TEMPERATURE (`src/temp.h`, in the status frame) is read on
   **ADC3**, not the audio converter: on this part VSENSE is bonded to
   ADC3_INP18 (VBAT/4 on INP17, VREFINT on INP19) and ADC1/2 cannot

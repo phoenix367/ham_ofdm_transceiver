@@ -39,7 +39,23 @@ static void test_lc(void)
             ok = 0;                                                        \
     } while (0)
     LC_CASE(0); LC_CASE(1); LC_CASE(2); LC_CASE(3); LC_CASE(4);
+    LC_CASE(5);
     check("lc word pack/unpack (incl. half-even rounding)", ok);
+    /* the two ends of the "no measurement" code, which the cases above
+     * only cover as data: a real report near the floor must never be
+     * mistaken for an absent one, in either direction */
+    {
+        lc_word_t a, b;
+        memset(&a, 0, sizeof(a));
+        a.snr_db = LC_SNR_NONE;
+        lc_unpack(lc_pack(&a), &b);
+        check("no-measurement packs to code 0 and comes back as none",
+              ((lc_pack(&a) >> 8) & 15) == 0 && LC_SNR_IS_NONE(b.snr_db));
+        a.snr_db = -30.0;                    /* real, below the field */
+        lc_unpack(lc_pack(&a), &b);
+        check("a real report below the floor clamps to -22, not to none",
+              ((lc_pack(&a) >> 8) & 15) == 1 && b.snr_db == -22.0);
+    }
 }
 
 /* ---------------- controller parity ---------------- */

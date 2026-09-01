@@ -8,6 +8,21 @@
 #include "tx.h" /* link_mode_t, mod_type_t */
 #include "conv.h"
 
+/* The link-control word's 4-bit SNR field: code 0 means "I have no
+ * measurement to report", NOT -24 dB. Reporting a measurement one does
+ * not have is not harmless -- the peer caps its transmit rung on that
+ * number, so a station quiet for 60 s told its peer "I hear you at
+ * -24 dB" and got 19-second EXTREME acks back on a +20 dB link
+ * (measured: 3 of 4 replies on the two-board stand). Real measurements
+ * clamp into codes 1..15 = -22..+6 dB; at or below -22 dB the peer is
+ * capped to rung 0 either way, so the lost code costs nothing. An old
+ * peer's sentinel packs to this same code 0, so a patched receiver
+ * fixes the exchange even against an unpatched sender. Keep in step
+ * with LC_SNR_NONE in ofdm_phy/link.py. */
+#define LC_SNR_NONE (-99.0)
+#define LC_SNR_NONE_MAX (-90.0)
+#define LC_SNR_IS_NONE(x) ((x) <= LC_SNR_NONE_MAX)
+
 #define FREQ_STEP_HZ 8.0
 #define FREQ_MAX_HZ 120.0
 #define SNR_HIST_LEN 5
@@ -61,7 +76,8 @@ int link_max_payload_bytes(int rung, double max_air_s);
 typedef struct {
     int rung;              /* resulting ctl_tx_rung(now) */
     int peer_req;          /* rung the peer asked us to use */
-    int cap;               /* cap from peer_report_db vs sens+offset */
+    int cap;               /* cap from peer_report_db vs sens+offset;
+                            * -1 = peer reported nothing, no cap */
     int losses;            /* consecutive timeouts (>=2: -2, >=4: rung 0) */
     int my_req;            /* what we ask the peer for */
     double peer_report_db; /* SNR the peer last reported */

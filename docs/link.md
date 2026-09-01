@@ -30,6 +30,18 @@ flowchart LR
 Flags: bit0 = last fragment, bit1 = no-data (ack-only), bit2 = priority
 stream. Every frame piggybacks the full word — data, ACKs, everything.
 
+The SNR field's **code 0 means "no measurement to report"**, not
+−24 dB; genuine reports use codes 1–15 = −22…+6 dB. The distinction is
+load-bearing, because the receiver caps its transmit rung on this
+number: a station that has simply been quiet for 60 s (its own SNR
+filter aged out) used to report the low rail, and its peer answered a
+1-byte ack with a 19-second EXTREME frame on a +20 dB link — measured
+on the stand, 3 replies in 4. A real report below the field's floor
+clamps to code 1, so "I hear you badly" stays distinguishable from "I
+have not heard you". Old peers pack their absent measurement into the
+same code 0, so a patched receiver is fixed even against an unpatched
+sender.
+
 ## Adaptation: three feedback paths, three latencies
 
 ```mermaid
@@ -40,7 +52,7 @@ flowchart TD
     end
     subgraph TXside["transmitter side (per outbound link)"]
         PR["peer request"] --> MIN
-        CAP["peer's SNR report of MY signal<br/>(clamps instantly when peer goes deaf)"] --> MIN
+        CAP["peer's SNR report of MY signal<br/>(applies only when the peer HAS one;<br/>absence is not a bad channel)"] --> MIN
         OFF["learned per-rung offsets<br/>loss +0.7 dB / success −0.15 dB"] --> CAP
         MIN["min(...)"] --> LOSS["loss fallback<br/>2 losses → −2 rungs<br/>4 losses → rung 0"] --> RUNG["TX rung"]
         STALE["request age > 90 s<br/>→ decay"] --> LOSS

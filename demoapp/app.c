@@ -294,6 +294,17 @@ static const char *snr_str(char *buf, size_t n, double db, const char *none)
 /* Die temperature from the board's own sensor, or "n/a": the status
  * frame carries UP_TEMP_NONE when there is no reading, and 0 C is a
  * real temperature that must not stand in for a missing one. */
+/* the transmit-rung cap, or "none" when the peer has reported no
+ * measurement for it to be computed from */
+static const char *cap_str(char *buf, size_t n, int cap)
+{
+    if (cap < 0)
+        snprintf(buf, n, "none");
+    else
+        snprintf(buf, n, "%d", cap);
+    return buf;
+}
+
 static const char *temp_str(char *buf, size_t n, int q8)
 {
     if (q8 == UP_TEMP_NONE)
@@ -414,10 +425,11 @@ static void diag_print(void *ctx, int ev, int a, int b, int c, int d,
         break;
     case ST_EV_RUNG: {
         link_diag_t ld;
-        char pb[32], rb[16];
+        char pb[32], rb[16], cb[16];
         ctl_diag(&g_st.ctl, t, &ld);
-        printf(" %d -> %d (losses=%d cap=%d peer_req=%d peer_snr=%s "
-               "req_age=%s)", a, b, c, d, ld.peer_req,
+        printf(" %d -> %d (losses=%d cap=%s peer_req=%d peer_snr=%s "
+               "req_age=%s)", a, b, c,
+               cap_str(cb, sizeof(cb), d), ld.peer_req,
                snr_str(pb, sizeof(pb), ld.peer_report_db, "not reported"),
                age_str(rb, sizeof(rb), ld.req_age_s));
         break;
@@ -473,13 +485,14 @@ static void show_status(void)
            station_pool_refused());
     {
         link_diag_t ld;
-        char pb[32], mb[32], rb[16], xb[16];
+        char pb[32], mb[32], rb[16], xb[16], cb[16];
         ctl_diag(&g_st.ctl, now_t(), &ld);
-        printf("  link ctl: rung=%d cap=%d peer_req=%d my_req=%d "
+        printf("  link ctl: rung=%d cap=%s peer_req=%d my_req=%d "
                "losses=%d\n"
                "            peer_snr=%s my_snr=%s "
                "req_age=%s rx_age=%s offset=%.1fdB\n",
-               ld.rung, ld.cap, ld.peer_req, ld.my_req, ld.losses,
+               ld.rung, cap_str(cb, sizeof(cb), ld.cap), ld.peer_req,
+               ld.my_req, ld.losses,
                snr_str(pb, sizeof(pb), ld.peer_report_db, "not reported"),
                snr_str(mb, sizeof(mb), ld.filtered_snr, "none in 60 s"),
                age_str(rb, sizeof(rb), ld.req_age_s),
