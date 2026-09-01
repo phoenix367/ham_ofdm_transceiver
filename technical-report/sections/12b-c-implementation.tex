@@ -2419,6 +2419,88 @@ second, 51-byte frame followed in under 15\,s.  Thirty-one checks cover
 the codec and every mapping decision without hardware, the two probe
 flavours among them.
 
+\subsection{Carrying IP, and Whose Timers Are Wrong}
+\label{sec:cport_iptun}
+
+Running IP over the KISS path fails for a reason that has nothing to do
+with the radio: the kernel's AX.25 stack is not network-namespace
+aware, and its receive handler discards frames arriving on a device
+outside the initial namespace.  With the far interface in a namespace,
+its device counted 82 received packets while the stack reported
+\texttt{0 ICMP messages received} --- the frames crossed the link
+correctly and died one layer above it.  That rules out containers as
+well, a container's isolation being a network namespace, and leaves a
+second machine.
+
+A TUN device has no such restriction, so \texttt{host/ip\_tun.py}
+carries IP packets directly as station messages and both ends run on
+one host.  It works: pings answered with a 3.8\,s round trip at
+rung~12, no loss, and a 4\,kB TCP transfer arriving byte-identical.
+The interesting part is what the throughput did on the way there.
+
+\begin{table}[H]
+    \centering
+    \caption{The same 4\,kB TCP transfer under four queueing policies.
+             Every figure is measured on the two-board stand; the link
+             itself was unchanged throughout.}
+    \label{tab:iptun}
+    \small
+    \begin{tabular}{@{}lllp{5.4cm}@{}}
+    \toprule
+    \textbf{Policy} & \textbf{Ping} & \textbf{TCP} & \textbf{Shape} \\
+    \midrule
+    read, drop what will not fit & --- & 8.8\,B/s &
+    12 application drops per kB, a 77\,s tail \\
+    queue 8 packets & 117\,s & 44.2\,B/s & bufferbloat \\
+    queue by time (1--2 packets) & 3.8\,s & 21.1\,B/s &
+    a 130\,s stall mid-transfer \\
+    \textbf{fq\_codel tuned to the link} & \textbf{3.8\,s} &
+    \textbf{43.7\,B/s} & smooth, 948\,B per 10\,s \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Three defects, and all three are the same defect.
+
+The first was mine: the tunnel read every packet and discarded what
+would not fit.  That destroys the interface queue and hands TCP a loss
+for every packet of its opening burst --- Linux starts with ten ---
+which TCP reads as congestion and answers with a collapsed window and a
+multi-second retransmit timeout.  Not reading while the board is busy
+leaves the packets where the kernel can apply backpressure properly,
+and took the transfer from 8.8 to 44\,B/s with no drops at all.
+
+The second was the queue depth.  Eight packets was chosen as ``about a
+minute of air at rung~12'' and then met rung~4, where every packet is
+four times slower: round trips of 117\,s, all of it queueing.  A queue
+has to be sized in \emph{time}, and the useful depth here is tiny ---
+this link's bandwidth-delay product is about 440\,bytes, less than one
+packet --- so anything beyond a couple of packets buys latency and no
+throughput.
+
+The third was invisible, and is the one worth carrying away.  Shortening
+the queue fixed the latency and cost half the throughput, with a
+130-second hole in the middle of a transfer and \emph{zero drops
+recorded at either end}.  Zero drops was the clue: the losses were the
+qdisc's.  The kernel's default is \texttt{fq\_codel} with a 5\,ms
+target and a 100\,ms interval, sized for links where a packet takes
+microseconds; here a packet is 8.6\,\emph{seconds} of air, so CoDel
+sees a standing queue the instant anything is buffered and drops it.
+It had been doing so through every measurement, and no queue length
+could have fixed it.  Tuned to the link --- a target that must exceed
+one packet's serialisation time, 10.3\,s at rung~12 against 8.6\,s of
+air --- CoDel does what it is for, dropping only when delay persists,
+and both properties arrive together.
+
+The pattern is the same one Section~\ref{sec:cport_hosttiming}
+describes on the USB side, where every host timeout was shorter than
+the device's 2283\,ms decode.  A link whose frames take seconds
+invalidates timing constants three orders of magnitude away from it,
+in code nobody thinks of as part of the radio: a USB write deadline, a
+TCP retransmit timer, an active queue manager's target delay.  Each was
+chosen sensibly for the hardware its author had in mind, and each is
+wrong here in the same direction.
+
 \subsection{From Simulation to a Radio}
 \label{sec:cport_sdr}
 
