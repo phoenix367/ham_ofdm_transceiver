@@ -207,6 +207,10 @@ typedef struct {
     int tx_frames, rx_frames, retransmissions, timeouts, harq_combines,
         afc_trims;
     int last_rung;
+    /* the window a burst actually engaged with, kept as a STATISTIC:
+     * btx.win itself is dropped when the burst disengages, and reading
+     * it afterwards only worked while that state was leaking */
+    int last_burst_win;
 } station_stats_t;
 
 typedef struct {
@@ -356,6 +360,7 @@ void station_delivered_reset(station_t *st);
 /* Drop the bulk message in flight together with its burst state, and
  * return its storage. A transfer can be abandoned from outside: an
  * operator cancel, or setting up a fresh one over the top. */
+void msg_release_for_test(station_t *st);   /* tests only */
 void station_abort_bulk(station_t *st);
 
 /* Sizing diagnostics for ST_POOL_SLOTS, process-wide across every

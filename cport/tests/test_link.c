@@ -657,6 +657,66 @@ static void caps_case(int a_caps, int b_caps, int b_answers,
  * with nothing attached to either board -- an ack-only frame every air
  * time, forever, because the kick survived a caps_probe_wanted() that
  * declines on its first line for a peer already known. */
+/* The burst state must not outlive the message it is sending.
+ * msg_data() used to return pool[-1] for a released slot and the burst
+ * paths memcpy'd it into a packet -- an out-of-bounds read that went on
+ * the air (ASan-reproduced from ordinary traffic: a data frame, an ack,
+ * a partial bitmap). */
+static void test_burst_outlives_message(void)
+{
+    station_phy_t p = { 0, phy_build, phy_receive, phy_build_burst,
+                        phy_receive_burst };
+    static station_t S;
+    static int16_t out[600000];
+    static uint8_t msg[250];
+    int i, n;
+    double t = 100.0;
+
+    for (i = 0; i < (int)sizeof(msg); i++)
+        msg[i] = (uint8_t)i;
+
+    /* abort while a burst is engaged: every field must go, not just
+     * .active -- burst_stream_ready() does not test .active */
+    station_init(&S, &p, 31337);
+    S.caps_disabled = 1;          /* drive this station by hand: a
+                                   * stranger peer would get a probe
+                                   * before any burst */
+    S.burst_window = 8;
+    S.burst_stream = 1;
+    S.ctl.peer_req = 10;
+    S.ctl.peer_report_db = 20.0;
+    S.ctl.peer_req_time = t;
+    station_submit(&S, msg, (int)sizeof(msg), QOS_BULK);
+    n = station_poll_tx(&S, t, 0, out, (int)(sizeof(out) / sizeof(out[0])));
+    check("a burst engages", n > 0 && S.btx.active && S.btx.window_left >= 0);
+    check("and the engaged window is recorded as a statistic",
+          S.stats.last_burst_win > 0);
+    station_abort_bulk(&S);
+    check("abort drops the WHOLE burst state, not just the flag",
+          !S.btx.active && S.btx.window_left == 0 && !S.btx.stream_ok);
+    check("abort also drops the fragment pointing at the freed message",
+          !S.pending.active);
+    check("and the message's slot went back", S.cur_bulk.slot < 0
+          && S.pool_used == 0);
+
+    /* a released message under an engaged burst must produce silence,
+     * not a read from pool[-1] */
+    station_init(&S, &p, 31337);
+    S.caps_disabled = 1;
+    S.burst_window = 8;
+    S.ctl.peer_req = 10;
+    S.ctl.peer_report_db = 20.0;
+    S.ctl.peer_req_time = t;
+    station_submit(&S, msg, (int)sizeof(msg), QOS_BULK);
+    station_poll_tx(&S, t, 0, out, (int)(sizeof(out) / sizeof(out[0])));
+    msg_release_for_test(&S);          /* what the legacy ack path does */
+    S.btx.window_left = S.btx.win;     /* what a partial bitmap does */
+    n = station_poll_tx(&S, t + 1.0, 0, out,
+                        (int)(sizeof(out) / sizeof(out[0])));
+    check("a burst whose message was released transmits nothing", n == 0);
+    check("and disengages rather than trying again", !S.btx.active);
+}
+
 static void test_caps_kick_orphan(void)
 {
     station_phy_t p = { 0, phy_build, phy_receive, phy_build_burst,
@@ -755,8 +815,12 @@ static void test_caps(void)
         check("caps: declared knobs arrive (win 4, rung ceiling 9)",
               A2.peer.valid && A2.peer.win_max == 4
               && A2.peer.max_rung == 9);
+        /* the engaged window, from the statistic: btx.win itself is
+         * dropped when the burst disengages, and asserting on it after
+         * the transfer only worked while that state leaked */
         check("caps: the window respects the peer's declared ceiling",
-              B2.delivered_n >= 1 && A2.btx.win > 0 && A2.btx.win <= 4);
+              B2.delivered_n >= 1 && A2.stats.last_burst_win > 0
+              && A2.stats.last_burst_win <= 4);
         check("caps: the tx rung never exceeds the peer's rung ceiling",
               A2.stats.last_rung <= 9 && A2.stats.last_rung > 0);
     }
@@ -1032,6 +1096,7 @@ int main(void)
     test_burst_stream();
     test_caps();
     test_caps_kick_orphan();
+    test_burst_outlives_message();
     test_rto();
     test_burst_window();
     test_peer_stream_memory();

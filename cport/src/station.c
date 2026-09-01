@@ -152,10 +152,32 @@ static void pool_free(station_t *st, int s)
     st->pool_used--;
 }
 
-/* payload of a held message */
+/* payload of a held message, or NULL once its slot has gone back.
+ *
+ * It used to return st->pool[-1] for a released message, and the burst
+ * transmit paths memcpy'd from it straight into a packet -- an
+ * out-of-bounds READ that went on the air. At the default ST_MSG_MAX
+ * the underflow lands inside link_ctl_t and is invisible; at the
+ * shipping 3328/4096 it is 3 kB outside the object. Reproduced under
+ * ASan from ordinary wire traffic (a data frame, an ack, a partial
+ * bitmap). The callers must check. */
 static uint8_t *msg_data(station_t *st, const st_msg_t *m)
 {
-    return st->pool[m->slot];
+    return m->slot >= 0 ? st->pool[m->slot] : 0;
+}
+
+/* Drop the burst state as a UNIT.
+ *
+ * Clearing only .active left window_left, stream_ok and the bitmaps
+ * behind, and burst_stream_ready() does not test .active -- so the next
+ * poll re-entered burst_send_stream against a message that had already
+ * been released. The transfer id survives so a new transfer does not
+ * reuse the id the peer still has state for. */
+static void burst_disengage(station_t *st)
+{
+    int id = st->btx.id;
+    memset(&st->btx, 0, sizeof(st->btx));
+    st->btx.id = id;
 }
 
 /* finish with a message and give its slot back */
@@ -186,9 +208,20 @@ void station_delivered_reset(station_t *st)
     st->delivered_n = 0;
 }
 
+/* what the legacy ack path does to a message a burst is still sending;
+ * exposed for the regression test, which cannot reach it any other way */
+void msg_release_for_test(station_t *st)
+{
+    msg_release(st, &st->cur_bulk);
+}
+
 void station_abort_bulk(station_t *st)
 {
-    st->btx.active = 0;
+    burst_disengage(st);
+    /* the in-flight legacy fragment refers to the message being freed:
+     * left active, its ack would advance a dead struct and release a
+     * slot that a later message may already own */
+    st->pending.active = 0;
     msg_release(st, &st->cur_bulk);
 }
 
@@ -665,6 +698,7 @@ static int burst_try_engage(station_t *st, int rung_idx)
                                   st->btx.win), 0.0);
     }
     st->btx.window_left = st->btx.win;
+    st->stats.last_burst_win = st->btx.win;
     st->btx.cursor = 0;
     st->btx.miss = 0;
     {   /* a peer that has shown it cannot follow a stream is not asked
@@ -735,7 +769,8 @@ static int payload_cap(int rung_idx, double max_air_s)
  * packet format byte-identical. */
 static int burst_stream_ready(const station_t *st)
 {
-    return st->burst_stream && st->btx.stream_ok && st->phy.build_burst
+    return st->burst_stream && st->btx.active && st->btx.stream_ok
+           && st->phy.build_burst
            && st->btx.window_left >= BURST_STREAM_MIN;
 }
 
@@ -826,8 +861,12 @@ static int burst_send_stream(station_t *st, int rung_idx, int16_t *out,
         payload[1] = (uint8_t)((k == count - 1 || k == 0 ? 0x80 : 0)
                                | st->btx.n);
         payload[2] = (uint8_t)fs;
-        memcpy(payload + BURST_SUBHDR, msg_data(st, &st->cur_bulk) + idx * fs,
-               (size_t)fs);
+        {
+            const uint8_t *src = msg_data(st, &st->cur_bulk);
+            if (!src)
+                return 0;            /* released under us: send nothing */
+            memcpy(payload + BURST_SUBHDR, src + idx * fs, (size_t)fs);
+        }
         n = data_encode(lc_pack(&lc), payload, BURST_SUBHDR + fs,
                         blocks + (size_t)k * pkt_n);
         if (n != pkt_n)
@@ -1116,7 +1155,7 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
              * rare and correctness on the air beats resend savings. */
             diag(st, ST_EV_BURST_REFRAG, st->btx.frag_size, rung_idx,
                  st->btx.n, 0, t);
-            st->btx.active = 0;
+            burst_disengage(st);
         } else {
             flen = idx == st->btx.n - 1 ? st->btx.last_len
                                         : st->btx.frag_size;
@@ -1125,9 +1164,15 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
             payload[0] = (uint8_t)idx;
             payload[1] = (uint8_t)((ack_req ? 0x80 : 0) | st->btx.n);
             payload[2] = (uint8_t)st->btx.frag_size;
-            memcpy(payload + BURST_SUBHDR,
-                   msg_data(st, &st->cur_bulk) + idx * st->btx.frag_size,
-                   (size_t)flen);
+            {
+                const uint8_t *src = msg_data(st, &st->cur_bulk);
+                if (!src) {          /* released under us */
+                    burst_disengage(st);
+                    return 0;
+                }
+                memcpy(payload + BURST_SUBHDR,
+                       src + idx * st->btx.frag_size, (size_t)flen);
+            }
             lc.seq = st->btx.id;
             lc.ack = st->last_rx_seq >= 0 ? st->last_rx_seq : 0;
             lc.req_rung = st_rx_request(st, t);
@@ -1479,7 +1524,7 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
             st->btx.miss = 0;
             if (burst_all_acked(st)) {
                 diag(st, ST_EV_BURST_DONE, 0, st->btx.id, 0, 0, t);
-                st->btx.active = 0;
+                burst_disengage(st);
                 msg_release(st, &st->cur_bulk);
                 ctl_on_ack(&st->ctl);
                 if (st->last_tx_rung >= 0)

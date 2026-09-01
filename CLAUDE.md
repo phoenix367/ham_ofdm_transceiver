@@ -750,6 +750,22 @@ Cross-module invariants that are easy to break:
   the same figure that sizes the write timeout. `host/_read_serial` and
   `usb_host.c`'s loop are the two places; `host/test_modem.py` pins the
   behaviour without hardware.
+- BURST STATE MUST NOT OUTLIVE ITS MESSAGE. `msg_data()` returned
+  `st->pool[m->slot]` unguarded, and `slot` is -1 after `msg_release`:
+  the burst transmit paths then memcpy'd `pool[-1]` into a packet and
+  TRANSMITTED it. At the default `ST_MSG_MAX` 256 the underflow lands
+  inside `link_ctl_t` (contained UB, invisible to ASan); at the
+  shipping 3328/4096 it is ~3 kB outside the object. Reproduced under
+  ASan from ordinary wire traffic. Three routes in, all now closed:
+  clearing only `btx.active` left `window_left`/`stream_ok`/bitmaps
+  behind (`burst_stream_ready()` does not test `.active`), so
+  `station_abort_bulk` and the REFRAG path both go through
+  `burst_disengage()`, which drops the struct as a unit and keeps only
+  the transfer id; `msg_data` returns NULL for a released slot and both
+  readers check it. `station_abort_bulk` also clears `pending`, which
+  pointed at the message it frees. The engaged window is now recorded
+  in `stats.last_burst_win` -- a test asserting on `btx.win` after a
+  transfer was reading state that only survived because it leaked.
 - `poll_tx`'s early-out gate and the paths behind it must AGREE. A flag
   that gets past `if (!owes_ack && !station_has_traffic && !caps_kick
   && !caps_reply_due) return 0;` but that no later block acts on leaves
