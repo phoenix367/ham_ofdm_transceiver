@@ -194,8 +194,17 @@ plain, and only rejects genuine other-port traffic.
 TXDELAY/P/SlotTime/TXtail/FullDuplex/SetHardware are accepted and
 ignored: the station's carrier sense and turnaround are measured, not
 configured from the host. `host/test_kiss.py` covers the codec and
-every mapping decision without hardware; measured end to end, a 48-byte
-UI frame crossed the two boards byte-identically in 3.4 s at rung 12.
+every mapping decision without hardware.
+
+Measured end to end, two ways. Through a TCP KISS client: a 48-byte
+AX.25 UI frame crossed the two boards byte-identically in 3.4 s, 1.4 s
+of it air at rung 12. Through the real Linux stack — two bridges, two
+`kissattach`, `ax0` and `ax1` — a `beacon` on port 1 arrives on the
+peer interface, including **the first frame after an attach**, which is
+the mkiss probe case above; a second, 51-byte frame followed in under
+15 s. (The interface byte counters differ by a few bytes between tx and
+rx: kernel accounting around the KISS framing, not the payload —
+byte-exactness is what the TCP measurement pins.)
 
 ## `host/ofdm_modem.py` — the Python host library
 
