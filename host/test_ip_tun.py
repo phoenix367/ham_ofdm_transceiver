@@ -28,6 +28,7 @@ class Args:
     qos = 2
     max_air = 45.0
     msg_max = 3328
+    mtu = 1000
     verbose = False
 
 
@@ -86,6 +87,27 @@ def test_pacing():
     check("and traffic resumes", len(t.m.submitted) == 3)
 
 
+def test_read_gating():
+    """The loop must stop READING when the board is busy, so packets
+    wait in the kernel's queue instead of being destroyed here."""
+    t = tunnel()
+    check("an idle board: keep reading", t.wants_read() is True)
+
+    t = tunnel(queues=(0, 0, 2))
+    check("a full board queue: stop reading, let the kernel hold them",
+          t.wants_read() is False)
+    check("and that is congestion, not the ladder", t.stuck is False)
+
+    t = tunnel(rung=0)
+    check("a rung too low for an MTU-sized packet: stop reading",
+          t.wants_read() is False)
+    check("and that IS the ladder, so it will probe", t.stuck is True)
+
+    t = tunnel(rung=12)
+    t.inflight = 2
+    check("in-flight credit also stops the reading", t.wants_read() is False)
+
+
 def test_probe():
     t = tunnel(rung=0)
     check("no probe while nothing is blocked", not t.probe_due(1000.0))
@@ -114,6 +136,7 @@ def test_receive():
 def main():
     test_send_and_drop()
     test_pacing()
+    test_read_gating()
     test_probe()
     test_receive()
     print(f"\n{PASS} passed, {FAIL} failed")

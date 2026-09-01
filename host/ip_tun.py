@@ -95,6 +95,30 @@ class Tunnel:
         depth = q[min(self.args.qos, 2)] if q else 0
         return depth + self.inflight >= QUEUE_HIGH
 
+    def wants_read(self):
+        """Should the tunnel take another packet from the kernel now?
+
+        NOT reading is the whole trick. The first version read every
+        packet and discarded what would not fit, which throws away the
+        kernel's queue and hands TCP a loss for every packet of its
+        opening burst -- Linux starts with ten. Measured: 1 kB took
+        116.8 s (8.8 B/s) with 5 and 7 application drops, most of them
+        in the first second, and the last segment cost 77 s of
+        retransmit backoff.
+
+        Leaving the packets in the interface queue instead gives TCP
+        what it expects: backpressure, and AQM drops from the qdisc
+        rather than a black hole. Bound the queue (txqueuelen) so this
+        does not become bufferbloat.
+        """
+        if self.board_full():
+            self.stuck = False
+            return False
+        if self.air_time(self.args.mtu) > self.args.max_air:
+            self.stuck = True          # the ladder, not congestion
+            return False
+        return True
+
     # -- the two directions --------------------------------------------
     def on_packet(self, pkt):
         """An IP packet from the kernel, heading for the radio.
@@ -112,6 +136,8 @@ class Tunnel:
             self.say(f"dropped a {len(pkt)} B packet: over the board's "
                      f"{self.args.msg_max} B message limit (lower the MTU)")
             return
+        # Defensive only: the loop does not read while these hold, so
+        # reaching here means the situation changed under us.
         if self.board_full():
             self.dropped += 1
             self.stuck = False
@@ -120,7 +146,7 @@ class Tunnel:
         air = self.air_time(len(pkt))
         if air > self.args.max_air:
             self.dropped += 1
-            self.stuck = True      # the LADDER is the problem: probe
+            self.stuck = True
             self.note_drops()
             return
         try:
@@ -207,6 +233,9 @@ def main():
                     help="bigger is more efficient and slower per packet: "
                          "1000 B is ~9 s of air at rung 12 (default 1000)")
     ap.add_argument("--qos", type=int, default=2, choices=(0, 1, 2))
+    ap.add_argument("--qlen", type=int, default=8,
+                    help="interface queue, in packets: the backpressure "
+                         "TCP needs, bounded so it is not bufferbloat")
     ap.add_argument("--max-air", type=float, default=45.0,
                     help="drop packets that would take longer than this")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -237,6 +266,10 @@ def main():
     fd = tun_open(args.dev)
     ip("addr", "add", args.local, "dev", args.dev)
     ip("link", "set", args.dev, "mtu", str(args.mtu), "up")
+    # Eight packets is about a minute of air at rung 12 -- enough for
+    # TCP to keep a window in flight, short enough that a queued packet
+    # is still worth delivering when it reaches the front.
+    ip("link", "set", args.dev, "txqueuelen", str(args.qlen))
     if args.peer:
         # explicit host route: with both ends on one host in different
         # namespaces, this is what sends the packet to the radio
@@ -265,7 +298,11 @@ def main():
                 except USBTimeoutError:
                     pass
                 last_ping = now
-            r, _, _ = select.select([fd], [], [], 0.05)
+            # Only offer the tunnel fd to select when the board can
+            # take another packet: unread packets wait in the kernel's
+            # queue, where TCP can see the backpressure.
+            watch = [fd] if t.wants_read() else []
+            r, _, _ = select.select(watch, [], [], 0.05)
             if r:
                 t.on_packet(os.read(fd, 65535))
             for kind, payload in modem.events(timeout=0.05, poke=False):
