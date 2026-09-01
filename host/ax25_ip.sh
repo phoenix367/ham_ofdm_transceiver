@@ -4,6 +4,19 @@
 # Works on the two AX.25 interfaces that a pair of kiss_bridge.py +
 # kissattach sessions creates (see docs/drivers.md).
 #
+# READ THIS FIRST -- THE NAMESPACE DOES NOT WORK FOR AX.25
+#   Measured on this stand: with the remote interface in a namespace,
+#   frames arrive (the device's rx counter climbs) and the IP stack
+#   never sees one -- "0 ICMP messages received" against 82 received
+#   packets. AX.25 is not network-namespace aware; its receive handler
+#   drops frames arriving on a device outside the initial namespace, so
+#   nothing is ever answered.
+#
+#   There is no host-local way around it. To run IP over this link, put
+#   one end on a SECOND MACHINE (or a VM with the board passed through).
+#   `up` still configures both ends and is useful for the addressing and
+#   the ARP entries; just do not expect a reply from the namespace side.
+#
 # THE TRAP THIS EXISTS FOR
 #   Both interfaces live on the same host, so the kernel routes between
 #   their addresses through loopback and never touches the radio: a ping

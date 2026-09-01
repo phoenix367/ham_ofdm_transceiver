@@ -193,13 +193,16 @@ check)
         echo "          -s <local ip> <local callsign>"
         echo "     or just re-run: sudo ./ax25_ip.sh up)"; }
     echo "does the far side's IP stack see them?"
+    echo "  (frames counted by the interface but 0 ICMP received means"
+    echo "   they are dropped BETWEEN the device and IP -- which is what"
+    echo "   a network namespace does to AX.25: the protocol is not"
+    echo "   namespace-aware and its receive handler discards frames"
+    echo "   arriving on a device outside the initial namespace)"
     ip netns exec "$NS" netstat -s 2>/dev/null \
         | grep -iE "echo request|echo replies|ICMP messages received" \
         | sed 's/^/  /' || echo "  (netstat unavailable)"
-    echo "  interface drops/errors:"
-    ip netns exec "$NS" ip -s -s link show "$REMOTE_IF" \
-        | awk '/RX:/{getline h; getline v; print "    rx", v}
-               /TX:/{getline h; getline v; print "    tx", v}'
+    echo "  interface totals (packets bytes):"
+    echo "    rx $(counters "$REMOTE_IF" RX "$NS")   tx $(counters "$REMOTE_IF" TX "$NS")"
     echo "counters:"
     echo "  $LOCAL_IF  tx $(counters "$LOCAL_IF" TX)   rx $(counters "$LOCAL_IF" RX)"
     echo "  $REMOTE_IF  tx $(counters "$REMOTE_IF" TX "$NS")   rx $(counters "$REMOTE_IF" RX "$NS")"

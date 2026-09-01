@@ -199,15 +199,29 @@ sudo ./ax25_ip.sh up        # addresses, namespace, static ARP
 sudo ./ax25_ip.sh down
 ```
 
-**The trap it exists for:** both interfaces are on one host, so the
-kernel routes between their addresses through loopback and never
-touches the radio — a ping that "succeeds" in 40 µs while the tx
-counter never moves. The script puts the remote interface in a network
-namespace, which is what makes it a second host; `status` prints the
-counters, because those, not the ping, are what prove the traffic was
-real. Teardown returns the interface to the root namespace *before*
-deleting the namespace, since deleting one destroys the devices left
-inside it and this one belongs to a running `kissattach`.
+**Two traps, and the second one has no host-local fix.**
+
+Both interfaces are on one host, so the kernel routes between their
+addresses through loopback and never touches the radio — a ping that
+"succeeds" in 40 µs while the tx counter never moves. That is why the
+script puts the remote interface in a network namespace, and why
+`status` prints the counters: those, not the ping, prove the traffic
+was real.
+
+But **AX.25 is not network-namespace aware**. Measured here: with the
+remote interface in a namespace, its device counted 82 received packets
+while the IP stack reported `0 ICMP messages received`. The protocol's
+receive handler drops frames arriving on a device outside the initial
+namespace, so nothing is ever answered — the packets cross the radio
+correctly and die one layer above it. `measure_ax25.sh check` prints
+exactly that pair of numbers, which is what identifies it.
+
+So IP over this link needs **one end on a second machine** (or a VM
+with a board passed through). `up` is still useful for the addressing
+and the ARP entries, and teardown returns the interface to the root
+namespace *before* deleting the namespace, since deleting one destroys
+the devices left inside it and this one belongs to a running
+`kissattach`.
 
 Defaults are `10.73.0.1/24` and `.2` (not 44-net, which is really
 allocated) at MTU 200, matching the `paclen` advice above so one packet
