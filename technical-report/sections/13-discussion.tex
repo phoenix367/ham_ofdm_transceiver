@@ -46,7 +46,11 @@ without LLR recalibration (the map is BPSK-trained); a
 modulation-specific map is straightforward but unmeasured.  The LDPC
 matrix is a from-scratch IRA construction, not a standards matrix.
 The project also has no over-the-air validation yet --- the WAV
-recordings are transceiver-ready precisely to enable it.
+recordings are transceiver-ready precisely to enable it.  The voice
+evaluation of \S\ref{sec:cport_voice} is bounded the same way: the
+codec's catastrophic-failure rate was measured on read speech, not on
+shack audio, and one non-English trial is an anecdote rather than a
+rate.
 
 \subsection{Future Work}
 
@@ -57,6 +61,8 @@ slew-limited tracker back to the float model (it is measurably
 better); pilot reduction or 2-D channel estimation to reclaim carrier
 capacity; per-carrier bit-loading on the measured channel estimate;
 frame aggregation in the ARQ to amortise preamble overhead at high
-rungs; a 46.875\,Hz-spacing variant for very stable channels; and
+rungs; a host-side voice mode over the 250\,bit/s codec evaluated in
+\S\ref{sec:cport_voice}, whose remaining question is a failure rate
+rather than a bitrate; a 46.875\,Hz-spacing variant for very stable channels; and
 shrinking EXTREME's frequency-search range after AFC netting
 converges (compute reduction on embedded targets).

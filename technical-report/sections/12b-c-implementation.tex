@@ -2838,3 +2838,261 @@ found only two of the three frames, because it advanced four seconds
 after each hit while the demodulator returns one frame per window ---
 the miss was in the measurement harness, not the link, which is exactly
 the kind of result worth re-checking before blaming the hardware.
+
+\subsection{Voice at 250 Bits per Second}
+\label{sec:cport_voice}
+
+Every payload so far has been data.  Voice was never plausible on this
+link: the classic amateur speech codecs start around 700\,bit/s
+(Codec2 700C, what FreeDV uses on HF), and rung~12 carries a measured
+102\,B/s $=$ 816\,bit/s of \emph{goodput}, leaving no room for framing,
+acknowledgements or a fade.  Neural codecs have since moved the floor.
+LSCodec-25\,Hz\footnote{Guo \emph{et al.}, ``LSCodec: Low-Bitrate and
+Speaker-Decoupled Discrete Speech Codec'', Interspeech 2025;
+inference code and weights at
+\texttt{github.com/X-LANCE/LSCodec-Inference}, MIT licensed.}
+emits 25 tokens per second, each a 10-bit index into a 1024-entry
+codebook: \textbf{250\,bit/s}, or 31.25\,B/s.  That is a quarter of
+what the top rung carries.
+
+This subsection reports an evaluation, not an implementation.  Nothing
+in \texttt{cport/} changed, and the conclusion is that nothing should
+--- but the measurements below decide what a voice mode would cost and
+which of its problems are fixable.
+
+\subsubsection{The link is not the constraint}
+
+At 31.25\,B/s one station message (\texttt{ST\_MSG\_MAX} 3328) holds
+\textbf{106 seconds of speech}, and the streaming burst machinery
+already carries it: a 200-byte fragment is exactly 160 tokens, or
+6.4\,s.  Table~\ref{tab:voice_rate} gives the delivery ratio against
+the ladder.
+
+\begin{table}[H]
+    \centering
+    \caption{Speech delivered per second of air, from the streamed
+             goodput of each rung.  Real time is the $1.00\times$ line;
+             the modem's headline sensitivity, EXTREME at
+             $-17.9$\,dB, is unusable for voice by three orders of
+             magnitude.}
+    \label{tab:voice_rate}
+    \small
+    \begin{tabular}{@{}lrrrr@{}}
+    \toprule
+    \textbf{Rung} & \textbf{Sens.\ (dB)} & \textbf{Goodput} &
+    \textbf{106\,s memo} & \textbf{Speech/s of air} \\
+    \midrule
+    0 (EXTREME)  & $-17.9$ &   1.0\,B/s & 3465\,s & $0.03\times$ \\
+    4 (NORMAL)   & $-7.6$  &  14.5\,B/s &  230\,s & $0.46\times$ \\
+    7            & $-5.3$  &  43.5\,B/s &   77\,s & $1.39\times$ \\
+    10           & $+0.7$  &  86.9\,B/s &   38\,s & $2.78\times$ \\
+    \textbf{12}  & $+4.7$  & \textbf{130\,B/s} & \textbf{26\,s} &
+    $\mathbf{4.17\times}$ \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Voice runs faster than real time from rung~7 upward and is
+store-and-forward below it.  The cost is that the link's whole
+sensitivity advantage is forfeited: at the EXTREME bootstrap rung a
+106-second memo needs an hour of air.  A voice mode is a
+good-conditions mode.
+
+Compute is likewise not the constraint, provided it stays on the host.
+Measured on the demonstration laptop (Intel i5-8300H, CPU only), the
+17.5\,M-parameter encoder runs at $14.3\times$ real time on
+\emph{one} core and $31\times$ on four; the 31.3\,M-parameter vocoder
+decodes at roughly $3\times$.  Encoding a 106-second memo takes
+3.4--7.4\,s against 26\,s of air, so it overlaps keying.  Memory is the
+awkward figure: a one-shot encode costs about 14\,MB per second of
+audio, so a full-length memo peaks near 2\,GB.  None of this belongs on
+the STM32 --- 48\,M parameters of PyTorch is four orders of magnitude
+beyond the part --- which places a voice mode exactly where KISS
+(\S\ref{sec:cport_kiss}) and the IP tunnel (\S\ref{sec:cport_iptun})
+already are: a host program above an unchanged modem.
+
+\subsubsection{Two findings that are not about the bitrate}
+
+\paragraph{The codec is domain-sensitive, and fails abruptly.}
+Reconstruction quality was measured as ASR word error rate against
+ground-truth transcripts, using a CTC recogniser
+(\texttt{wav2vec2-large-960h-lv60-self}) rather than an
+attention-decoder model, because the latter hallucinates on damaged
+audio and scores it as total loss.  The result depends on the corpus
+far more than on anything in the codec.
+
+\begin{table}[H]
+    \centering
+    \caption{The same weights, prompt scheme and recogniser on two
+             corpora, 16 and 15 utterances.  LibriTTS is what LSCodec
+             was trained on; LibriSpeech is ordinary read speech from
+             the same books, recorded and processed differently.}
+    \label{tab:voice_domain}
+    \small
+    \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    & \textbf{LibriTTS} & \textbf{LibriSpeech} & \textbf{Paper} \\
+    & \emph{(in domain)} & \emph{(out of domain)} & \emph{(reported)} \\
+    \midrule
+    WER, original audio      & 8.28\,\% & 1.01\,\%  & 1.20\,\% \\
+    WER, after 250\,bit/s    & 10.83\,\% & 22.64\,\% & 5.46\,\% \\
+    \textbf{Added by codec}  & \textbf{+2.6\,pts} & \textbf{+21.6\,pts}
+                             & +4.3\,pts \\
+    Speaker similarity       & 0.875 & 0.864 & 0.945 \\
+    \textbf{Utterances destroyed} & \textbf{0 of 15} & \textbf{3 of 16}
+                             & --- \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+On its own corpus the codec costs 2.6 points of word error and loses
+nothing outright, reproducing the paper's 4.3.  Move one corpus away
+and it costs 21.6 points and destroys three utterances in sixteen ---
+not degraded, destroyed: normal duration, normal energy, and a
+transcript reading \texttt{Eatly Waty Ing Ening} where the sentence
+was ``it is obviously unnecessary for us to point out\ldots''.  The
+same failures appear under a second recogniser of a different
+architecture, so this is the audio and not a transcription artefact.
+
+That failure mode is the important one for a radio link, because it is
+\textbf{invisible to every layer below the ear}.  The bitstream is
+valid, the CRC passes, the ARQ is satisfied, the byte count is right,
+and the far operator hears confident nonsense.  Shack audio --- a real
+microphone, a real room, SSB processing --- sits further from LibriTTS
+than LibriSpeech does, so the right planning figure is the middle
+column, not the paper's.
+
+Four candidate explanations were tested and eliminated before the
+corpus one was accepted: a substituted prompt encoder (the official
+WavLM checkpoint's distribution link returns
+\texttt{AuthenticationFailed}; using the authentic weights improved
+speaker similarity 0.793\,$\rightarrow$\,0.845 but moved word error not
+at all), a weak recogniser, a poor prompt choice (giving each utterance
+\emph{itself} as prompt changed nothing), and a feature-layer indexing
+error.  The pipeline reproduces the paper on the paper's own corpus,
+which is what licenses the comparison.
+
+\paragraph{The prompt, not the bitstream, carries the speaker.}
+LSCodec is speaker-\emph{decoupled} by design --- that is how it
+reaches 250\,bit/s.  The tokens carry what was said; a reference prompt
+supplies who says it.  Decoding one byte-identical token stream against
+two different prompts gives two different people:
+
+\begin{table}[H]
+    \centering
+    \caption{Speaker-embedding cosine similarity (Resemblyzer).  The
+             token stream is identical across each speaker's rows; only
+             the prompt differs.}
+    \label{tab:voice_identity}
+    \small
+    \begin{tabular}{@{}lrrl@{}}
+    \toprule
+    \textbf{Reconstruction} & \textbf{vs A} & \textbf{vs B} &
+    \textbf{Outcome} \\
+    \midrule
+    A, matched prompt & 0.845 & 0.429 & still A \\
+    A, crossed prompt & 0.428 & 0.673 & \textbf{became B} \\
+    B, matched prompt & 0.478 & 0.778 & still B \\
+    B, crossed prompt & 0.760 & 0.570 & \textbf{became A} \\
+    \midrule
+    \emph{two unrelated real speakers} & 0.431 & --- & baseline \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+A crossed reconstruction scores 0.428 against its own speaker, landing
+on the 0.431 baseline between two unrelated people.  A wrong prompt
+does not colour the voice, it substitutes a stranger's.  For amateur
+service that is a station-identification question before it is an
+audio-quality one, and it is architectural: no amount of retraining
+makes a speaker-decoupled token carry timbre.
+
+\subsubsection{What enrolment costs}
+
+The prompt is not a fixed-size speaker vector but a \emph{time series}
+of WavLM-Large layer-6 features, $T \times 1024$ float32 at
+$\sim$50\,Hz --- 200\,kB per second of prompt audio, some
+6400$\times$ the speech bitrate.  Sending features over the air is out
+of the question.  Sending prompt \emph{audio} is not, because the
+quality saturates almost immediately.
+
+\begin{table}[H]
+    \centering
+    \caption{Enrolment prompt length against reconstruction speaker
+             similarity, and what each length would cost to transfer.
+             Air time at the measured rung-12 goodput of 102\,B/s.}
+    \label{tab:voice_prompt}
+    \small
+    \begin{tabular}{@{}lrrrr@{}}
+    \toprule
+    \textbf{Prompt} & \textbf{SECS} & \textbf{fp16 features} &
+    \textbf{Opus 16\,kbit/s} & \textbf{Air} \\
+    \midrule
+    0.5\,s & 0.751 &  48\,kB & 1.0\,kB & 10\,s \\
+    1\,s   & 0.826 &  98\,kB & 2.0\,kB & 20\,s \\
+    \textbf{2\,s} & \textbf{0.855} & 198\,kB & \textbf{4.0\,kB} &
+    \textbf{40\,s} \\
+    4\,s   & 0.858 & 398\,kB & 8.0\,kB & 78\,s \\
+    16\,s  & 0.869 & 1592\,kB & 32\,kB & 314\,s \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Two seconds buys 98\,\% of the benefit; eight times more data adds
+0.014.  So enrolment is a one-off exchange of about 4\,kB --- roughly
+40\,s of air, or two station messages --- after which every
+transmission from that station is pure 250\,bit/s payload.  Two
+constraints follow.  The prompt cannot be sent \emph{through} LSCodec,
+which strips exactly the information it needs to carry, so a voice mode
+needs a second, conventional codec for enrolment alone.  And each
+station must hold WavLM-Large (1.2\,GB) locally to turn received
+prompt audio into features; the cached result is about 198\,kB per
+correspondent.
+
+\subsubsection{A non-English trial}
+
+The corpus finding predicts trouble for any operator not speaking
+English audiobook prose, so a real recording was tried: a Russian
+sentence (\emph{Zhili byli ded da baba, i byla u nikh kurochka
+ryaba}), phone-grade, 4.16\,s.  It encoded without complaint ---
+101 tokens, 127\,bytes, 244\,bit/s, 0.97\,s of air at rung~12, 84 of
+1024 codebook entries used.
+
+With the speaker's own prompt, 7 of 10 words survived the round trip
+and character error rate went from 10.6\,\% to 21.3\,\%; a native
+listener judged the result intelligible and recognisable, which is the
+verdict that matters and which the error rate understates.  The three
+words lost were the content words --- \emph{zhili}, \emph{kurochka},
+\emph{ryaba} --- while the function words came through: at 250\,bit/s
+an English-trained codebook has nothing to spend on unfamiliar
+phonetics.  Substituting an English speaker's prompt degraded it
+further (34.0\,\% CER) and dropped the recogniser's confidence that
+the audio was Russian at all from 96\,\% to 37\,\%.  The prompt is
+carrying language as well as timbre, so for a non-English operator a
+wrong prompt costs the voice \emph{and} the accent.
+
+\subsubsection{Where this leaves a voice mode}
+
+The bitrate fits, the compute fits, and the transport needs no change:
+the tokens are opaque bytes of exactly the size the streaming burst
+machinery already moves, and enrolment is two messages.  A voice mode
+would be a host program, like KISS and the IP tunnel, and
+\texttt{cport/} would not change.
+
+What is unresolved is the failure \emph{rate} on real shack audio.
+Three destroyed utterances in sixteen was measured on read speech one
+corpus away from training; the single Russian trial suggests the
+degradation is graceful there, but one utterance is an anecdote and not
+a rate.  That number, and not the bitrate, decides the question ---
+because a transmission that arrives as fluent nonsense with every
+protocol counter healthy is worse than one that fails.
+
+Fine-tuning is the obvious remedy and splits usefully.  The
+vocoder (31.3\,M parameters) can be fine-tuned without touching the
+codebook, which means \textbf{the bitstream does not change}: a peer
+running stock weights still decodes the transmission, a peer with the
+tuned weights decodes it better, and no capability bit or protocol
+revision is involved.  Retraining the encoder and quantiser would
+change what the tokens mean and \emph{is} a protocol change, requiring
+both ends to match.  Neither fixes the identity property, which is the
+architecture working as designed.
