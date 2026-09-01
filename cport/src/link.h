@@ -53,6 +53,10 @@ typedef struct {
     int peer_req;
     double peer_req_time;
     double peer_report_db;
+    /* How much of the inbound silence has already been charged
+     * to my_req: the decay must follow ELAPSED TIME, not the
+     * number of times it is asked (poll_tx asks twice a frame) */
+    double req_decay_t;
     int consecutive_losses;
     double rung_offset_db[16];
 } link_ctl_t;

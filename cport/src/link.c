@@ -54,6 +54,7 @@ void ctl_init(link_ctl_t *c)
     c->last_rx_time = -1e9;
     c->peer_req_time = -1e9;
     c->peer_report_db = LC_SNR_NONE;
+    c->req_decay_t = -1e9;
 }
 
 void ctl_on_rx_frame(link_ctl_t *c, double snr_db, const lc_word_t *lc,
@@ -99,14 +100,29 @@ int ctl_rx_request(link_ctl_t *c, double now)
     double snr;
     int i, best_up = 0;
 
-    if (now - c->last_rx_time > RX_STALE_S) {
-        int decay = (int)floor((now - c->last_rx_time) / RX_STALE_S);
-        c->my_req -= decay;
-        if (c->my_req < 0)
-            c->my_req = 0;
-        c->snr_hist_n = 0; /* stale measurements must not come back */
-        c->snr_hist_head = 0;
-        return c->my_req;
+    /* Decay follows ELAPSED TIME, not the number of calls. This used
+     * to subtract the whole silence every time while leaving
+     * last_rx_time alone, and station_poll_tx asks twice per frame (the
+     * request that goes on the wire, then the reply-rung guess):
+     * measured, three calls at ONE instant walked my_req 12 -> 11 ->
+     * 10 -> 9, so a few retransmissions inside a fade collapsed the
+     * request to rung 0 and the peer was asked for EXTREME. Charging
+     * the decay against req_decay_t makes repeated calls idempotent. */
+    {
+        double base = c->req_decay_t > c->last_rx_time ? c->req_decay_t
+                                                       : c->last_rx_time;
+        if (now - base > RX_STALE_S) {
+            int decay = (int)floor((now - base) / RX_STALE_S);
+            c->my_req -= decay;
+            if (c->my_req < 0)
+                c->my_req = 0;
+            c->req_decay_t = base + decay * RX_STALE_S;
+            c->snr_hist_n = 0; /* stale measurements must not come back */
+            c->snr_hist_head = 0;
+            return c->my_req;
+        }
+        if (now - c->last_rx_time > RX_STALE_S)
+            return c->my_req;   /* this silence is already charged */
     }
 
     snr = ctl_filtered_snr(c, now);

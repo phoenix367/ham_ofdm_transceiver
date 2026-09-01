@@ -122,6 +122,10 @@ class LinkController:
     _snr_hist: typing.Deque = field(default_factory=lambda: collections.deque(maxlen=5))
     _my_req: int = 0
     last_rx_time: float = -1e9
+    # how much of the inbound silence has already been charged to the
+    # request: the decay must follow elapsed time, not the number of
+    # times it is asked (the C station asks twice per frame)
+    _req_decay_t: float = -1e9
 
     # TX side (outbound link)
     peer_req: int = 0
@@ -165,11 +169,21 @@ class LinkController:
         frames stop decoding, yet the request still travels in our own
         (possibly still-working) outbound frames with a fresh timestamp -- so
         the receiver itself must treat "I hear nothing" as evidence."""
-        if now is not None and now - self.last_rx_time > self.rx_stale_s:
-            decay = int((now - self.last_rx_time) // self.rx_stale_s)
-            self._my_req = max(0, self._my_req - decay)
-            self._snr_hist.clear()  # stale measurements must not come back
-            return self._my_req
+        if now is not None:
+            # Decay follows ELAPSED TIME, not call count. Subtracting the
+            # whole silence on every call while leaving last_rx_time alone
+            # meant the C twin -- which asks twice per frame -- walked the
+            # request 12 -> 11 -> 10 -> 9 in three calls at one instant,
+            # collapsing it to rung 0 after a handful of retransmissions.
+            base = max(self._req_decay_t, self.last_rx_time)
+            if now - base > self.rx_stale_s:
+                decay = int((now - base) // self.rx_stale_s)
+                self._my_req = max(0, self._my_req - decay)
+                self._req_decay_t = base + decay * self.rx_stale_s
+                self._snr_hist.clear()  # stale measurements must not return
+                return self._my_req
+            if now - self.last_rx_time > self.rx_stale_s:
+                return self._my_req     # this silence is already charged
 
         snr = self.filtered_snr(now)
         best_up = 0

@@ -750,6 +750,19 @@ Cross-module invariants that are easy to break:
   the same figure that sizes the write timeout. `host/_read_serial` and
   `usb_host.c`'s loop are the two places; `host/test_modem.py` pins the
   behaviour without hardware.
+- The inbound-silence decay (`ctl_rx_request`, `link.py rx_request`) is
+  charged against `req_decay_t`, NOT recomputed from `last_rx_time` on
+  every call. It used to subtract the whole silence each time it was
+  asked while leaving `last_rx_time` alone -- and `station_poll_tx`
+  asks TWICE per frame (the request that goes on the wire, then
+  `reply_rung_guess`), so three calls at one instant walked a request
+  12 -> 11 -> 10 -> 9. A handful of retransmissions inside a fade
+  collapsed the request to rung 0, the peer was asked for EXTREME, and
+  the two values that went out disagreed: the wire carried one rung and
+  the reply budget was sized for another. Both twins fixed together and
+  the parity trace pins it (three asks at one instant, one answer).
+  Any state a getter mutates must be idempotent -- prefer charging
+  against a marker over recomputing from an event timestamp.
 - BURST STATE MUST NOT OUTLIVE ITS MESSAGE. `msg_data()` returned
   `st->pool[m->slot]` unguarded, and `slot` is -1 after `msg_release`:
   the burst transmit paths then memcpy'd `pool[-1]` into a packet and

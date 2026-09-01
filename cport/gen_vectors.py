@@ -270,6 +270,11 @@ def gen_link_rom():
     q_req(120.0); q_req(200.0); q_snr(200.0)
     # stale peer request decay
     q_tx(300.0)
+    # the inbound-silence decay is per ELAPSED TIME, not per call: three
+    # asks at one instant must give one answer (station_poll_tx asks
+    # twice per frame, and this used to decay on each)
+    q_req(400.0); q_req(400.0); q_req(400.0)
+    q_req(445.0)   # ... and time still moves it
     # a peer that reports NO measurement must not cap us: its request
     # stands (this is the conversational-gap case that used to collapse
     # every reply to EXTREME), while a real low report still does cap.
