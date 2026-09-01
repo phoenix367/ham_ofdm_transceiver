@@ -45,7 +45,9 @@ full AX.25 frame is then ~216 bytes, inside the 255-byte single-frame
 payload cap, and costs 3.0 s at rung 10.
 """
 import argparse
+import atexit
 import os
+import signal
 import select
 import socket
 import sys
@@ -327,6 +329,10 @@ def main():
                     help="listen for KISS-over-TCP clients (default 8001)")
     ap.add_argument("--pty", action="store_true",
                     help="present a pty for kissattach instead of TCP")
+    ap.add_argument("--pty-link", metavar="PATH",
+                    help="symlink PATH to the pty, so scripts and configs "
+                         "have a stable name across runs (the pts number "
+                         "changes every time)")
     ap.add_argument("--mode", choices=("message", "broadcast"),
                     default="message")
     ap.add_argument("--qos", type=int, default=2, choices=(0, 1, 2),
@@ -346,13 +352,42 @@ def main():
         return 1
     bridge = Bridge(modem, args)
 
+    # atexit does not run on a signal, and a stale symlink pointing at a
+    # dead pts is worse than none: kissattach would open it and fail.
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+
     listener = None
     if args.pty:
         master, slave = os.openpty()
         os.set_blocking(master, False)
-        print(f"[kiss] KISS pty ready: {os.ttyname(slave)}\n"
-              f"       e.g. sudo kissattach {os.ttyname(slave)} radio",
-              flush=True)
+        name = os.ttyname(slave)
+        if args.pty_link:
+            # the pts number is allocated per run; a symlink gives
+            # axports, scripts and systemd units a name that survives
+            try:
+                if os.path.islink(args.pty_link) or \
+                        os.path.exists(args.pty_link):
+                    os.remove(args.pty_link)
+                os.symlink(name, args.pty_link)
+                atexit.register(lambda: os.path.islink(args.pty_link)
+                                and os.remove(args.pty_link))
+                name = f"{args.pty_link} -> {name}"
+            except OSError as e:
+                print(f"[kiss] could not link {args.pty_link}: {e}",
+                      file=sys.stderr)
+        print(f"[kiss] KISS pty ready: {name}", flush=True)
+        # kissattach's second argument is a PORT NAME from
+        # /etc/ax25/axports, not a label -- "cannot find port radio in
+        # axports" is what an undefined one looks like.
+        print(f"       kissattach needs that port defined first, in "
+              f"/etc/ax25/axports:\n"
+              f"           ofdm  N0CALL-1  9600  200  2  OFDM modem\n"
+              f"       (name callsign speed paclen window description; "
+              f"paclen 200 keeps a\n"
+              f"        full AX.25 frame inside one transmission -- see "
+              f"docs/drivers.md)\n"
+              f"       then: sudo kissattach "
+              f"{args.pty_link or os.ttyname(slave)} ofdm", flush=True)
         bridge.add_client(master)
     else:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

@@ -130,6 +130,34 @@ putting KISS in the firmware would duplicate the transport, add a
 fourth wire format to keep in step, and present the board as a dumb
 TNC. Nothing in `cport/` changes for this.
 
+### Using it with `kissattach`
+
+`kissattach`'s second argument is a **port name from
+`/etc/ax25/axports`**, not a label — an undefined one gives
+`cannot find port radio in axports`, which is the first thing everyone
+hits. Define it (the file ships with only comments):
+
+```
+# name  callsign   speed  paclen  window  description
+ofdm    N0CALL-1   9600   200     2       OFDM modem
+```
+
+`paclen 200` is the value the air-time arithmetic below argues for;
+`speed` is ignored on a pty. Then:
+
+```bash
+./kiss_bridge.py --pty --pty-link /tmp/kiss0 --serial <uid>
+sudo kissattach /tmp/kiss0 ofdm        # brings up ax0
+```
+
+`--pty-link` matters because the pts number is allocated per run: the
+symlink gives axports entries, scripts and unit files a name that
+survives a restart, and it is removed on exit (including on SIGTERM, so
+nothing is left pointing at a dead pts).
+
+One host program per board: a console and a bridge cannot both hold the
+same modem, and trying says so.
+
 One KISS data frame is one AX.25 frame, boundaries preserved, in either
 of two mappings: `message` (default) rides the station's ARQ
 point-to-point, `broadcast` sends one non-ARQ transmission per frame —

@@ -278,8 +278,20 @@ class _UsbTransport:
                 "(or serial= from Python). "
                 f"Found: {have}")
         self.dev = matches[0]
-        self.dev.set_configuration()
-        usb.util.claim_interface(self.dev, 0)
+        try:
+            self.dev.set_configuration()
+            usb.util.claim_interface(self.dev, 0)
+        except usb.core.USBError as e:
+            # EBUSY: someone else has the interface -- a console, another
+            # bridge, a session that did not exit. That is an ordinary
+            # thing to do by accident and deserves a sentence, not a
+            # libusb traceback.
+            if e.errno == 16:
+                raise RuntimeError(
+                    "the modem is already claimed by another program "
+                    "(a console, another bridge, or a session that did "
+                    "not exit). One host program per board.") from None
+            raise
         # Recover the OUT endpoint from a previous session that died
         # mid-transfer. Empirically harmless here: three consecutive
         # opens against an armed OUT endpoint all worked.
