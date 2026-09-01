@@ -187,7 +187,40 @@ Three rules it enforces, all from the air-time arithmetic:
   independent timers, one adapting the rung underneath the other, is a
   layering accident. Send UI frames and let this link do reliability.
 
-### IP over the link
+### IP over the link, without AX.25 (`host/ip_tun.py`)
+
+The kernel's AX.25 stack cannot receive in a network namespace, which
+rules out namespaces *and* containers for IP over `kiss_bridge.py` (a
+container's isolation is a network namespace) and leaves a second
+machine. TUN devices have no such restriction, so this tool carries IP
+packets directly as station messages — no AX.25 at all — and both ends
+can live on one host:
+
+```bash
+sudo ./ip_tun.py --serial <A> --local 10.73.0.1/24 --peer 10.73.0.2
+sudo ip netns add radio2
+sudo ip netns exec radio2 \
+     ./ip_tun.py --serial <B> --local 10.73.0.2/24 --peer 10.73.0.1
+ping -c 3 -i 10 -W 60 -s 64 10.73.0.2
+```
+
+USB is not namespaced, so the second instance reaches its board from
+inside the namespace perfectly well; only the network side is isolated.
+
+Policy differs from the KISS bridge on purpose. A packet that cannot go
+now is **dropped**, not held: IP is allowed to lose packets and every
+sender above it retransmits, so holding would deliver something stale
+minutes later and call it delivery. An AX.25 UI frame has nobody to
+retry it, which is why the bridge holds instead. The ladder probe
+survives, but only fires when the *rung* is what blocks traffic —
+congestion is not answered with more traffic.
+
+An MTU-sized packet is one message with one acknowledgment: 1000 bytes
+is ~9 s of air at rung 12, so ~110 B/s, close to the station's own file
+transfer because the ack is amortised over a large payload. Bigger MTU
+is more efficient and slower per packet.
+
+### IP over AX.25 (`host/ax25_ip.sh`) — needs two machines
 
 `host/ax25_ip.sh` sets up, tears down and inspects an IP configuration
 across the two AX.25 interfaces:
