@@ -128,6 +128,18 @@ def snr_str(db, none="-- (none in 60 s)"):
     return none if db <= -90.0 else f"{db:+.1f} dB"
 
 
+def rung_str(now, last):
+    """The rung the next frame would use; the last transmitted one is
+    shown only when it differs, which is the case worth seeing -- an
+    idle station used to report the rung of a transmission hours old."""
+    if now is None:                       # older firmware: only the last
+        return f"rung {last}"
+    shown = "none yet" if now < 0 else str(now)
+    if last == now or last < 0:
+        return f"rung {shown}"
+    return f"rung {shown} (last tx {last})"
+
+
 def temp_str(c):
     """Die temperature, or "n/a" -- the board reports no reading as a
     sentinel and 0 C is a real temperature."""
@@ -507,7 +519,8 @@ class Console:
             self.plain("no status yet -- the board pushes one every 0.5 s")
             return
         q = st["queues"]
-        self.plain(f"rung {st['rung']}  SNR {snr_str(st['snr_db'])}  "
+        self.plain(f"{rung_str(st.get('rung_now'), st['rung'])}  "
+                   f"SNR {snr_str(st['snr_db'])}  "
                    f"die {temp_str(st.get('temp_c'))}  "
                    f"{'BUSY' if st['busy'] else 'idle'}"
                    f"{'  pending-ack' if st['pending'] else ''}")

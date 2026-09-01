@@ -294,12 +294,20 @@ void station_diag_format(int ev, int a, int b, int c, int d,
                  c ? " (first burst-ack miss, forgiven)" : "");
         break;
     case ST_EV_RUNG:
-        if (d < 0)
-            snprintf(out, (size_t)cap, "rung %d -> %d (losses %d, no peer "
-                     "report -- request stands)", a, b, c);
-        else
-            snprintf(out, (size_t)cap, "rung %d -> %d (losses %d, cap %d)",
-                     a, b, c, d);
+        {
+            char from[16];
+            /* -1 is "no rung yet", not rung minus one */
+            if (a < 0)
+                snprintf(from, sizeof(from), "none");
+            else
+                snprintf(from, sizeof(from), "%d", a);
+            if (d < 0)
+                snprintf(out, (size_t)cap, "rung %s -> %d (losses %d, no "
+                         "peer report -- request stands)", from, b, c);
+            else
+                snprintf(out, (size_t)cap, "rung %s -> %d (losses %d, "
+                         "cap %d)", from, b, c, d);
+        }
         break;
     case ST_EV_BURST_ENGAGE:
         snprintf(out, (size_t)cap, "burst engage: %d frag(s) x %d B, "
@@ -522,6 +530,11 @@ static int st_tx_rung(const station_t *st, double t, int qos)
         && r > st->peer.max_rung)
         r = st->peer.max_rung;
     return r;
+}
+
+int station_tx_rung(const station_t *st, double t)
+{
+    return st_tx_rung(st, t, 2 /* bulk: the unpenalised class */);
 }
 
 /* what we ask the peer to send at: never above our own ceiling */

@@ -372,6 +372,12 @@ int station_pool_double_free(void);
  * submission half way through a file. */
 int station_pool_free(const station_t *st);
 int station_has_traffic(const station_t *st);
+/* The rung the next bulk frame would go out at, as of t: the controller
+ * clamped by the operator ceiling and the peer's declared one. This is
+ * NOT stats.last_rung, which is a record of the last frame actually
+ * transmitted and can be hours stale -- a station idle overnight
+ * reported "rung 12" and then sent at rung 0. */
+int station_tx_rung(const station_t *st, double t);
 /* returns sample count to transmit now, or 0 */
 int station_poll_tx(station_t *st, double t, int channel_busy,
                     int16_t *out, int out_cap);

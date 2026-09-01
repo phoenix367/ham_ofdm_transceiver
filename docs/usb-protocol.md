@@ -88,7 +88,7 @@ SUBMIT (0 from older firmware ⇒ assume 256, and the host's own buffer
 must actually match what it advertises). `caps` bits: LDPC(0),
 EXT_FRAMES(1), BURST(2), AUDIO_TAP(3), BCAST(4).
 
-## `up_status_t` (42 B)
+## `up_status_t` (43 B)
 
 `rung:i32, snr_q8:i32, tx_frames:u32, rx_frames:u32, timeouts:u32,
 retransmissions:u32, q_ctl:u16, q_inter:u16, q_bulk:u16, busy:u8,
@@ -98,7 +98,12 @@ pending:u8`, then the peer's capability record as learned over the air
 peer_max_rung1:u8` = ceiling+1, 0 unspecified), then `bc_free:u16` —
 free bytes in the broadcast source buffer, the chunk-pacing signal,
 then `temp_q8:i16` — the die temperature in Q8 °C from the part's own
-sensor, or `UP_TEMP_NONE` (−32768) where there is none. Older firmware
+sensor, or `UP_TEMP_NONE` (−32768) where there is none — then
+`rung_now:i8`, the rung the **next** frame would go out at (−1 = none
+yet, `UP_RUNG_ABSENT` = older firmware omitted it). `rung` at the head
+of the frame is the last rung actually *transmitted* and can be hours
+stale, which is why both are carried: an overnight-idle station
+reported `rung 12` and then sent at rung 0. Older firmware
 sends 32 or 40 B; decoders default the peer record and `bc_free` to
 zero and the temperature to `UP_TEMP_NONE` — never to 0 °C, which is a
 real temperature.

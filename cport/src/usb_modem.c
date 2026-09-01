@@ -256,6 +256,7 @@ void usb_modem_tick(usb_modem_t *m, double now, int status)
                                          ? m->st->peer.max_rung + 1 : 0);
         s.bc_free = m->bcast_free;
         s.temp_q8 = m->temp_q8;
+        s.rung_now = (int8_t)station_tx_rung(m->st, now);
         n = up_encode_status(&s, out, (int)sizeof(out));
         if (n > 0)
             txq_push(m, out, n);

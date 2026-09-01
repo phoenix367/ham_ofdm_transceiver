@@ -294,6 +294,29 @@ static const char *snr_str(char *buf, size_t n, double db, const char *none)
 /* Die temperature from the board's own sensor, or "n/a": the status
  * frame carries UP_TEMP_NONE when there is no reading, and 0 C is a
  * real temperature that must not stand in for a missing one. */
+/* The headline rung: what the next frame would go out at. `last tx` is
+ * appended only when it differs -- that gap is the whole point of the
+ * field. A station idle overnight showed "rung 12" from a transmission
+ * hours earlier and then sent at rung 0; now it reads
+ * "rung 0 (last tx 12)". */
+static const char *rung_str(char *buf, size_t n, int now, int last)
+{
+    char nb[16], lb[16];
+    if (now == UP_RUNG_ABSENT)                  /* older firmware */
+        snprintf(buf, n, "rung %d", last);
+    else {
+        if (now < 0) snprintf(nb, sizeof(nb), "none yet");
+        else snprintf(nb, sizeof(nb), "%d", now);
+        if (last == now || last < 0)
+            snprintf(buf, n, "rung %s", nb);
+        else {
+            snprintf(lb, sizeof(lb), "%d", last);
+            snprintf(buf, n, "rung %s (last tx %s)", nb, lb);
+        }
+    }
+    return buf;
+}
+
 /* the transmit-rung cap, or "none" when the peer has reported no
  * measurement for it to be computed from */
 static const char *cap_str(char *buf, size_t n, int cap)
@@ -425,10 +448,12 @@ static void diag_print(void *ctx, int ev, int a, int b, int c, int d,
         break;
     case ST_EV_RUNG: {
         link_diag_t ld;
-        char pb[32], rb[16], cb[16];
+        char pb[32], rb[16], cb[16], fb[16];
         ctl_diag(&g_st.ctl, t, &ld);
-        printf(" %d -> %d (losses=%d cap=%s peer_req=%d peer_snr=%s "
-               "req_age=%s)", a, b, c,
+        printf(" %s -> %d (losses=%d cap=%s peer_req=%d peer_snr=%s "
+               "req_age=%s)",
+               a < 0 ? "none" : (snprintf(fb, sizeof(fb), "%d", a), fb),
+               b, c,
                cap_str(cb, sizeof(cb), d), ld.peer_req,
                snr_str(pb, sizeof(pb), ld.peer_report_db, "not reported"),
                age_str(rb, sizeof(rb), ld.req_age_s));
@@ -1174,9 +1199,11 @@ static int usb_command(char *line)
             printf("no status yet -- the board pushes one every 0.5 s\n");
         } else {
             {
-                char sb[32], tb[16];
-                printf("%s [%s] rung %d  SNR %s  die %s  %s%s\n", tstamp(),
-                       g_name, g_ust.rung,
+                char sb[32], tb[16], rgb[48];
+                printf("%s [%s] %s  SNR %s  die %s  %s%s\n", tstamp(),
+                       g_name,
+                       rung_str(rgb, sizeof(rgb), g_ust.rung_now,
+                                g_ust.rung),
                        snr_str(sb, sizeof(sb), g_ust.snr_q8 / 256.0,
                                "-- (none in 60 s)"),
                        temp_str(tb, sizeof(tb), g_ust.temp_q8),

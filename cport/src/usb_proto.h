@@ -137,6 +137,12 @@ typedef struct {
                               * unspecified (an older record) */
     uint16_t bc_free;        /* free bytes in the broadcast source
                               * buffer (chunked broadcastfile pacing) */
+    int8_t   rung_now;       /* the rung the next frame would go out at,
+                              * as opposed to `rung` above, which is the
+                              * last one actually TRANSMITTED and may be
+                              * hours old. -1 = no rung yet,
+                              * UP_RUNG_ABSENT = older firmware did not
+                              * send the field at all. */
     int16_t  temp_q8;        /* die temperature, degrees C in Q8, from
                               * the part's internal sensor (src/temp.h).
                               * UP_TEMP_NONE when there is no sensor:
@@ -156,7 +162,10 @@ typedef struct {
  * refused the frame, and the board simply stopped pushing status --
  * enumeration and commands all still worked, which is what made it
  * look like a firmware hang rather than an arithmetic slip. */
-#define UP_STATUS_LEN 42
+#define UP_STATUS_LEN 43
+
+/* the status frame carried no rung_now (firmware older than this field) */
+#define UP_RUNG_ABSENT ((int8_t)-128)
 
 /* --- encoding ------------------------------------------------------- */
 

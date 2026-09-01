@@ -219,6 +219,7 @@ int main(void)
         up_status_t out3;
         memset(&in, 0, sizeof(in));
         in.temp_q8 = (int16_t)(37 * 256);
+        in.rung_now = 9;
         n = up_encode_status(&in, exact, (int)sizeof(exact));
         memset(&out3, 0, sizeof(out3));
         check("status encodes into UP_HDR_LEN + UP_STATUS_LEN exactly",
@@ -232,12 +233,27 @@ int main(void)
               g_n == 1 &&
               up_decode_status(g_f[0].data, g_f[0].len, &out3) == 0 &&
               out3.temp_q8 == (int16_t)(37 * 256));
+        check("the current rung survives the round trip",
+              out3.rung_now == 9);
         /* an older firmware's 40-byte status must still decode, with
          * the temperature reported ABSENT rather than as 0 C */
         memset(&out3, 0, sizeof(out3));
         check("a 40-byte status decodes, temperature absent",
               up_decode_status(g_f[0].data, 40, &out3) == 0 &&
-              out3.temp_q8 == UP_TEMP_NONE);
+              out3.temp_q8 == UP_TEMP_NONE
+              && out3.rung_now == UP_RUNG_ABSENT);
+        /* -1 is a legitimate value ("no rung yet") and must not be
+         * confused with the field being missing */
+        memset(&out3, 0, sizeof(out3));
+        in.rung_now = -1;
+        n = up_encode_status(&in, exact, (int)sizeof(exact));
+        reset();
+        up_parser_init(&par);
+        up_parser_push(&par, exact, n, sink, 0);
+        check("rung -1 (none yet) is distinct from the field being absent",
+              g_n == 1 &&
+              up_decode_status(g_f[0].data, g_f[0].len, &out3) == 0 &&
+              out3.rung_now == -1 && out3.rung_now != UP_RUNG_ABSENT);
     }
 
     /* ---- truncated fixed payloads are refused, not read past ---- */

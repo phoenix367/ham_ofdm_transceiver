@@ -138,7 +138,7 @@ def decode_status(p):
          # (older firmware, emulator, a part whose calibration words
          # did not check out). None, not a number: 0 is a plausible
          # temperature and must not stand in for "no sensor".
-         "temp_c": None}
+         "temp_c": None, "rung_now": None}
     if len(p) >= 40:
         d["peer_state"], d["peer_caps"] = p[32], p[33]
         d["peer_msg_max"] = struct.unpack_from("<H", p, 34)[0]
@@ -148,6 +148,11 @@ def decode_status(p):
     if len(p) >= 42:
         q8 = struct.unpack_from("<h", p, 40)[0]
         d["temp_c"] = None if q8 == -32768 else q8 / 256.0
+    if len(p) >= 43:
+        # the rung the NEXT frame would use, as opposed to "rung" above
+        # which is the last one transmitted. -1 = none yet; None here
+        # means the firmware predates the field.
+        d["rung_now"] = struct.unpack_from("<b", p, 42)[0]
     return d
 
 
