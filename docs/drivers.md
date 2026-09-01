@@ -181,6 +181,33 @@ Three rules it enforces, all from the air-time arithmetic:
   independent timers, one adapting the rung underneath the other, is a
   layering accident. Send UI frames and let this link do reliability.
 
+### IP over the link
+
+`host/ax25_ip.sh` sets up, tears down and inspects an IP configuration
+across the two AX.25 interfaces:
+
+```bash
+sudo ./ax25_ip.sh up        # addresses, namespace, static ARP
+     ./ax25_ip.sh status    # what is configured, and the counters
+     ./ax25_ip.sh ping      # link-appropriate timing
+sudo ./ax25_ip.sh down
+```
+
+**The trap it exists for:** both interfaces are on one host, so the
+kernel routes between their addresses through loopback and never
+touches the radio — a ping that "succeeds" in 40 µs while the tx
+counter never moves. The script puts the remote interface in a network
+namespace, which is what makes it a second host; `status` prints the
+counters, because those, not the ping, are what prove the traffic was
+real. Teardown returns the interface to the root namespace *before*
+deleting the namespace, since deleting one destroys the devices left
+inside it and this one belongs to a running `kissattach`.
+
+Defaults are `10.73.0.1/24` and `.2` (not 44-net, which is really
+allocated) at MTU 200, matching the `paclen` advice above so one packet
+is one transmission. Expect **seconds per round trip**: ICMP and UDP
+are fine, TCP's retransmit timers are not built for this.
+
 **mkiss marks its first two frames after an attach.** The Linux KISS
 line discipline probes the TNC for checksum support: the first frame it
 sends carries the SMACK flag (bit 7 of the type byte) and the second
