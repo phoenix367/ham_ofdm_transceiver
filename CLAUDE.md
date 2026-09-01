@@ -750,6 +750,24 @@ Cross-module invariants that are easy to break:
   the same figure that sizes the write timeout. `host/_read_serial` and
   `usb_host.c`'s loop are the two places; `host/test_modem.py` pins the
   behaviour without hardware.
+- EVERY frame carries an ack, so `station_on_decoded` retires the
+  pending fragment BEFORE its dispatch. The CAPS, BURST_ACK and
+  BURST_DATA branches all return early, so an ack riding on one of them
+  used to be discarded -- while the peer's transmit path had already
+  cleared its own `reply_due` and believed it had answered. Under
+  bidirectional traffic (chat during a file transfer) that cost one
+  retransmission per frame the peer sent, and an invisible one:
+  `first_try` is only cleared in the timeout path, so
+  `stats.retransmissions` did not count them.
+- An engaged burst OWNS `cur_bulk`, and `poll_tx` will not fall through
+  to the legacy path for it. Once `window_left` hits 0 (the
+  ack-requesting fragment is out) any decoded frame clears
+  `await_until`, and the legacy path then re-sent the same message from
+  the start -- into the same `assembly[0]` the burst was filling, and if
+  it completed the message nothing cleared `btx.active`, so the station
+  reported traffic forever and never bursted or probed again. Control
+  and interactive traffic and an owed ack still go out; the bulk
+  message waits for its bitmap or its timeout probe.
 - The inbound-silence decay (`ctl_rx_request`, `link.py rx_request`) is
   charged against `req_decay_t`, NOT recomputed from `last_rx_time` on
   every call. It used to subtract the whole silence each time it was

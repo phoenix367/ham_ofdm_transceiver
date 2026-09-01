@@ -1211,6 +1211,18 @@ int station_poll_tx(station_t *st, double t, int channel_busy,
         }
     }
 
+    /* While a burst is engaged it OWNS cur_bulk. Falling through to the
+     * legacy path re-sent the same message from the start, into the same
+     * reassembly buffer the burst was filling -- and if that path
+     * completed the message, nothing cleared btx.active and the station
+     * reported traffic forever. Reachable whenever window_left has hit 0
+     * (the ack-requesting fragment is out) and any decoded frame clears
+     * await_until. Control and interactive traffic may still go; an owed
+     * ack may still go; the bulk message may not. */
+    if (st->btx.active && !owes_ack && !st->cur_prio.active
+        && !st->qcount[QOS_CONTROL] && !st->qcount[QOS_INTERACTIVE])
+        return 0;
+
     if (st->pending.active)
         qos = st->pending.qos;
     else if (st->qcount[0])
@@ -1438,6 +1450,25 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
         st->rto_pending = 0;
     }
     st->await_until = -1.0; /* got a frame; the exchange continues */
+
+    /* EVERY frame carries an ack, so retire the pending fragment here
+     * rather than after the dispatch below: the CAPS, BURST_ACK and
+     * BURST_DATA branches all return early, so an ack riding on one of
+     * them used to be thrown away -- while the peer's transmit path had
+     * already cleared its own reply_due and believed it had answered.
+     * Bidirectional traffic then cost one retransmission per frame the
+     * peer sent, uncounted (first_try is only cleared on timeout). */
+    if (st->pending.active && lc.ack == st->pending.seq) {
+        st_msg_t *acked = st->pending.stream ? &st->cur_prio : &st->cur_bulk;
+        acked->off += st->pending.chunk_len;
+        if (st->pending.last)
+            msg_release(st, acked);
+        st->pending.active = 0;
+        ctl_on_ack(&st->ctl);
+        if (st->last_tx_rung >= 0)
+            ctl_note_outcome(&st->ctl, st->last_tx_rung, 1);
+    }
+
     st->last_cfo_hz = cfo_hz;
     st->has_cfo = 1;
 
@@ -1613,17 +1644,7 @@ int station_on_decoded(station_t *st, const uint8_t *pkt_bits, int pkt_n,
         return 0;
     }
 
-    /* ARQ: does their ack cover my pending fragment? */
-    if (st->pending.active && lc.ack == st->pending.seq) {
-        st_msg_t *src = st->pending.stream ? &st->cur_prio : &st->cur_bulk;
-        src->off += st->pending.chunk_len;
-        if (st->pending.last)
-            msg_release(st, src);
-        st->pending.active = 0;
-        ctl_on_ack(&st->ctl);
-        if (st->last_tx_rung >= 0)
-            ctl_note_outcome(&st->ctl, st->last_tx_rung, 1);
-    }
+    /* (the ack was honoured above, before the dispatch) */
 
     if (!(lc.flags & FLAG_NO_DATA)) {
         if (lc.seq != st->last_rx_seq) { /* not a duplicate */

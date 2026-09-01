@@ -717,6 +717,99 @@ static void test_burst_outlives_message(void)
     check("and disengages rather than trying again", !S.btx.active);
 }
 
+/* Every frame carries an ack. The CAPS / BURST_ACK / BURST_DATA
+ * branches used to return before the ARQ retire, so an ack riding on
+ * one of them was discarded -- while the sender had already cleared its
+ * own reply_due and believed it had answered. */
+static void test_ack_on_any_frame(void)
+{
+    station_phy_t p = { 0, phy_build, phy_receive, phy_build_burst,
+                        phy_receive_burst };
+    static station_t S;
+    static int16_t out[600000];
+    static uint8_t bits[2600];
+    lc_word_t lc;
+    double t = 100.0;
+    int n, flags[] = { FLAG_CAPS, FLAG_BURST_ACK, FLAG_BURST_DATA, 0 };
+    int k, ok = 1;
+
+    for (k = 0; flags[k] != 0 || k == 3; k++) {
+        station_init(&S, &p, 4242);
+        S.caps_disabled = 1;
+        S.ctl.peer_req = 10;
+        S.ctl.peer_report_db = 20.0;
+        S.ctl.peer_req_time = t;
+        station_submit(&S, (const uint8_t *)"hello", 5, QOS_INTERACTIVE);
+        n = station_poll_tx(&S, t, 0, out,
+                            (int)(sizeof(out) / sizeof(out[0])));
+        if (n <= 0 || !S.pending.active) {
+            ok = 0;
+            break;
+        }
+        /* a frame of this class, carrying an ack for what we just sent */
+        memset(&lc, 0, sizeof(lc));
+        lc.seq = 2;
+        lc.ack = S.pending.seq;
+        lc.snr_db = 10.0;
+        lc.flags = flags[k];
+        memset(bits, 0, sizeof(bits));
+        {
+            uint32_t v = lc_pack(&lc);
+            int i;
+            for (i = 0; i < 20; i++)
+                bits[i] = (uint8_t)((v >> (19 - i)) & 1);
+        }
+        station_on_decoded(&S, bits, 36 + 8, 10.0, 0.0, 0, t + 1.0);
+        if (S.pending.active)
+            ok = 0;                 /* the ack was thrown away */
+        if (flags[k] == 0)
+            break;
+    }
+    check("an ack is honoured on CAPS, burst-ack, burst-data and plain "
+          "frames alike", ok);
+}
+
+/* A burst owns cur_bulk: the legacy path must not send the same message
+ * again behind its back (it did, into the same reassembly buffer, and
+ * left btx.active set forever if it completed it). */
+static void test_burst_owns_its_message(void)
+{
+    station_phy_t p = { 0, phy_build, phy_receive, phy_build_burst,
+                        phy_receive_burst };
+    static station_t S;
+    static int16_t out[600000];
+    static uint8_t msg[250];
+    double t = 100.0;
+    int i, n;
+
+    for (i = 0; i < (int)sizeof(msg); i++)
+        msg[i] = (uint8_t)i;
+    station_init(&S, &p, 999);
+    S.caps_disabled = 1;
+    S.burst_window = 8;
+    S.ctl.peer_req = 10;
+    S.ctl.peer_report_db = 20.0;
+    S.ctl.peer_req_time = t;
+    station_submit(&S, msg, (int)sizeof(msg), QOS_BULK);
+    station_poll_tx(&S, t, 0, out, (int)(sizeof(out) / sizeof(out[0])));
+    check("a burst engages and owns the message",
+          S.btx.active && S.cur_bulk.active);
+
+    S.btx.window_left = 0;          /* the ack-requesting fragment is out */
+    S.await_until = -1.0;           /* ... and any decoded frame cleared it */
+    n = station_poll_tx(&S, t + 1.0, 0, out,
+                        (int)(sizeof(out) / sizeof(out[0])));
+    check("the legacy path does not re-send it", n == 0);
+    check("and the burst is still engaged, waiting for its ack",
+          S.btx.active && !S.pending.active);
+
+    /* control traffic is still allowed through */
+    station_submit(&S, (const uint8_t *)"ctl", 3, QOS_CONTROL);
+    n = station_poll_tx(&S, t + 2.0, 0, out,
+                        (int)(sizeof(out) / sizeof(out[0])));
+    check("but control traffic still gets out", n > 0);
+}
+
 static void test_caps_kick_orphan(void)
 {
     station_phy_t p = { 0, phy_build, phy_receive, phy_build_burst,
@@ -1097,6 +1190,8 @@ int main(void)
     test_caps();
     test_caps_kick_orphan();
     test_burst_outlives_message();
+    test_ack_on_any_frame();
+    test_burst_owns_its_message();
     test_rto();
     test_burst_window();
     test_peer_stream_memory();
