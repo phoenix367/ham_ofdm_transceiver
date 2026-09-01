@@ -724,6 +724,15 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
     if (!g_bc_complete || g_bc_src_off < g_bc_src_len)
         g_bc_close_due = 1;   /* an unfinished stream is on the air:
                                * close it before this one starts */
+    /* A new broadcast supersedes a held one, and the hold belongs to the
+     * command that armed it. Without this the flag survives: the hold
+     * branch below only runs when no rung was given, so the operator
+     * following this board's OWN advice ("held -- ... use -r") takes the
+     * explicit-rung path, the broadcast announces itself, and the
+     * transmit gate refuses to key it because g_bc_waiting is still set.
+     * Worse, the first command's 180 s deadline keeps running and wipes
+     * THIS payload when it expires. */
+    g_bc_waiting = 0;
     memcpy(g_bc_src, data, (size_t)len);
     g_bc_src_len = len;
     g_bc_src_off = 0;

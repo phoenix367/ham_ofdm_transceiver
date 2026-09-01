@@ -750,6 +750,14 @@ Cross-module invariants that are easy to break:
   the same figure that sizes the write timeout. `host/_read_serial` and
   `usb_host.c`'s loop are the two places; `host/test_modem.py` pins the
   behaviour without hardware.
+- A new `bcast` CLEARS `g_bc_waiting`. The hold belongs to the command
+  that armed it, and its branch only runs when no rung was given -- so
+  the operator following the board's own advice ("held ... use -r")
+  takes the explicit-rung path, the broadcast announces itself, and the
+  transmit gate silently refuses to key it because the flag is still
+  set. The first command's 180 s deadline then wipes the SECOND
+  broadcast's payload when it expires. Same class as the caps_kick
+  bug: one consumer, and a legitimate path around it.
 - EVERY frame carries an ack, so `station_on_decoded` retires the
   pending fragment BEFORE its dispatch. The CAPS, BURST_ACK and
   BURST_DATA branches all return early, so an ack riding on one of them
