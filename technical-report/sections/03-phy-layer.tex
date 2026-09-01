@@ -29,6 +29,30 @@ all taken from the article~\cite{habr_ofdm}.
     \end{tabular}
 \end{table}
 
+Two consequences of that grid are worth stating explicitly, because
+everything downstream is measured against them.
+
+\emph{One symbol carries 16 modulation symbols.}  With 16 of the 23
+subcarriers carrying data, a single OFDM symbol holds $16\mu$ coded
+bits before tiling --- 16 at BPSK, 32 at QPSK, 64 at 16-QAM --- and the
+tiling factor then divides the rate by 4, 16 or 64.  The whole ladder
+of Section~\ref{sec:modes}, from 7.8 to 1059\,bit/s, is that one
+number multiplied by a modulation order, a code rate and a tiling
+factor; nothing else in the waveform moves.
+
+\emph{Seven of twenty-three carriers are pilots.}  Roughly 30\,\% of
+the grid is spent on channel estimation, every symbol, at every rung.
+That is a deliberate choice for HF: pilots every 3--4 bins track a
+fading channel across the 2.1\,kHz occupied band, and the Wiener
+estimator built on them is what makes coherent accumulation over 64
+tiled repeats possible at all.  It is also the single largest rate
+saving still available --- reclaiming even half of it would beat every
+coding improvement measured in this report --- which is why pilot
+reduction and 2-D channel estimation head the future-work list
+(Section~\ref{sec:discussion}).  The pilot pattern is fixed by the
+article and was not varied here; changing it would invalidate the
+bit-exact reproduction that Section~\ref{sec:results} rests on.
+
 Symbol \emph{tiling} is the article's central trick for negative-SNR
 operation: each OFDM symbol body is repeated back-to-back
 \texttt{sym\_tile} times, and the receiver accumulates the repeats
