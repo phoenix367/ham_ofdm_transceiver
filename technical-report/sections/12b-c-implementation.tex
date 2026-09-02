@@ -3370,10 +3370,37 @@ themselves and cost twice that.  The tokens a chunked encoder gets
 \subsubsection{Latency: the chunk is not the knob}
 \label{sec:voice_latency}
 
-Algorithmic latency is the chunk length plus its \emph{right} context.
-Left context is audio the encoder already has, and is free; only
-lookahead delays the output.  Separating the two turns a 7.3\,s pipeline
-into a 1.3\,s one for two tenths of a decibel.
+A chunk is never encoded alone.  The encoder is given a window that
+extends past the chunk on both sides, and the tokens belonging to that
+extra audio are then thrown away --- neighbouring chunks emit them.
+Figure~\ref{fig:voice_chunk_context} shows the arrangement.  The two
+sides are not symmetric in cost, and that asymmetry is the whole result:
+
+\begin{itemize}
+  \item \textbf{Left context} is audio that has \emph{already been
+        spoken}.  It is sitting in the buffer when the chunk is
+        encoded, so including it delays nothing.  It is free, and
+        should be generous.
+  \item \textbf{Right context} is audio that has \emph{not been spoken
+        yet}.  To include it the encoder must wait for it, so every
+        millisecond of it is a millisecond of latency --- and it is the
+        only part of the window that is.
+\end{itemize}
+
+Algorithmic latency is therefore the chunk length plus the right context
+alone, not the window width.  Treating the two separately turns a 7.3\,s
+pipeline into a 1.3\,s one for two tenths of a decibel.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth,height=0.78\textheight,keepaspectratio]{images/voice_chunk_context.png}
+    \caption{One chunk's encoder window.  Only the right context costs
+             latency; the left context is audio already in hand.  Because
+             the group norm covers the whole window
+             (\S\ref{sec:voice_stream}), the context changes the chunk's
+             own tokens rather than merely repairing its edges.}
+    \label{fig:voice_chunk_context}
+\end{figure}
 
 \begin{table}[H]
     \centering
@@ -3416,8 +3443,31 @@ now the slower half --- the figure a receiver must keep ahead of.
 \label{sec:voice_russian}
 
 Streamed at the settled configuration, five minutes of continuous
-narration --- LibriVox, public domain, one speaker --- gives the
-end-to-end picture for both languages.
+narration gives the end-to-end picture for both languages.  The method
+matters here, because the figures are not comparable with the
+decode-against-decode distances used earlier in this section.
+
+Both sources are public-domain LibriVox recordings of a single speaker:
+\emph{The Heart of a Mystery} (chapter~1) for English, and Zinaida
+Gippius's \emph{Chortova kukla} (chapter~1) for Russian.  Each was
+converted to 16\,kHz mono and cut to exactly 300\,s starting 25--30\,s
+in, past the LibriVox announcement, so the material is continuous
+narration rather than the concatenated utterances used for the
+receptive-field work.  The prompt is the first 2\,s of the same
+recording --- the speaker enrolling with the opening of their own
+transmission --- and decoding runs in blocks of 150 tokens against that
+one cached prompt.
+
+The distance is the mean absolute difference of 80-band log-mel
+spectrograms (1024-point FFT, 256 hop), with the 24\,kHz decoder output
+resampled to 16\,kHz so both sides are measured at the same rate, over
+the frames the two share.  \textbf{It is taken against the ORIGINAL
+AUDIO}, so unlike the earlier tables it includes the codec's own
+reconstruction loss and its absolute value is not comparable with them;
+only the comparison \emph{within} Table~\ref{tab:voice_longform} is
+meaningful.  Language identification is Whisper \texttt{small}'s
+\texttt{detect\_language} applied to eight equal segments of each file,
+with the returned probabilities averaged.
 
 \begin{table}[H]
     \centering

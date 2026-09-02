@@ -1,0 +1,18 @@
+flowchart TB
+    subgraph WIN["encoder input window for chunk k — 2.60 s of audio"]
+        direction LR
+        L["<b>LEFT CONTEXT</b> 1.28 s<br/>already spoken, already sent<br/><b>FREE</b> — adds no delay"]
+        C["<b>CHUNK k</b><br/>1 s<br/>the new audio"]
+        R["<b>RIGHT CONTEXT</b> 0.32 s<br/>not yet spoken — must WAIT<br/><b>THIS is the latency</b>"]
+        L --- C --- R
+    end
+    WIN --> E["encoder — GroupNorm normalises over the WHOLE given window,<br/>so the context changes the chunk's own tokens, not just the edges"]
+    E --> T["tokens for the whole 2.60 s window"]
+    T --> K["<b>KEEP</b> the 25 tokens of chunk k"]
+    T --> D["DISCARD the context tokens<br/>— neighbouring chunks emit those"]
+    K --> O["output: 25 tokens/s, 250 bit/s<br/>latency = 1 s chunk + 0.32 s lookahead = <b>1.32 s</b>"]
+    style L fill:#e3f0e9,stroke:#2F6B4F,stroke-width:2px
+    style C fill:#e8f4f5,stroke:#0E7C82,stroke-width:2px
+    style R fill:#f6e4e1,stroke:#A2372A,stroke-width:2px
+    style D fill:#eef1f3,stroke:#5A6A76
+    style O fill:#e8f4f5,stroke:#0E7C82
