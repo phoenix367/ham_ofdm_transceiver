@@ -11,6 +11,7 @@
 #include "../src/rom_modes.h"
 #include "../src/tx.h"
 #include "../src/rx_stream.h"
+#include "../src/broadcast.h"
 #include "test_vectors.h"
 
 static int g_pass, g_fail;
@@ -220,6 +221,88 @@ int main(void)
                 printf("  lead %d: start %d cfo %+.2f Hz\n", lead, ev.start_abs,
                        (double)ev.cfo_word * 12000.0 / 4294967296.0);
         }
+    }
+
+    /* A stream of small broadcast groups must not lose one to its own
+     * commit rule. This is bench/bc_soak.c's failing seed, verbatim: ten
+     * 2-frame BCAST groups at rung 12 (QAM16 3/4), LCG-derived payloads,
+     * chunk sizes and inter-group gaps, which places group 9's tone
+     * field in the ~8-sample alignment window (mod 256) where the field
+     * ENTERING the detection window scores one isolated above-threshold
+     * evaluation (~10x thr^2 against ~1e5x aligned). Committing that
+     * spike anchors two blocks early, and the failed ZC/header attempts
+     * then consume the true peak, losing the group whole -- 0.76% of
+     * all groups of the live voice campaign, byte-located in the
+     * rx_*.bin dumps. WEAK_COMMIT_X gates the region-end commit so the
+     * weak argmax waits instead, and the true peak displaces it; a
+     * build with -DWEAK_COMMIT_X=1 (gate off) loses frames 18 and 19
+     * here. The multi-group preamble history is load-bearing: the same
+     * geometry as an isolated pair decodes fine, so do not "simplify"
+     * this to two groups. */
+    {
+        rxs_event_t ev;
+        uint32_t st = 20264;
+        int g2, seq = 0, frames = 0, left = 0, pos, i, n, lead;
+        #define SOAK_RND() ((st = st * 1664525u + 1013904223u) >> 8)
+        lead = 300 + (int)(SOAK_RND() % 512u);
+        memset(g_samples, 0, sizeof(g_samples));
+        pos = lead;
+        for (g2 = 0; g2 < 10; g2++) {
+            uint8_t payload[26], blocks[2 * (36 + 8 * 26)];
+            int chunk = 30 + (int)(SOAK_RND() % 2u) * 5, pkt_n = 0, nf;
+            txs_t *t;
+            int total = 0, got2;
+            for (nf = 0; nf < 2; nf++) {
+                int first = (nf == 0), take = first ? 23 : chunk - 23;
+                int flags = first ? BC_SYNC : 0;
+                if (!first && g2 == 9)
+                    flags |= BC_EOS;
+                memset(payload, 0, sizeof(payload));
+                payload[0] = (uint8_t)(flags | ((seq + nf) & BC_SEQ_MASK));
+                payload[1] = (uint8_t)take;
+                if (first)
+                    payload[2] = (uint8_t)((1 << 4) | 0x0F);
+                for (i = 0; i < take; i++)
+                    payload[(first ? 3 : 2) + i] =
+                        (uint8_t)(SOAK_RND() & 0xFFu);
+                pkt_n = data_encode(0, payload, 26,
+                                    blocks + (size_t)nf * (36 + 8 * 26));
+            }
+            memmove(blocks + (size_t)pkt_n, blocks + (36 + 8 * 26),
+                    (size_t)pkt_n);
+            t = txs_open(MODE_NORMAL, blocks, pkt_n, 2, PKT_TYP_BCAST,
+                         MOD_QAM16, CC_R34, 4, 0, &total);
+            n = 0;
+            while (t && (got2 = txs_pull(t, g_samples + pos + n,
+                                         (int)(sizeof(g_samples) / 2)
+                                             - pos - n - 20000)) > 0)
+                n += got2;
+            seq += 2;
+            pos += n + 1000 + (int)(SOAK_RND() % 15000u);
+        }
+        n = pos + 2000;
+        {
+            rxs_t *r = rxs_open(MODE_NORMAL, 0);
+            for (pos = 0; pos + 256 <= n; pos += 256) {
+                if (!rxs_push(r, g_samples + pos, 256, &ev))
+                    continue;
+                if (ev.type == 1 && ev.hdr.typ == PKT_TYP_BCAST) {
+                    int fl = 0;
+                    for (i = 0; i < 8; i++)
+                        fl = (fl << 1) | (ev.bits[20 + i] & 1);
+                    frames++;
+                    left = (fl & BC_SYNC) ? 1 : (left > 0 ? left - 1 : 0);
+                    if (fl & BC_EOS)
+                        left = 0;
+                    if (left > 0 && !rxs_continue_burst(r, 4))
+                        left = 0;
+                }
+            }
+        }
+        check("stream BCAST groups: weak-spike alignment loses nothing "
+              "(soak seed 20264)", frames == 20);
+        printf("  %d of 20 frames decoded\n", frames);
+        #undef SOAK_RND
     }
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
