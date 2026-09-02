@@ -115,6 +115,9 @@ struct rxs_state {
     int blk_idx, burst_resync;
     int64_t burst_resume_abs;
     int64_t last_eval_blk;
+    int64_t resummarize_to;   /* blocks <= this need their summary
+                                 recomputed from raw before evaluation
+                                 (a failure rearm rewound past them) */
     int blk_base, blk_mask;   /* this instance's slice of g_blk */
     int lag_base, lag_mask;   /* and of g_lag */
     int64_t ring_hwm; /* deepest raw lookback (incl. FIR history) */
@@ -318,6 +321,7 @@ rxs_t *rxs_open(link_mode_t mode, int calibrate)
     r->active = 1;
     r->best_metric = -1;
     r->last_eval_blk = -1;
+    r->resummarize_to = -1;
     r->ring_hwm = 0;
     r->ring_miss = 0;
     return r;
@@ -553,11 +557,36 @@ static void tone_commit(rxs_t *r)
 
 static void rearm(rxs_t *r, int64_t guard_abs)
 {
+    int64_t newest = r->abs_n / r->B - 1;
     r->st = S_SEARCH;
     r->crossed = 0;
     r->decline = 0;
     r->best_metric = -1;
     r->min_blk = (guard_abs + r->B - 1) / r->B;
+    /* Resume EVALUATION at the guard, not at the newest block. The
+     * header-fail path has always rearmed at cs_abs + B with the intent
+     * "the true preamble, still in the ring, can be re-acquired" -- but
+     * S_SEARCH only ever evaluated the newest block, so every window
+     * between the failed anchor and the present was silently skipped,
+     * and the summary ring (one tone window deep) had dropped them
+     * anyway. The effect: an isolated partial-overlap spike two blocks
+     * before a real preamble commits garbage, the failed ZC/header
+     * attempts consume the samples of the true peak, and the frame is
+     * lost whole -- one group in ~130 at the voice cadence, alignment-
+     * dependent (an ~8-sample window mod 256), reproduced and traced in
+     * bench/bc_soak.c. The raw ring is ~20x deeper than the summary
+     * ring, so the catch-up recomputes summaries from raw; the cost is
+     * a bounded burst of block FFTs after a FAILED acquisition only --
+     * the live path still summarizes each block exactly once. */
+    r->last_eval_blk = r->min_blk + r->total_blocks - 2;
+    if (r->last_eval_blk < newest) {
+        int64_t b, to = r->last_eval_blk;
+        for (b = r->min_blk; b <= to; b++)
+            block_summary(r, b);
+        r->resummarize_to = newest;
+    } else {
+        r->resummarize_to = -1;
+    }
 }
 
 /* finish the data block: quantize/calibrate, decode, CRC, SNR estimate */
@@ -657,14 +686,23 @@ static int advance(rxs_t *r, rxs_event_t *ev)
     for (;;) {
         switch (r->st) {
         case S_SEARCH: {
-            int64_t blk = r->abs_n / r->B - 1; /* newest complete block */
+            int64_t newest = r->abs_n / r->B - 1;
+            int64_t blk = r->last_eval_blk + 1;
             int64_t metric;
             int shift;
-            if (blk < r->total_blocks - 1 || blk < r->min_blk
-                || blk == r->last_eval_blk)
+            if (blk < r->total_blocks - 1)
+                blk = r->total_blocks - 1;
+            if (blk > newest)
                 return 0;
             r->last_eval_blk = blk;
+            if (blk <= r->resummarize_to)
+                block_summary(r, blk);
             eval_tone_window(r, blk, &metric, &shift);
+            SDBG("search blk=%lld off=%lld metric=%lld shift=%d "
+                 "crossed=%d decline=%d best=%lld@%lld\n",
+                 (long long)blk, (long long)(blk - r->total_blocks + 1),
+                 (long long)metric, shift, r->crossed, r->decline,
+                 (long long)r->best_metric, (long long)r->best_off_blk);
             /* partial tone overlap already crosses the threshold ~a full
              * window before the true peak, so a decline-from-best rule
              * commits too early (measured). Instead: track the argmax over

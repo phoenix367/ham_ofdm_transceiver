@@ -359,6 +359,20 @@ bcrepro: $(GEN) | $(BUILD)
 	    src/tx.c src/fft.c src/dsp.c src/bits.c src/conv.c src/ldpc.c \
 	    src/packets.c src/link.c src/station.c src/arena.c -lm
 
+# The broadcast soak: thousands of voice-shaped groups (2 frames,
+# random payload, random gaps, random sample-phase lead) through the
+# streaming receiver. This is what reproduced the stand's 0.76% group
+# loss as a code path -- an isolated partial-overlap threshold spike
+# committing 2 blocks early, whose failed ZC/header attempts then
+# consumed the true peak that S_SEARCH (newest-block-only) never went
+# back to evaluate. Returns nonzero if any trial loses a frame.
+bcsoak: $(GEN) | $(BUILD)
+	gcc -std=c99 -O2 -Isrc -DMAX_LLRS=4416 -o $(BUILD)/bc_soak \
+	    bench/bc_soak.c src/rx_stream.c src/rx_detect.c src/rx_demod.c \
+	    src/tx.c src/fft.c src/dsp.c src/bits.c src/conv.c src/ldpc.c \
+	    src/packets.c src/link.c src/station.c src/arena.c -lm
+	./$(BUILD)/bc_soak -t 20 -g 18 -q | tail -2
+
 burstrepro: $(GEN) | $(BUILD)
 	gcc -std=c99 -O2 -Isrc -DMAX_LLRS=4416 -o $(BUILD)/burst_repro \
 	    bench/burst_repro.c src/rx_stream.c src/rx_detect.c src/rx_demod.c \
@@ -374,7 +388,7 @@ cstest: | $(BUILD)
 	    bench/csense_test.c src/csense.c -lm
 	$(BUILD)/csense_test
 
-robust: burstrepro bcrepro cstest
+robust: burstrepro bcrepro bcsoak cstest
 	@echo "=== input-abuse decode matrix (each line must say 8/8) ==="
 	@for imp in "-dc -16577" "-dc 18000" "-step" "-clip" "-hum" "-imp" \
 	            "-stuck" "-dc -16577 -step -hum -imp"; do \
