@@ -622,7 +622,9 @@ def main():
                     help="board to attach to (see --list). Optional when "
                          "exactly one board is present.")
     ap.add_argument("--name", default=None,
-                    help="label for this console (default: last 4 of serial)")
+                    help="label for this console (default: FIRST 4 of the "
+                         "serial -- the tail is the wafer/lot ID and is "
+                         "identical across boards from one wafer)")
     ap.add_argument("--msg-max", type=int, default=BOARD_MSG_MAX,
                     help=f"board's ST_MSG_MAX (default {BOARD_MSG_MAX}, the "
                          "cport default; not discoverable over the wire)")
