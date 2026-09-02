@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radio Voice Console</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#EDF0F2; --surface:#FFFFFF; --sunk:#E3E8EB;
+  --ink:#121A20; --muted:#5A6A76; --rule:#CBD5DA;
+  --ok:#0E7C82; --air:#A96A00; --fault:#A2372A;
+  --ok-wash:#E2F0F1; --air-wash:#F6EDDD; --fault-wash:#F6E4E1;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ground:#0E1418; --surface:#161E24; --sunk:#11181D;
+  --ink:#E2E9EE; --muted:#8FA1AE; --rule:#2A3740;
+  --ok:#3CBAC0; --air:#D79A3E; --fault:#D9705C;
+  --ok-wash:#132A2C; --air-wash:#2A2216; --fault-wash:#2C1A17;
+}}
+:root[data-theme="dark"]{
+  --ground:#0E1418; --surface:#161E24; --sunk:#11181D;
+  --ink:#E2E9EE; --muted:#8FA1AE; --rule:#2A3740;
+  --ok:#3CBAC0; --air:#D79A3E; --fault:#D9705C;
+  --ok-wash:#132A2C; --air-wash:#2A2216; --fault-wash:#2C1A17;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);
+  font-family:"IBM Plex Sans",system-ui,sans-serif;line-height:1.55}
+.wrap{max-width:780px;margin:0 auto;padding:28px 22px 72px}
+h1{font-family:"IBM Plex Sans Condensed",sans-serif;font-size:1.7rem;
+  font-weight:700;letter-spacing:-.01em;margin:0 0 4px}
+.sub{color:var(--muted);font-size:.92rem;margin:0 0 26px;max-width:60ch}
+.panel{background:var(--surface);border:1px solid var(--rule);padding:18px 20px;
+  display:flex;flex-direction:column;gap:14px;margin-bottom:16px}
+.lab{font-family:"IBM Plex Mono",monospace;font-size:.68rem;text-transform:uppercase;
+  letter-spacing:.11em;color:var(--muted)}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+select,button{font:inherit;color:var(--ink);background:var(--surface);
+  border:1px solid var(--rule);padding:8px 12px}
+select{min-width:210px;font-family:"IBM Plex Mono",monospace;font-size:.82rem}
+button{cursor:pointer;font-family:"IBM Plex Sans Condensed",sans-serif;
+  font-weight:600;letter-spacing:.02em}
+button:hover:not(:disabled){border-color:var(--ok)}
+button:disabled{opacity:.45;cursor:not-allowed}
+:focus-visible{outline:2px solid var(--ok);outline-offset:2px}
+.chip{display:inline-flex;align-items:center;gap:7px;font-family:"IBM Plex Mono",monospace;
+  font-size:.72rem;padding:4px 10px;border:1px solid var(--rule)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.chip.ok{background:var(--ok-wash);border-color:var(--ok);color:var(--ok)}
+.chip.ok .dot{background:var(--ok)}
+.chip.air{background:var(--air-wash);border-color:var(--air);color:var(--air)}
+.chip.air .dot{background:var(--air)}
+.chip.fault{background:var(--fault-wash);border-color:var(--fault);color:var(--fault)}
+.chip.fault .dot{background:var(--fault)}
+#ptt{width:100%;padding:30px;font-size:1.5rem;font-weight:700;letter-spacing:.06em;
+  border:2px solid var(--rule);background:var(--sunk);color:var(--muted)}
+#ptt.ready{border-color:var(--ok);color:var(--ok);background:var(--ok-wash)}
+#ptt.live{border-color:var(--air);color:var(--air);background:var(--air-wash)}
+@media (prefers-reduced-motion:no-preference){
+  #ptt.live{animation:breathe 1.5s ease-in-out infinite}
+  @keyframes breathe{50%{box-shadow:0 0 0 6px var(--air-wash)}}
+}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:1px;
+  background:var(--rule);border:1px solid var(--rule)}
+.cell{background:var(--surface);padding:11px 13px}
+.val{font-family:"IBM Plex Mono",monospace;font-size:1.15rem;font-weight:600;
+  font-variant-numeric:tabular-nums}
+.cell .lab{margin-top:2px}
+#log{font-family:"IBM Plex Mono",monospace;font-size:.74rem;color:var(--muted);
+  background:var(--sunk);border:1px solid var(--rule);padding:12px 14px;
+  height:150px;overflow:auto;white-space:pre-wrap}
+.note{font-size:.82rem;color:var(--muted);border-left:2px solid var(--rule);
+  padding-left:12px}
+.note b{color:var(--ink);font-weight:500}
+a{color:var(--ok)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Radio Voice Console</h1>
+  <p class="sub">Speech at 250 bit/s over the OFDM modem. Hold transmit and talk;
+     the receiving station writes what it decodes to a WAV file.</p>
+
+  <div class="panel">
+    <div class="lab">Stations</div>
+    <div class="row">
+      <select id="tx" aria-label="Transmitting station"></select>
+      <span aria-hidden="true">&rarr;</span>
+      <select id="rx" aria-label="Receiving station"></select>
+      <button id="connect">Connect</button>
+    </div>
+    <div class="row">
+      <span id="linkchip" class="chip"><span class="dot"></span><span id="linktext">not connected</span></span>
+      <button id="warm" disabled>Warm the link</button>
+    </div>
+    <p class="note">The link is warmed before every transfer. An idle station lets
+       its rate ladder decay and falls back to listening on the slowest mode only,
+       so a cold broadcast can go out at a rung the far end is not receiving on
+       &mdash; which looks like a dead radio and is really a negotiation problem.</p>
+  </div>
+
+  <div class="panel">
+    <div class="lab">Speaker prompt</div>
+    <div class="row">
+      <input type="file" id="promptfile" accept=".prompt,.bin,application/octet-stream"
+             aria-label="binary speaker prompt">
+      <button id="clearprompt">Use my own voice</button>
+    </div>
+    <span id="promptchip" class="chip"><span class="dot"></span><span id="prompttext">no prompt loaded — the far end will use the first 2 s of your own audio</span></span>
+    <p class="note">The prompt decides <b>whose voice</b> comes out; the 250 bit/s
+       stream carries only what was said. Load a binary prompt from
+       <code>roundtrip.py --prompt-out</code> (float16 or int8, detected
+       automatically) to decode as that speaker instead.</p>
+  </div>
+
+  <div class="panel">
+    <button id="ptt" disabled>START TRANSMIT</button>
+    <div class="grid">
+      <div class="cell"><div class="val" id="v-rung">&mdash;</div><div class="lab">rung</div></div>
+      <div class="cell"><div class="val" id="v-tx">0</div><div class="lab">bytes sent</div></div>
+      <div class="cell"><div class="val" id="v-rx">0</div><div class="lab">bytes heard</div></div>
+      <div class="cell"><div class="val" id="v-grp">0</div><div class="lab">groups</div></div>
+    </div>
+    <p class="note"><b>Broadcast, not ARQ.</b> Nothing is acknowledged and nothing is
+       retransmitted &mdash; for speech a late repeat is worse than a gap. Gaps are
+       never repaired.</p>
+  </div>
+
+  <div class="panel" id="recpanel" hidden>
+    <div class="lab">Received at the far station</div>
+    <div class="row">
+      <audio id="player" controls preload="none" style="flex:1;min-width:260px"></audio>
+      <a id="dlrx" class="chip" download>download</a>
+    </div>
+    <span class="chip ok" id="recinfo"><span class="dot"></span><span id="rectext"></span></span>
+
+    <div class="lab" style="margin-top:6px">What went into the encoder (16 kHz)</div>
+    <div class="row">
+      <audio id="srcplayer" controls preload="none" style="flex:1;min-width:260px"></audio>
+      <a id="dlsrc" class="chip" download>download</a>
+    </div>
+    <p class="note">The source is saved <b>after resampling</b>, so it is exactly
+       what the encoder saw &mdash; the honest thing to judge the far end against,
+       not the raw microphone stream.</p>
+  </div>
+
+  <div class="panel">
+    <div class="lab">Station log</div>
+    <div id="log" role="log" aria-live="polite"></div>
+  </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+let ctx=null, node=null, stream=null, talking=false, warm=false;
+// the audio-post chain lives here, not inside startTalk: stopTalk has to
+// be able to DRAIN it, or the close command overtakes the last block of
+// speech still queued behind it
+let chain=Promise.resolve();
+
+async function api(p,o){const r=await fetch(p,o);return r.json();}
+
+// STM32 serials share a long common SUFFIX (lot and wafer); they differ
+// at the front. Taking the tail gives every board the same name, which is
+// what board_console.py avoids by using serial[:4]. Use the shortest
+// prefix that is actually unique across the boards present.
+function shortNames(serials){
+  for(let n=4;n<=24;n++){
+    const p=serials.map(s=>s.slice(0,n));
+    if(new Set(p).size===serials.length) return p;
+  }
+  return serials;
+}
+async function loadStations(){
+  const d=await api('/api/stations');
+  const ser=d.stations.map(s=>s.serial);
+  const names=shortNames(ser);
+  const opts=ser.map((s,i)=>
+    `<option value="${s}" title="${s}">${names[i]}</option>`).join('');
+  $('tx').innerHTML=opts; $('rx').innerHTML=opts;
+  if(ser.length>1) $('rx').selectedIndex=1;
+  if(!ser.length) setLink('fault','no stations found — is the firmware running?');
+}
+function setLink(cls,text){
+  $('linkchip').className='chip'+(cls?' '+cls:''); $('linktext').textContent=text;
+}
+$('connect').onclick=async()=>{
+  const tx=$('tx').value, rx=$('rx').value;
+  if(tx===rx){setLink('fault','pick two different stations');return;}
+  setLink('','connecting');
+  const d=await api('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({tx,rx})});
+  if(d.ok){
+    setLink('','connected — asking for the microphone');
+    try{  // trigger the permission prompt NOW, not mid-transmission:
+          // the prompt steals the pointer and releases a held button
+      const t=await navigator.mediaDevices.getUserMedia({audio:true});
+      t.getTracks().forEach(x=>x.stop());
+      setLink('','connected, mic ready, link cold'); $('warm').disabled=false;
+    }catch(e){setLink('fault','microphone refused: '+e.name);}
+  } else setLink('fault',d.error||'could not open the stations');
+};
+$('warm').onclick=async()=>{
+  $('warm').disabled=true; setLink('','warming, this takes a few seconds');
+  const d=await api('/api/warmup',{method:'POST'});
+  $('warm').disabled=false;
+  if(d.ok){warm=true; setLink('ok',`link warm at rung ${d.rung} (${d.seconds}s)`);
+           $('ptt').disabled=false; $('ptt').className='ready';}
+  // warming is ARQ: it makes the far station key an ack, and a half-duplex
+  // peer cannot hear a broadcast while it is transmitting one
+  else if(d.busy) setLink('air', d.reason);
+  else {warm=false; setLink('fault','link did not answer — check both boards');}
+};
+
+async function startTalk(){
+  if(talking||$('ptt').disabled) return;
+  shownFile=shownSource=null;   // the next result is a new file
+  talking=true; $('warm').disabled=true; $('ptt').className='live'; $('ptt').textContent='ON AIR — CLICK TO STOP';
+  await api('/api/start',{method:'POST'});
+  stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,
+    echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+  ctx=new AudioContext({sampleRate:16000});
+  const src=ctx.createMediaStreamSource(stream);
+  node=ctx.createScriptProcessor(4096,1,1);
+  // ONE post in flight at a time. These were fire-and-forget, and two
+  // concurrent fetches have no ordering guarantee on the wire at all --
+  // the browser is free to open a second connection and let it land
+  // first, which hands the encoder a block of speech out of order and
+  // starts a rival broadcast on the board. Chaining them keeps the
+  // audio callback non-blocking (it just extends the chain) while the
+  // network sees a strict sequence.
+  chain=Promise.resolve();
+  node.onaudioprocess=e=>{
+    if(!talking) return;
+    const f=new Float32Array(e.inputBuffer.getChannelData(0));
+    chain=chain.then(()=>fetch('/api/audio?sr='+ctx.sampleRate,
+      {method:'POST',body:f.buffer})).catch(()=>{});
+  };
+  src.connect(node); node.connect(ctx.destination);
+}
+async function stopTalk(){
+  if(!talking) return;
+  talking=false; $('ptt').className='ready'; $('ptt').textContent='DECODING AT THE FAR STATION…';
+  $('ptt').disabled=true;
+  if(node){node.disconnect(); node=null;}
+  await chain;            // every captured block has reached the server
+  if(ctx){ctx.close(); ctx=null;}
+  if(stream){stream.getTracks().forEach(t=>t.stop()); stream=null;}
+  const d=await api('/api/stop',{method:'POST'});
+  $('ptt').disabled=false; $('warm').disabled=false;
+  $('ptt').textContent='START TRANSMIT';
+  setLink(d.ok?'ok':'fault', d.ok
+    ? `wrote ${d.file.split('/').pop()} — ${d.seconds}s, ${d.loss_pct}% of bytes lost`
+    : (d.reason||'nothing decoded at the far station'));
+  if(d.ok) showRecording(d.file, `${d.seconds}s, ${d.loss_pct}% lost`, d.source);
+}
+$('ptt').addEventListener('click',()=>{talking?stopTalk():startTalk();});
+
+$('promptfile').onchange=async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const d=await api('/api/prompt?name='+encodeURIComponent(f.name),
+    {method:'POST',body:await f.arrayBuffer()});
+  if(d.ok){$('promptchip').className='chip ok';
+    $('prompttext').textContent=`${f.name} — ${d.format}, ${d.frames} frames (${d.seconds}s)`;}
+  else{$('promptchip').className='chip fault';
+    $('prompttext').textContent='not a prompt file: '+(d.error||'unreadable');}
+};
+$('clearprompt').onclick=async()=>{
+  await api('/api/prompt',{method:'POST'});
+  $('promptfile').value='';
+  $('promptchip').className='chip';
+  $('prompttext').textContent='no prompt loaded — the far end will use the first 2 s of your own audio';
+};
+
+// Assigning .src aborts any fetch in progress and reloads the element, so
+// a status poll that reassigns it every 700 ms kills playback a second in
+// and throws "fetching process ... aborted". Only touch src when the file
+// actually changes.
+let shownFile=null, shownSource=null;
+function setPlayer(el, dl, name){
+  el.src='/api/recording/'+encodeURIComponent(name);
+  dl.href='/api/recording/'+encodeURIComponent(name)+'?dl=1';
+  dl.setAttribute('download', name);
+}
+function showRecording(path, info, source){
+  const name=path.split('/').pop();
+  if(name!==shownFile){
+    shownFile=name;
+    setPlayer($('player'), $('dlrx'), name);
+    $('rectext').textContent=name+(info?' — '+info:'');
+    $('recpanel').hidden=false;
+  }else if(info){
+    $('rectext').textContent=name+' — '+info;
+  }
+  if(source){
+    const sn=source.split('/').pop();
+    if(sn!==shownSource){
+      shownSource=sn;
+      setPlayer($('srcplayer'), $('dlsrc'), sn);
+    }
+  }
+}
+setInterval(async()=>{
+  const s=await api('/api/status');
+  if(s.file) showRecording(s.file,null,s.source);
+  $('v-rung').textContent=s.rung??'—';
+  $('v-tx').textContent=s.tx_bytes; $('v-rx').textContent=s.rx_bytes;
+  $('v-grp').textContent=s.groups;
+  $('log').textContent=(s.log||[]).join('\n');
+  $('log').scrollTop=$('log').scrollHeight;
+},700);
+loadStations();
+</script>
+</body>
+</html>
