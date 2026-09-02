@@ -3303,15 +3303,201 @@ the audio was Russian at all from 96\,\% to 37\,\%.  The prompt is
 carrying language as well as timbre, so for a non-English operator a
 wrong prompt costs the voice \emph{and} the accent.
 
+\subsubsection{Streaming, and the one-shot trap}
+\label{sec:voice_stream}
+
+Everything above encodes a whole utterance at once, which costs memory
+that grows with its length --- 124\,s of speech peaked at
+\textbf{7.7\,GB} of resident set --- and rules out both continuous
+operation and pipelining the encode against the transmission.  Chunking
+the input looked like it would cost quality.  It does not; it
+\emph{improves} it, and the reason is worth recording because it
+inverted the measurement three times before it was understood.
+
+Chunked and un-chunked encodings of the same audio disagree on 25\,\% of
+their tokens even with generous overlap, and no amount of extra context
+closes the gap.  The cause is not the receptive field.  Every
+normalisation in the encoder is \texttt{Fp32GroupNorm(1, dim)} --- group
+norm with a \emph{single} group, which normalises over channels
+\textbf{and time} jointly.  Each layer therefore subtracts a mean and
+divides by a deviation computed over the whole input, so the effective
+receptive field is the entire utterance, not the 43 aggregator frames
+(1.72\,s) the convolutions imply.  A chunk has different statistics from
+the utterance containing it, and every token inside it shifts, not just
+those near a seam: at 40+ frames from any boundary, agreement was
+27.5\,\% --- as wrong as at the boundary itself.
+
+The consequence is that the encoder implicitly assumes utterance-length
+input, and \emph{it was trained on utterances of a few seconds}.
+Encoding half a minute in one pass is as out-of-distribution as any
+other mismatch, which is what the numbers say once they are taken
+against the original audio rather than against a one-shot baseline.
+
+\begin{table}[H]
+    \centering
+    \caption{Log-mel distance to the ORIGINAL audio, not to another
+             decode.  Beyond about 15\,s the one-shot encode degrades
+             and chunking does not --- at 30\,s it is 4.5\,dB better.
+             Earlier figures in this project measured chunking against
+             a one-shot baseline that was itself drifting.}
+    \label{tab:voice_stream_len}
+    \small
+    \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    \textbf{Utterance} & \textbf{One-shot} & \textbf{6\,s chunks} &
+    \textbf{12\,s chunks} \\
+    \midrule
+    13\,s &  6.14\,dB & \textbf{6.04\,dB} &  6.16\,dB \\
+    30\,s & 14.16\,dB & \textbf{9.63\,dB} &  9.61\,dB \\
+    60\,s & 13.42\,dB & \textbf{11.24\,dB} & 13.11\,dB \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+A tempting alternative --- freezing the group-norm statistics from a
+warm-up window so chunks become independent --- makes streaming
+\emph{exact} (100.0\,\% token agreement against its own un-chunked
+result, against 75\,\% with live statistics) and costs \textbf{4.32\,dB},
+because those statistics are what make the encoder invariant to
+recording level: the input deviation of the first layer varies
+$\pm$22\,\% across utterances, and layers 9--11 by 39--71\,\%.  It is
+rejected, and it makes a wider point --- \textbf{token agreement is a
+misleading metric}.  Live-statistic chunking disagrees on a quarter of
+its tokens and costs 2\,dB; frozen statistics agree perfectly with
+themselves and cost twice that.  The tokens a chunked encoder gets
+``wrong'' are ones the vocoder is insensitive to.
+
+\subsubsection{Latency: the chunk is not the knob}
+\label{sec:voice_latency}
+
+Algorithmic latency is the chunk length plus its \emph{right} context.
+Left context is audio the encoder already has, and is free; only
+lookahead delays the output.  Separating the two turns a 7.3\,s pipeline
+into a 1.3\,s one for two tenths of a decibel.
+
+\begin{table}[H]
+    \centering
+    \caption{Chunk and context against latency, measured on two minutes
+             of Russian narration.  Chunk length is nearly irrelevant;
+             the last 0.32\,s of lookahead is a cliff.}
+    \label{tab:voice_latency}
+    \small
+    \begin{tabular}{@{}lllrr@{}}
+    \toprule
+    \textbf{Chunk} & \textbf{Left ctx} & \textbf{Right ctx} &
+    \textbf{Latency} & \textbf{mel dB} \\
+    \midrule
+    6\,s & 1.28\,s & 1.28\,s & 7.28\,s &  7.20 \\
+    2\,s & 1.28\,s & 1.28\,s & 3.28\,s &  7.29 \\
+    2\,s & 1.28\,s & 0.88\,s & 2.88\,s &  7.33 \\
+    2\,s & 1.28\,s & 0.32\,s & 2.32\,s &  7.33 \\
+    \textbf{1\,s} & \textbf{1.28\,s} & \textbf{0.32\,s} &
+        \textbf{1.32\,s} & \textbf{7.40} \\
+    2\,s & 1.28\,s & \textbf{0.00\,s} & 2.00\,s & \textbf{16.76} \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Going from 6\,s chunks to 1\,s costs 0.20\,dB.  Removing the final
+0.32\,s of lookahead costs \textbf{9.4\,dB} and the decode collapses.
+Quality never depended on chunk length --- only on having \emph{some}
+right context --- so the latency was reducible almost for free, and a
+listener could not distinguish the 1\,s and 6\,s outputs at all.  The
+settled configuration is \textbf{1\,s chunks, 1.28\,s of left context
+and 0.32\,s of lookahead}, for 1.32\,s of algorithmic latency, flat
+memory, and no change to the model, the bitstream or the protocol.
+
+Chunking costs compute in overlap: each 1\,s chunk re-encodes 1.6\,s of
+context around it, and encoding falls from $33\times$ real time at 6\,s
+chunks to $17\times$ at 1\,s.  Decoding is unaffected at $5\times$ and is
+now the slower half --- the figure a receiver must keep ahead of.
+
+\subsubsection{Five minutes of Russian, and an English accent}
+\label{sec:voice_russian}
+
+Streamed at the settled configuration, five minutes of continuous
+narration --- LibriVox, public domain, one speaker --- gives the
+end-to-end picture for both languages.
+
+\begin{table}[H]
+    \centering
+    \caption{Five minutes of long-form narration through the streaming
+             configuration.  The byte count is identical because the
+             token rate is fixed at 25\,Hz: language changes what the
+             tokens say, never how many there are.}
+    \label{tab:voice_longform}
+    \small
+    \begin{tabular}{@{}lrrrr@{}}
+    \toprule
+    & \textbf{Bytes} & \textbf{Rate} & \textbf{Encode} &
+    \textbf{mel vs original} \\
+    \midrule
+    English (in domain) & 9373 & 249.9\,bit/s & $33\times$ & 5.84\,dB \\
+    Russian             & 9373 & 249.9\,bit/s & $28\times$ & 7.42\,dB \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Russian costs $+1.58$\,dB, far less than the domain penalty on English
+read speech in Table~\ref{tab:voice_domain}, and a native listener
+judged the reconstruction satisfactory.  \textbf{Five minutes of speech
+is 9373 bytes: three station messages, and 1.5 minutes of air at
+rung~12.}
+
+The listener also reported something the distance metric does not
+capture --- the decoded speaker has an English accent.  It is
+measurable, and it locates a defect precisely:
+
+\begin{table}[H]
+    \centering
+    \caption{Language identification, averaged over eight segments of
+             each five-minute file.  English is unchanged; Russian loses
+             38 points and gains English.}
+    \label{tab:voice_accent}
+    \small
+    \begin{tabular}{@{}lll@{}}
+    \toprule
+    & \textbf{Original} & \textbf{Decoded at 250\,bit/s} \\
+    \midrule
+    Russian narration & ru 99\,\% & ru 61\,\%, en 12\,\%, uk 6\,\% \\
+    English narration & en 100\,\% & en 100\,\% \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+An earlier result had attributed language leakage to the prompt: giving
+a Russian utterance an English speaker's prompt dropped its identified
+language from 96\,\% to 37\,\%.  That is real, but it is not the whole
+mechanism, because here \emph{the prompt is Russian} --- the first two
+seconds of the same narration --- and the accent persists.  There are two
+independent sources, and the second is the vocoder itself, whose
+Conformer stages and HiFiGAN backend were trained entirely on English
+audiobooks and have learned how English phonemes are realised.
+
+That is the useful part.  The accent lives in the one component that can
+be fine-tuned \textbf{without touching the bitstream}
+(\S\ref{sec:voice_design}): a peer running stock weights still decodes,
+a peer with Russian-tuned weights decodes better, and no capability bit
+or protocol revision is involved.  Language-identification confidence
+gives that fine-tune a ready objective --- 61\,\%\,$\rightarrow$\,99\,\%
+--- with the unchanged English column as its regression check.
+
 \subsubsection{Where this leaves a voice mode}
 
 The bitrate fits, the compute fits, and the transport needs no change:
 the tokens are opaque bytes of exactly the size the streaming burst
 machinery already moves, and enrolment is two messages.  A voice mode
 would be a host program, like KISS and the IP tunnel, and
-\texttt{cport/} would not change.
+\texttt{cport/} would not change.  It also need not be
+store-and-forward: \S\ref{sec:voice_latency} settles the codec at
+1.32\,s of algorithmic latency with flat memory, which puts it an order
+of magnitude below the link's own turnaround and makes continuous
+operation the natural mode rather than an aspiration.
 
-What is unresolved is the failure \emph{rate} on real shack audio.
+Two defects are characterised rather than fixed.  The English accent of
+\S\ref{sec:voice_russian} is the cheaper one, and sits in the
+fine-tunable half.  The other is unresolved: the failure \emph{rate} on
+real shack audio.
 Three destroyed utterances in sixteen was measured on read speech one
 corpus away from training; the single Russian trial suggests the
 degradation is graceful there, but one utterance is an anecdote and not
