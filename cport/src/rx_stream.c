@@ -22,6 +22,9 @@
  * three the EXTREME count cost 110 kB for nothing. Caps are powers of
  * two so the index stays a mask. */
 #define BLK_CAP 128                      /* EXTREME: >= 120 blocks */
+#ifndef WEAK_COMMIT_X      /* -DWEAK_COMMIT_X=1 disables the gate (A/B) */
+#define WEAK_COMMIT_X 64   /* region-end commit needs metric >= 64x thr^2 */
+#endif
 #define BLK_CAP_NORMAL 16                /* >= 15  */
 #define BLK_CAP_ROBUST 32                /* >= 30  */
 #define BLK_TOTAL (BLK_CAP_NORMAL + BLK_CAP_ROBUST + BLK_CAP)
@@ -115,9 +118,6 @@ struct rxs_state {
     int blk_idx, burst_resync;
     int64_t burst_resume_abs;
     int64_t last_eval_blk;
-    int64_t resummarize_to;   /* blocks <= this need their summary
-                                 recomputed from raw before evaluation
-                                 (a failure rearm rewound past them) */
     int blk_base, blk_mask;   /* this instance's slice of g_blk */
     int lag_base, lag_mask;   /* and of g_lag */
     int64_t ring_hwm; /* deepest raw lookback (incl. FIR history) */
@@ -321,7 +321,6 @@ rxs_t *rxs_open(link_mode_t mode, int calibrate)
     r->active = 1;
     r->best_metric = -1;
     r->last_eval_blk = -1;
-    r->resummarize_to = -1;
     r->ring_hwm = 0;
     r->ring_miss = 0;
     return r;
@@ -557,36 +556,11 @@ static void tone_commit(rxs_t *r)
 
 static void rearm(rxs_t *r, int64_t guard_abs)
 {
-    int64_t newest = r->abs_n / r->B - 1;
     r->st = S_SEARCH;
     r->crossed = 0;
     r->decline = 0;
     r->best_metric = -1;
     r->min_blk = (guard_abs + r->B - 1) / r->B;
-    /* Resume EVALUATION at the guard, not at the newest block. The
-     * header-fail path has always rearmed at cs_abs + B with the intent
-     * "the true preamble, still in the ring, can be re-acquired" -- but
-     * S_SEARCH only ever evaluated the newest block, so every window
-     * between the failed anchor and the present was silently skipped,
-     * and the summary ring (one tone window deep) had dropped them
-     * anyway. The effect: an isolated partial-overlap spike two blocks
-     * before a real preamble commits garbage, the failed ZC/header
-     * attempts consume the samples of the true peak, and the frame is
-     * lost whole -- one group in ~130 at the voice cadence, alignment-
-     * dependent (an ~8-sample window mod 256), reproduced and traced in
-     * bench/bc_soak.c. The raw ring is ~20x deeper than the summary
-     * ring, so the catch-up recomputes summaries from raw; the cost is
-     * a bounded burst of block FFTs after a FAILED acquisition only --
-     * the live path still summarizes each block exactly once. */
-    r->last_eval_blk = r->min_blk + r->total_blocks - 2;
-    if (r->last_eval_blk < newest) {
-        int64_t b, to = r->last_eval_blk;
-        for (b = r->min_blk; b <= to; b++)
-            block_summary(r, b);
-        r->resummarize_to = newest;
-    } else {
-        r->resummarize_to = -1;
-    }
 }
 
 /* finish the data block: quantize/calibrate, decode, CRC, SNR estimate */
@@ -686,23 +660,14 @@ static int advance(rxs_t *r, rxs_event_t *ev)
     for (;;) {
         switch (r->st) {
         case S_SEARCH: {
-            int64_t newest = r->abs_n / r->B - 1;
-            int64_t blk = r->last_eval_blk + 1;
+            int64_t blk = r->abs_n / r->B - 1; /* newest complete block */
             int64_t metric;
             int shift;
-            if (blk < r->total_blocks - 1)
-                blk = r->total_blocks - 1;
-            if (blk > newest)
+            if (blk < r->total_blocks - 1 || blk < r->min_blk
+                || blk == r->last_eval_blk)
                 return 0;
             r->last_eval_blk = blk;
-            if (blk <= r->resummarize_to)
-                block_summary(r, blk);
             eval_tone_window(r, blk, &metric, &shift);
-            SDBG("search blk=%lld off=%lld metric=%lld shift=%d "
-                 "crossed=%d decline=%d best=%lld@%lld\n",
-                 (long long)blk, (long long)(blk - r->total_blocks + 1),
-                 (long long)metric, shift, r->crossed, r->decline,
-                 (long long)r->best_metric, (long long)r->best_off_blk);
             /* partial tone overlap already crosses the threshold ~a full
              * window before the true peak, so a decline-from-best rule
              * commits too early (measured). Instead: track the argmax over
@@ -730,9 +695,36 @@ static int advance(rxs_t *r, rxs_event_t *ev)
              * argmax has been stable for a full window span of newer
              * evaluations (quiet channels: data symbols can hover at the
              * threshold so the region never cleanly ends, but the aligned
-             * tone peak scores far above them and stays the argmax) */
+             * tone peak scores far above them and stays the argmax).
+             *
+             * The region-end commit is gated on the metric being STRONG
+             * (>= 64x the threshold). A tone field ENTERING the window
+             * can produce an isolated above-threshold spike -- one or
+             * two evaluations at ~10x threshold, at an ~8-sample window
+             * of the frame's start offset mod 256 -- whose region dies
+             * immediately, and committing it anchors ~2 blocks before
+             * the REAL preamble: the failed ZC/header attempts then
+             * consume the true peak's samples, which the search (newest
+             * block only, summary ring one window deep) never revisits,
+             * and the frame is lost whole. That was the entire 0.76%
+             * "clean-wire" broadcast group loss of the voice campaign
+             * (make bcsoak reproduces it: 28/720 frames). A WEAK argmax
+             * instead takes the patient path: evaluation continues, the
+             * true peak arrives within the next window, replaces the
+             * argmax, and its own strong region-end commit fires.
+             * Genuine peaks measure 1e4..1e6 x threshold at NORMAL and
+             * ~1e3x at the EXTREME knee, so 64x costs a real frame
+             * nothing but the stability wait it already tolerates on
+             * quiet channels -- and a first fix that instead REWOUND
+             * the search and recomputed summaries from the raw ring
+             * melted both boards (cap_overruns in the millions: every
+             * failed EXTREME acquisition re-scanned its excursion, on
+             * noise, forever). Prefer not committing garbage over
+             * recovering from having committed it. */
             if (r->crossed
-                && (r->decline >= DECLINE_BLOCKS
+                && ((r->decline >= DECLINE_BLOCKS
+                     && r->best_metric >= (int64_t)r->thr_q10 * r->thr_q10
+                                              * WEAK_COMMIT_X)
                     || blk - r->best_eval_blk
                            >= r->total_blocks + DECLINE_BLOCKS)) {
                 tone_commit(r);

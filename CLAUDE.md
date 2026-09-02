@@ -317,6 +317,30 @@ Cross-module invariants that are easy to break:
   Keep both lags; `test_stream` holds the two block-aligned leads as
   self-consistency cases, and the EXTREME sweep gained 6.9 % decodes
   from it. The Python fixed `_detect_newman` has the same construction.
+- The streaming detector's region-end commit (`rx_stream.c` S_SEARCH)
+  is gated on the metric being STRONG (`WEAK_COMMIT_X`, 64x thr^2); a
+  weak argmax takes the argmax-stability path instead. Why: a tone
+  field ENTERING the window can produce an isolated above-threshold
+  spike (~10x thr^2 vs 1e4..1e6x for real peaks) whose region dies at
+  once, and committing it anchors ~2 blocks before the REAL preamble --
+  an ~8-sample window of the frame's start offset mod 256 -- after
+  which the failed ZC/header attempts consume the true peak's samples,
+  which the newest-block-only search never revisits (the summary ring
+  is one tone window deep). The frame is lost whole with nothing logged
+  but a seq gap at the next SYNC: that was the ENTIRE 0.76%
+  "clean-wire" broadcast group loss of the voice campaign, and the
+  "on-air acquisition miss by design" reading of it was wrong. Under
+  the gate the weak spike simply waits, the true peak arrives within
+  the next window and replaces the argmax, and its own strong commit
+  fires -- the garbage is never committed at all. `make bcsoak` (in
+  `make robust`) is the regression: 28/720 frames lost before, 0/1800
+  after; `make zcab` guards the EXTREME knee. Do NOT fix this by
+  rewinding the search and recomputing summaries from the raw ring
+  after a failure: that was implemented first, passed every host
+  suite, and MELTED both boards (cap_overruns in the millions,
+  push_ms_max 2.7 s) -- at EXTREME every failed acquisition re-scanned
+  its whole excursion on noise, forever. Prefer not committing garbage
+  over recovering from having committed it.
 - Mixing float and fixed receivers: the fixed chain's detector returns
   positions in ANALYTIC index space, offset by the 31-sample Hilbert
   group delay. It cancels inside `FixedReceiver.receive()` but any
