@@ -3599,9 +3599,11 @@ listening.  Together: first audio at the far station about
 The transmissions kept reporting losses --- 7.7\,\%, 11.8\,\%,
 14.4\,\% of bytes --- on a cross-wired pair at rung~12 carrying
 250\,bit/s.  On a channel with tens of decibels of margin and a duty
-cycle this low that looks impossible, and chasing it produced a wrong
-answer before the right one.  Both are reported, because the way the
-wrong one survived two rounds of measurement is the more useful part.
+cycle this low that looks impossible, and chasing it produced two
+wrong answers before the right one.  All three are reported, because
+how each wrong one survived its own round of measurement is the more
+useful part --- and because the right one ended in the firmware, not
+in an explanation.
 
 A lost unit is always the same shape: \textbf{one group, lost whole}
 --- 30 or 35 bytes depending on how the group was sized, about a
@@ -3668,33 +3670,90 @@ and 17.92\,s into their streams --- \emph{uniformly spread}, with one
 transmission losing two.  A warm-up that finished twenty seconds
 earlier cannot miss a group at 10.88\,s.
 
-\paragraph{What it actually is.}
-Across all 69 transmissions in this campaign, 2376 frames were keyed
-and 18 were lost: a \textbf{group-loss rate of 0.76\,\%}.  That is not
-a defect, it is the acquisition statistics of non-acknowledged
-broadcast, and \S\ref{sec:cport_bcast} already records the same
-phenomenon from the other direction --- 38 of 39 groups delivered
-across an earlier campaign at rung~4, a 2.6\,\% loss rate.  The voice
-path at rung~12 is running three times better than the documented
-figure, and the honest conclusion is that it was never misbehaving.
+\paragraph{The second wrong answer, and how it fell.}
+The natural conclusion at this point --- and the one a draft of this
+section briefly drew --- was that 0.76\,\% is simply the acquisition
+statistics of non-acknowledged broadcast: \S\ref{sec:cport_bcast}
+records 38 of 39 groups across an earlier campaign at rung~4, a
+2.6\,\% loss rate, and the voice path was running three times better
+than that.  Acquisition is a threshold decision, a high
+signal-to-noise ratio makes a miss unlikely rather than impossible,
+and nothing in a broadcast retries.  Plausible, self-consistent, and
+wrong --- the instinct that a clean channel should lose nothing was
+right all the way down.
 
-Preamble acquisition is a threshold decision.  A high signal-to-noise
-ratio makes a miss unlikely; it does not make it impossible, and
-nothing in a broadcast retries.  Every acknowledged path on this radio
-hides exactly this by retransmitting --- which is precisely why the
-counters \texttt{frames\_ok} and \texttt{frames\_lost} exist, and why
-they were built into the broadcast EOS in the first place.  The
-instinct that a clean channel should lose nothing is right about the
-\emph{channel} and wrong about the acquisition in front of it.
+What broke this one was refusing to accept ``statistics'' without a
+reproduction.  A soak bench (\texttt{make bcsoak}) drives the
+firmware's own group build-and-walk through the streaming receiver at
+the voice shape --- two-frame groups, random payload, random gaps,
+random sample-phase lead, thousands of groups --- and the loss
+reproduced \emph{on the host}, with no noise, no boards and no air:
+28 of 720 frames, deterministic per seed, every missed group starting
+in the same $\sim$8-sample window of alignment mod 256.  A rate that
+depends on sample phase is not statistics.
+
+\paragraph{The actual defect.}
+Traced on a failing seed: a tone field \emph{entering} the detection
+window can produce one isolated above-threshold evaluation --- metric
+$\sim$$5\times10^{7}$ against $\sim$$10^{11}$ for the aligned peak, at
+a coarse-frequency shift of $-5$ bins --- whose above-threshold region
+dies immediately.  The detector's region-argmax rule committed it,
+anchoring two blocks before the real preamble.  The header then fails,
+and the recovery rearm does exactly what its comment has promised all
+along --- ``the true preamble, still in the ring, can be re-acquired''
+--- except that nothing ever looked: the search only evaluated the
+\emph{newest} block, so every window between the failed anchor and the
+present was skipped, and the failed ZC and header attempts had
+meanwhile consumed the true peak's samples.  Three garbage attempts
+walk straight over the group.  The comment described a recovery the
+machinery never performed.
+
+Two fixes were built, and the difference between them is the useful
+part.  The first made the machinery match the comment: rewind the
+search after a failure and recompute block summaries from the raw
+ring.  It passed all 170 tests, the robustness gate and an 1800-group
+soak --- and melted both boards within minutes of flashing:
+at EXTREME, failed acquisitions on plain noise are routine, each one
+re-scanned its whole excursion, and the capture FIFO never recovered
+(4.8 million dropped samples on the receiving board, which decoded
+nothing at all).  No host bench models EXTREME-scale CPU under a
+failure loop, which is exactly why it survived validation.  The second
+fix is three lines and does strictly \emph{less} work than the
+original code: the fast region-end commit now requires the metric to
+be \emph{strong} ($\geq 64\times$ the threshold; real peaks measure
+$10^{4}$--$10^{6}\times$), and a weak argmax takes the
+argmax-stability path the code already had --- during which the true
+peak's evaluations arrive and replace it.  The garbage is never
+committed at all.  Prefer not committing garbage over recovering from
+having committed it.
+
+Validation, in the order it should have happened the first time: the
+soak falls to 0 lost in 1800 groups; a gate-on/gate-off A/B at the
+EXTREME sensitivity knee decodes \emph{identically} at every
+signal-to-noise point with zero false alarms in both arms; and on the
+reflashed boards, \textbf{24 of 24 live voice transmissions
+($\sim$900 frames) crossed with zero loss} --- with the warm-up settle
+deliberately disabled in half of them, which is what being the actual
+cause looks like.  Against the pre-fix 21.7\,\% per-transmission rate,
+24 clean runs is $p = 0.003$.  Whether the earlier rung-4 campaign's
+2.6\,\% shares this cause cannot be settled retroactively, but the
+soak now guards the code path either way.
 
 The methodological lesson is the expensive one and worth stating
 plainly.  A fault that logs nothing invites the investigator to supply
-the missing narrative, and two rounds of measurement confirmed a story
-that a third round demolished.  What broke the tie was not more data of
-the same kind --- it was changing the measurement so it could not
-flatter the hypothesis (interleaving the arms) and recording the raw
-artefact rather than a statistic derived from it (the byte streams).
-Both were cheap, and neither was done first.
+the missing narrative, and this one collected \emph{three} narratives
+--- a timing fix confirmed by two rounds of measurement, then ``by
+design'' backed by a plausible reference rate --- before the real
+defect surfaced.  Each fell to the same move: make the evidence harder
+to flatter.  Interleave the arms so drift cannot masquerade as an
+effect; keep the raw artefact (the byte streams) rather than a
+statistic derived from it; and refuse ``statistics'' as an explanation
+until the statistic survives a reproduction attempt.  All three were
+cheap, and none was done first.  The one that found the bug --- soak
+the exact code path at scale on the host --- also produced the second
+regression, because host validation cannot see embedded CPU: the
+firmware that shipped was proven on the bench \emph{and} the stand,
+and both proofs were necessary.
 
 \paragraph{Why a lost group is survivable at all.}
 The byte-alignment fix has a consequence worth stating separately,
@@ -3708,12 +3767,13 @@ hears a missing syllable, not a collapse.  It is also the argument for
 broadcast over ARQ at this bitrate, made concrete: the failure mode of
 dropping a group is bounded, local, and about a second long.
 
-This property is load-bearing rather than a nicety, and the previous
-paragraphs are why.  A 0.76\,\% group loss is not a bug awaiting a
-fix; it is what non-acknowledged broadcast costs, and a voice mode has
-to be built to survive it rather than to avoid it.  Byte-aligned groups
-are what convert an unavoidable acquisition miss into a missing
-syllable.
+This property remains load-bearing even now that the 0.76\,\% turned
+out to be a fixable defect: over a real fading channel, groups WILL be
+lost, no acknowledgement will recover them, and byte-aligned groups
+are what convert each loss into a missing syllable rather than a
+desynchronised remainder.  The clean-wire campaign proved the
+tolerance works; the fix means it is no longer being spent on the
+receiver's own commit rule.
 
 \subsubsection{Where this leaves a voice mode}
 
