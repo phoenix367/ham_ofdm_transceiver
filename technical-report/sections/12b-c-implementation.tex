@@ -2852,10 +2852,12 @@ emits 25 tokens per second, each a 10-bit index into a 1024-entry
 codebook: \textbf{250\,bit/s}, or 31.25\,B/s.  That is a quarter of
 what the top rung carries.
 
-This subsection reports an evaluation, not an implementation.  Nothing
-in \texttt{cport/} changed, and the conclusion is that nothing should
---- but the measurements below decide what a voice mode would cost and
-which of its problems are fixable.
+Most of what follows is evaluation: the measurements decide what a
+voice mode would cost and which of its problems are fixable.  The last
+part is not.  \S\ref{sec:voice_onair} puts the codec on the air
+between the two boards --- push a button, speak, and the far station
+writes a \texttt{.wav} --- and that exercise cost exactly one firmware
+change, for a reason no host-side measurement could have found.
 
 \subsubsection{The link is not the constraint}
 
@@ -3532,17 +3534,193 @@ or protocol revision is involved.  Language-identification confidence
 gives that fine-tune a ready objective --- 61\,\%\,$\rightarrow$\,99\,\%
 --- with the unchanged English column as its regression check.
 
+\subsubsection{Putting it on the air}
+\label{sec:voice_onair}
+
+The measurements above are all host-side.  What follows is the codec
+actually running between the two boards: a browser front end
+(\texttt{host/webvoice/}) that drives one board as transmitter and the
+other as receiver, holds a push-to-talk button, and writes what the far
+station decodes to a \texttt{.wav}.  It works, and the three defects it
+took to get there are more instructive than the fact that it does.
+
+Transport is \textbf{broadcast} (\texttt{PKT\_TYP\_BCAST}, ptype~15),
+not the ARQ path.  For speech a late repeat is worth less than a gap:
+the same 20\,s utterance costs 2.0--5.2\,s per message through the
+acknowledged path against 0.9\,s broadcast, and a retransmission that
+arrives after the listener has moved on is pure harm.  Nothing is
+acknowledged and nothing is repeated.
+
+\paragraph{Bit alignment, and why the first group always worked.}
+The token packer emits ten bits each and zero-pads to a byte boundary,
+so 50 tokens is 500 bits in 63 bytes --- four pad bits.  Independently
+packed groups are then concatenated by the receiver, which has no
+framing inside the stream and unpacks the whole thing as one bit
+sequence.  Every group after the first is therefore shifted by four
+bits, then eight, then twelve.  The symptom is diagnostic in hindsight:
+the first second of every transmission decoded perfectly and everything
+after it was noise, which reads like a channel that collapses and is
+arithmetic.  The fix is to emit only multiples of \textbf{four} tokens
+--- 40 bits is exactly 5 bytes --- and carry the remainder into the
+next group.  Verified 300/300 tokens bit-exact end to end.
+
+\paragraph{The latency was the group rule, not the codec.}
+\S\ref{sec:voice_latency} settles the codec at 1.32\,s.  The radio then
+added four more, and none of it was DSP\@.  The firmware keys only
+\emph{full} groups while chunks are still arriving, which is correct
+for a file --- a starved tail group would go out without EOS, and the
+true last frame must carry it --- but a group is
+$\texttt{BC\_GROUP}\times(\texttt{BC\_FRAME}-2) = 96$ bytes, and at
+250\,bit/s that is 3.1\,s of talking that must accumulate before the
+first carrier goes up.
+
+This is the one place \texttt{cport/} did change.  A real-time flag
+(ptype bit 5, \texttt{BC\_RT}) keys what is queued instead of waiting.
+It has three parts and the middle one is the trap: the group must
+shrink to a \emph{power of two} matching the frames actually keyed,
+because the SYNC descriptor carries $\log_2(\text{group})$ and a
+receiver told to expect four blocks when three were sent walks into a
+block that never comes and goes deaf for a block time --- the same
+failure that once made streamed bursts loop.  The flag is opt-in and
+off for every other broadcast, since a smaller group is a preamble per
+fewer frames and trades air time for latency.
+
+A second, duller second and a half was the machine learning framework:
+the first encode cost 826\,ms against 47\,ms for every one after, all of
+it lazy allocation and kernel selection landing on the first
+transmission.  Warming the graphs at startup moves it where nobody is
+listening.  Together: first audio at the far station about
+\textbf{3.6\,s} after the talker starts, against roughly 6\,s before.
+
+\paragraph{Frame loss on a clean wire, and what it actually was.}
+The transmissions kept reporting losses --- 7.7\,\%, 11.8\,\%,
+14.4\,\% of bytes --- on a cross-wired pair at rung~12 carrying
+250\,bit/s.  On a channel with tens of decibels of margin and a
+duty cycle this low, that is not a channel problem, and it was not.
+
+A lost unit is always the same size: \textbf{one group, 30 bytes} ---
+a SYNC frame plus its partner, 0.96\,s of speech.  Three independent
+measurements agree on it.  The recording comes back 0.96\,s short; the
+byte streams differ by exactly 30; and the sent/received dump names the
+offset outright:
+
+\begin{quote}\ttfamily\small
+sent 660 B, received 630 B, missing 30 B\\
+streams agree for the first 30 B\\
+$\Rightarrow$ 30 B missing at offset 30\\
+\hphantom{$\Rightarrow$} resumes at sent-offset 60; tail after that matches
+\end{quote}
+
+\noindent
+The receiver never acquires that group's preamble.  That is why nothing
+anywhere logged it: no walk is entered, so no failed-block event fires,
+and the loss is discovered only from the sequence gap in the
+\emph{next} SYNC\@.  A silent failure of this shape is exactly what the
+sequence field exists for.
+
+Three candidate causes were eliminated by counter rather than by
+argument, which is the only way to make progress on a fault that logs
+nothing.  The receiving board's capture-FIFO overrun counter
+(\texttt{cap\_overruns}) stayed at zero across every losing run --- the
+board was not dropping samples.  Its \texttt{bc\_rx\_lost} beacon
+counter, which only the failed-block path increments, also stayed at
+zero --- the frames were never \emph{heard}, not mis-decoded.  And the
+mid-stream broadcast statistics exchange, which does make the receiver
+key a frame, showed no correlation: three of four losses occurred in
+runs that had none.
+
+Both real causes were on the host, and both are ordering.
+
+The first is a race.  The web server is threaded and the browser posted
+audio blocks fire-and-forget from \texttt{onaudioprocess}, so the
+encoder and the broadcast sender ran on several threads at once ---
+\textbf{27 collisions in a single 20\,s transmission}, counted.  Two of
+them corrupt the token stream directly, but the damaging one is the
+broadcast-open flag, which was read \emph{before} the USB write and
+assigned \emph{after} it: two threads both see it clear and both send a
+non-continuation command, and the firmware treats the second as a new
+broadcast --- closing the one on the air, overwriting the unsent bytes
+and resetting the sequence to zero.  Serializing the ingest fixes it,
+but a server-side lock alone does not order the \emph{wire}: two
+concurrent \texttt{fetch()} calls may land in either order, so the
+browser chains its posts and drains the chain before the close.
+
+The second is the warm-up, and it is the interesting one.  The link
+must be warmed before each transmission --- the rate ladder decays
+after \texttt{RX\_STALE\_S} of silence and an idle station falls back to
+listening on EXTREME only, so a cold broadcast goes out at a rung the
+peer may not be receiving on.  The warm-up is an ARQ exchange, and it
+was declared complete the moment the far station \emph{decoded} the
+message.  But the acknowledgement it owed was still to be keyed, and
+the link is half duplex: the broadcast then started into a receiver
+that was transmitting, and a group went whole.  Waiting for the
+transmit board's \texttt{pending} to clear and its queues to drain
+costs about a second, and costs it while the operator has not started
+talking.
+
+\begin{table}[H]
+    \centering
+    \caption{Group loss against the warm-up settle.  Same two boards,
+             same 20\,s of audio, rung~12, no other change.  A loss is
+             always exactly one group.}
+    \label{tab:voice_settle}
+    \small
+    \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    \textbf{Warm-up} & \textbf{Transmissions} & \textbf{Lost a group} &
+    \textbf{Rate} \\
+    \midrule
+    returns on decode (as found) & 23 & 5 & 21.7\,\% \\
+    \textbf{waits for the exchange} & \textbf{16} & \textbf{0} &
+        \textbf{0\,\%} \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Fisher's exact test gives $p = 0.066$ two-tailed, and the probability of
+16 consecutive clean transmissions at the unsettled rate is $0.020$.
+That is supporting evidence, not proof, and one detail is unexplained:
+of the four losses whose position could be recovered, three sat near the
+head of the stream where the warm-up argument places them and one sat
+late, where it does not.  Every recording is therefore written with its
+sent and received byte streams beside it, so the next occurrence names
+itself instead of being inferred from a duration.
+
+\paragraph{Why a lost group is survivable at all.}
+The byte-alignment fix has a consequence worth stating separately,
+because it is the property that makes non-acknowledged voice viable.
+Once every group is a whole number of bytes carrying a whole number of
+tokens, a group that never arrives is a \emph{gap} --- the decoder
+resumes in step on the next one.  Before the fix, the same lost group
+desynchronised everything after it.  This is why a transmission
+measured at 7.7\,\% loss was still clearly intelligible: the listener
+hears a missing syllable, not a collapse.  It is also the argument for
+broadcast over ARQ at this bitrate, made concrete: the failure mode of
+dropping a group is bounded, local, and about a second long.
+
 \subsubsection{Where this leaves a voice mode}
 
-The bitrate fits, the compute fits, and the transport needs no change:
-the tokens are opaque bytes of exactly the size the streaming burst
-machinery already moves, and enrolment is two messages.  A voice mode
-would be a host program, like KISS and the IP tunnel, and
-\texttt{cport/} would not change.  It also need not be
-store-and-forward: \S\ref{sec:voice_latency} settles the codec at
-1.32\,s of algorithmic latency with flat memory, which puts it an order
-of magnitude below the link's own turnaround and makes continuous
-operation the natural mode rather than an aspiration.
+The bitrate fits, the compute fits, and the transport very nearly
+needs no change: the tokens are opaque bytes of exactly the size the
+streaming burst machinery already moves, and enrolment is two messages.
+A voice mode is a host program, like KISS and the IP tunnel, and
+\S\ref{sec:voice_onair} is that program working between two boards.
+It is also not store-and-forward: \S\ref{sec:voice_latency} settles
+the codec at 1.32\,s of algorithmic latency with flat memory, an order
+of magnitude below the link's own turnaround.
+
+The single firmware change is worth recording, because the earlier
+draft of this section predicted none and was wrong for an instructive
+reason.  Every host-side measurement was of the \emph{codec}, and the
+codec was never the problem: the radio's own rule that a broadcast keys
+only full groups is correct for a file and is, for speech, three
+seconds of latency that no amount of chunk tuning can reach.  A knob
+that a caller can decline (\texttt{BC\_RT}) was the right shape,
+because the rule it waives is still right for everything else.  The
+general lesson is the one this chapter keeps arriving at: a policy that
+is correct for the traffic it was written for becomes a defect when a
+new class of traffic arrives, and the fix is to make it a choice rather
+than to change it.
 
 Two defects are characterised rather than fixed.  The English accent of
 \S\ref{sec:voice_russian} is the cheaper one, and sits in the
