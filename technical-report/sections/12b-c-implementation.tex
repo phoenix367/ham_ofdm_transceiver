@@ -3541,8 +3541,11 @@ The measurements above are all host-side.  What follows is the codec
 actually running between the two boards: a browser front end
 (\texttt{host/webvoice/}) that drives one board as transmitter and the
 other as receiver, holds a push-to-talk button, and writes what the far
-station decodes to a \texttt{.wav}.  It works, and the three defects it
-took to get there are more instructive than the fact that it does.
+station decodes to a \texttt{.wav}.  It works, and how it got there is more
+instructive than the fact that it does: two host defects, one firmware
+policy that was right for files and wrong for speech, and a fourth
+problem that turned out not to be a defect at all --- after two rounds
+of measurement had confirmed that it was.
 
 Transport is \textbf{broadcast} (\texttt{PKT\_TYP\_BCAST}, ptype~15),
 not the ARQ path.  For speech a late repeat is worth less than a gap:
@@ -3592,99 +3595,106 @@ transmission.  Warming the graphs at startup moves it where nobody is
 listening.  Together: first audio at the far station about
 \textbf{3.6\,s} after the talker starts, against roughly 6\,s before.
 
-\paragraph{Frame loss on a clean wire, and what it actually was.}
+\paragraph{Group loss on a clean wire, and the wrong answer first.}
 The transmissions kept reporting losses --- 7.7\,\%, 11.8\,\%,
 14.4\,\% of bytes --- on a cross-wired pair at rung~12 carrying
-250\,bit/s.  On a channel with tens of decibels of margin and a
-duty cycle this low, that is not a channel problem, and it was not.
+250\,bit/s.  On a channel with tens of decibels of margin and a duty
+cycle this low that looks impossible, and chasing it produced a wrong
+answer before the right one.  Both are reported, because the way the
+wrong one survived two rounds of measurement is the more useful part.
 
-A lost unit is always the same size: \textbf{one group, 30 bytes} ---
-a SYNC frame plus its partner, 0.96\,s of speech.  Three independent
-measurements agree on it.  The recording comes back 0.96\,s short; the
-byte streams differ by exactly 30; and the sent/received dump names the
-offset outright:
+A lost unit is always the same shape: \textbf{one group, lost whole}
+--- 30 or 35 bytes depending on how the group was sized, about a
+second of speech.  Three independent measurements agree.  The recording
+comes back short by exactly that much; the byte streams differ by
+exactly that much; and the sent/received dump names the offset:
 
 \begin{quote}\ttfamily\small
 sent 660 B, received 630 B, missing 30 B\\
-streams agree for the first 30 B\\
-$\Rightarrow$ 30 B missing at offset 30\\
-\hphantom{$\Rightarrow$} resumes at sent-offset 60; tail after that matches
+streams agree for the first 310 B\\
+$\Rightarrow$ 30 B missing at offset 310\\
+\hphantom{$\Rightarrow$} resumes at sent-offset 340; tail after that matches
 \end{quote}
 
 \noindent
 The receiver never acquires that group's preamble.  That is why nothing
 anywhere logged it: no walk is entered, so no failed-block event fires,
-and the loss is discovered only from the sequence gap in the
-\emph{next} SYNC\@.  A silent failure of this shape is exactly what the
-sequence field exists for.
+and the loss is discovered only from the sequence gap in the \emph{next}
+SYNC\@.  A silent failure of this shape is what the sequence field
+exists for.
 
 Three candidate causes were eliminated by counter rather than by
 argument, which is the only way to make progress on a fault that logs
-nothing.  The receiving board's capture-FIFO overrun counter
-(\texttt{cap\_overruns}) stayed at zero across every losing run --- the
-board was not dropping samples.  Its \texttt{bc\_rx\_lost} beacon
-counter, which only the failed-block path increments, also stayed at
-zero --- the frames were never \emph{heard}, not mis-decoded.  And the
-mid-stream broadcast statistics exchange, which does make the receiver
-key a frame, showed no correlation: three of four losses occurred in
-runs that had none.
+nothing.  The receiving board's capture-FIFO overrun counter stayed at
+zero across every losing run --- it was not dropping samples.  Its
+\texttt{bc\_rx\_lost} beacon counter, which only the failed-block path
+increments, also stayed at zero --- the frames were never \emph{heard},
+not mis-decoded.  And the mid-stream broadcast statistics exchange,
+which does make the receiver key a frame, showed no correlation.
 
-Both real causes were on the host, and both are ordering.
-
-The first is a race.  The web server is threaded and the browser posted
-audio blocks fire-and-forget from \texttt{onaudioprocess}, so the
+Two genuine host defects were found on the way and are worth having
+regardless of what caused the loss.  The first is a race: the web
+server is threaded and the browser posted audio fire-and-forget, so the
 encoder and the broadcast sender ran on several threads at once ---
-\textbf{27 collisions in a single 20\,s transmission}, counted.  Two of
-them corrupt the token stream directly, but the damaging one is the
-broadcast-open flag, which was read \emph{before} the USB write and
-assigned \emph{after} it: two threads both see it clear and both send a
-non-continuation command, and the firmware treats the second as a new
-broadcast --- closing the one on the air, overwriting the unsent bytes
-and resetting the sequence to zero.  Serializing the ingest fixes it,
-but a server-side lock alone does not order the \emph{wire}: two
-concurrent \texttt{fetch()} calls may land in either order, so the
-browser chains its posts and drains the chain before the close.
+\textbf{27 collisions in a single 20\,s transmission}, counted.  The
+damaging one is the broadcast-open flag, read \emph{before} the USB
+write and assigned \emph{after} it, so two threads both see it clear and
+both send a non-continuation command; the firmware treats the second as
+a new broadcast, closing the one on the air and resetting the sequence.
+The second is the warm-up, which was declared complete the moment the
+far station \emph{decoded} the message --- while the acknowledgement it
+owed was still to be keyed, and the link is half duplex.  Both are
+fixed.  Neither was the cause.
 
-The second is the warm-up, and it is the interesting one.  The link
-must be warmed before each transmission --- the rate ladder decays
-after \texttt{RX\_STALE\_S} of silence and an idle station falls back to
-listening on EXTREME only, so a cold broadcast goes out at a rung the
-peer may not be receiving on.  The warm-up is an ARQ exchange, and it
-was declared complete the moment the far station \emph{decoded} the
-message.  But the acknowledgement it owed was still to be keyed, and
-the link is half duplex: the broadcast then started into a receiver
-that was transmitting, and a group went whole.  Waiting for the
-transmit board's \texttt{pending} to clear and its queues to drain
-costs about a second, and costs it while the operator has not started
-talking.
+\paragraph{How the wrong answer survived.}
+The warm-up defect predicts losses at the \emph{head} of a stream, and
+the first evidence agreed: 5 losses in 23 transmissions without the fix
+against 0 in 16 with it, Fisher $p = 0.066$, and three of four
+recoverable loss positions near the start.  That is a plausible-looking
+result, and it was wrong twice over.  The loss positions came from
+correlating audio envelopes, which is too blunt to locate a
+one-second gap in a re-synthesised waveform; and the two arms were
+measured an hour apart, so anything that drifted was attributed to the
+fix.
 
-\begin{table}[H]
-    \centering
-    \caption{Group loss against the warm-up settle.  Same two boards,
-             same 20\,s of audio, rung~12, no other change.  A loss is
-             always exactly one group.}
-    \label{tab:voice_settle}
-    \small
-    \begin{tabular}{@{}lrrr@{}}
-    \toprule
-    \textbf{Warm-up} & \textbf{Transmissions} & \textbf{Lost a group} &
-    \textbf{Rate} \\
-    \midrule
-    returns on decode (as found) & 23 & 5 & 21.7\,\% \\
-    \textbf{waits for the exchange} & \textbf{16} & \textbf{0} &
-        \textbf{0\,\%} \\
-    \bottomrule
-    \end{tabular}
-\end{table}
+Repeating it properly settles it.  Twelve \emph{interleaved} pairs ---
+the arms alternating within each pair, so drift cannot favour either
+--- give 1 loss in 12 with the fix against 2 in 12 without,
+$p = 1.000$.  There is no effect.  The earlier sixteen clean
+transmissions were chance, and the interleaved design is what exposes
+that.  By then the byte dumps were in place, and they close the
+argument outright: the gaps sit at 0.96\,s, 6.88\,s, 9.92\,s, 10.88\,s
+and 17.92\,s into their streams --- \emph{uniformly spread}, with one
+transmission losing two.  A warm-up that finished twenty seconds
+earlier cannot miss a group at 10.88\,s.
 
-Fisher's exact test gives $p = 0.066$ two-tailed, and the probability of
-16 consecutive clean transmissions at the unsettled rate is $0.020$.
-That is supporting evidence, not proof, and one detail is unexplained:
-of the four losses whose position could be recovered, three sat near the
-head of the stream where the warm-up argument places them and one sat
-late, where it does not.  Every recording is therefore written with its
-sent and received byte streams beside it, so the next occurrence names
-itself instead of being inferred from a duration.
+\paragraph{What it actually is.}
+Across all 69 transmissions in this campaign, 2376 frames were keyed
+and 18 were lost: a \textbf{group-loss rate of 0.76\,\%}.  That is not
+a defect, it is the acquisition statistics of non-acknowledged
+broadcast, and \S\ref{sec:cport_bcast} already records the same
+phenomenon from the other direction --- 38 of 39 groups delivered
+across an earlier campaign at rung~4, a 2.6\,\% loss rate.  The voice
+path at rung~12 is running three times better than the documented
+figure, and the honest conclusion is that it was never misbehaving.
+
+Preamble acquisition is a threshold decision.  A high signal-to-noise
+ratio makes a miss unlikely; it does not make it impossible, and
+nothing in a broadcast retries.  Every acknowledged path on this radio
+hides exactly this by retransmitting --- which is precisely why the
+counters \texttt{frames\_ok} and \texttt{frames\_lost} exist, and why
+they were built into the broadcast EOS in the first place.  The
+instinct that a clean channel should lose nothing is right about the
+\emph{channel} and wrong about the acquisition in front of it.
+
+The methodological lesson is the expensive one and worth stating
+plainly.  A fault that logs nothing invites the investigator to supply
+the missing narrative, and two rounds of measurement confirmed a story
+that a third round demolished.  What broke the tie was not more data of
+the same kind --- it was changing the measurement so it could not
+flatter the hypothesis (interleaving the arms) and recording the raw
+artefact rather than a statistic derived from it (the byte streams).
+Both were cheap, and neither was done first.
 
 \paragraph{Why a lost group is survivable at all.}
 The byte-alignment fix has a consequence worth stating separately,
@@ -3697,6 +3707,13 @@ measured at 7.7\,\% loss was still clearly intelligible: the listener
 hears a missing syllable, not a collapse.  It is also the argument for
 broadcast over ARQ at this bitrate, made concrete: the failure mode of
 dropping a group is bounded, local, and about a second long.
+
+This property is load-bearing rather than a nicety, and the previous
+paragraphs are why.  A 0.76\,\% group loss is not a bug awaiting a
+fix; it is what non-acknowledged broadcast costs, and a voice mode has
+to be built to survive it rather than to avoid it.  Byte-aligned groups
+are what convert an unavoidable acquisition miss into a missing
+syllable.
 
 \subsubsection{Where this leaves a voice mode}
 
