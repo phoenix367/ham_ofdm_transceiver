@@ -587,6 +587,13 @@ static double g_bc_hold_s = BC_RX_HOLD_S;
 static uint8_t g_bc_src[BC_TX_CAP];
 static int g_bc_src_len, g_bc_src_off, g_bc_seq, g_bc_rung, g_bc_ptype_tx;
 static int g_bc_complete = 1;  /* no more chunks coming from the host */
+/* Real time (ptype bit 5): key whatever bytes are here rather than waiting
+ * for a full group. Speech cannot wait 3 s for BC_GROUP*(BC_FRAME-2) = 96
+ * bytes to accumulate -- that delay IS the latency, and a late group is
+ * worth less than a short one. Costs a preamble per keying, so it is opt
+ * in and off for every other broadcast. */
+#define BC_RT 0x20
+static int g_bc_realtime;
 /* Hold-and-probe, the socket demo's line for line (bc_poll_link): a
  * broadcast with no rung given and an idle link is HELD while
  * control-class probes drive the ladder up -- a probe is a frame the
@@ -693,6 +700,7 @@ static void bc_cmd(void *ctx, int ptype, int rung, const uint8_t *data,
     (void)ctx;
     if (len <= 0 || len > BC_TX_CAP)
         return;
+    g_bc_realtime = (ptype & BC_RT) != 0;
     if (cont) {
         if (g_bc_src_len == 0)
             return;   /* no broadcast in flight: a stray continuation
@@ -916,6 +924,21 @@ static int bc_group_frames(void)
     while (g > 1
            && stream_air_time_pub(g_bc_rung, BC_FRAME, g) > BC_GROUP_MAX_AIR_S)
         g >>= 1;
+    if (g_bc_realtime && !g_bc_complete) {
+        /* Shrink to what is actually queued. The SYNC descriptor carries
+         * log2(group), so the count must stay a POWER OF TWO and must
+         * match the frames really keyed -- announce four and send three
+         * and the receiver's walk waits for a block that never comes,
+         * going deaf for a block time (the same failure that made
+         * streamed bursts loop). */
+        int avail = g_bc_src_len - g_bc_src_off;
+        int need = 1;
+        if (avail > BC_FRAME - 3)
+            need += (avail - (BC_FRAME - 3) + (BC_FRAME - 3))
+                    / (BC_FRAME - 2);
+        while (g > 1 && g > need)
+            g >>= 1;
+    }
     return g;
 }
 
@@ -1843,8 +1866,10 @@ int main(void)
                     /* while chunks are still arriving, only key a FULL
                      * group -- a starved tail group would go out
                      * without EOS and the true last frame must carry
-                     * it */
-                    && (g_bc_close_due || g_bc_complete
+                     * it. Real time waives this deliberately: the
+                     * stream is still closed by its own last chunk, so
+                     * EOS still lands on a real frame. */
+                    && (g_bc_close_due || g_bc_complete || g_bc_realtime
                         || g_bc_src_len - g_bc_src_off
                                >= BC_GROUP * (BC_FRAME - 2))) {
                     /* one GROUP per keying; the yield between groups is
