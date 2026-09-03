@@ -115,6 +115,21 @@ a{color:var(--ok)}
   </div>
 
   <div class="panel">
+    <div class="lab">Decode profile</div>
+    <div class="row">
+      <select id="profile" aria-label="Decode profile"></select>
+      <span id="profchip" class="chip"><span class="dot"></span><span id="proftext">&mdash;</span></span>
+    </div>
+    <p class="note">The far end decodes a second of speech at a time. It can wait
+       for the <b>next</b> chunk before decoding this one, which costs latency and
+       buys quality &mdash; measured against decoding the whole stream at once,
+       one second of lookahead removes about 45&nbsp;% of the chunking penalty and
+       a second one removes 8&nbsp;% more. Left context is free and always on;
+       lookahead is the only part you pay for, so it is the only knob here.
+       Changing it takes effect on the next transmission.</p>
+  </div>
+
+  <div class="panel">
     <button id="ptt" disabled>START TRANSMIT</button>
     <div class="grid">
       <div class="cell"><div class="val" id="v-rung">&mdash;</div><div class="lab">rung</div></div>
@@ -216,7 +231,8 @@ async function startTalk(){
   if(talking||$('ptt').disabled) return;
   shownFile=shownSource=null;   // the next result is a new file
   talking=true; $('warm').disabled=true; $('ptt').className='live'; $('ptt').textContent='ON AIR — CLICK TO STOP';
-  await api('/api/start',{method:'POST'});
+  await api('/api/start?profile='+encodeURIComponent($('profile').value),
+            {method:'POST'});
   stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,
     echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
   ctx=new AudioContext({sampleRate:16000});
@@ -306,6 +322,17 @@ setInterval(async()=>{
   $('v-rung').textContent=s.rung??'—';
   $('v-tx').textContent=s.tx_bytes; $('v-rx').textContent=s.rx_bytes;
   $('v-grp').textContent=s.groups;
+  if(s.profiles && !$('profile').options.length){
+    // the descriptions carry measured figures; keep ONE copy of them,
+    // on the server, so the page cannot drift from what was measured
+    $('profile').innerHTML=Object.entries(s.profiles).map(
+      ([k,v])=>`<option value="${k}">${k} — ${v}</option>`).join('');
+    if(s.profile) $('profile').value=s.profile;
+  }
+  if(s.profile){
+    $('profchip').className='chip ok';
+    $('proftext').textContent='far end decoding: '+s.profile;
+  }
   $('log').textContent=(s.log||[]).join('\n');
   $('log').scrollTop=$('log').scrollHeight;
 },700);
