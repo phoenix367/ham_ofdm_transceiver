@@ -16,7 +16,8 @@ Reference points measured on this vocoder:
     ./eval_adapter.py --adapter adapter.pt --wav sample.wav
 """
 import argparse, os, sys
-ROOT_DIR = os.environ.get("LSCODEC_HOME", "/mnt/data/lscodec/adapter")
+from _lscodec import SRC, CKPT, WORK, WAVLM, add_src
+ROOT_DIR = WORK  # data shards + trained adapters live here
 
 def _wavlm_default():
     """Prefer a copy on /mnt/data; fall back to ~/Downloads."""
@@ -36,15 +37,15 @@ AP = argparse.ArgumentParser()
 AP.add_argument("--adapter", default=ROOT_DIR + "/adapter.pt")
 AP.add_argument("--wav", required=True, help="held-out speaker's audio, 16 kHz")
 AP.add_argument("--seconds", type=float, default=2.0)
-AP.add_argument("--ckpt", default=ROOT_DIR + "/ckpt")
-AP.add_argument("--lscodec-dir", default=ROOT_DIR + "/LSCodec-Inference")
+AP.add_argument("--ckpt", default=CKPT)
+AP.add_argument("--lscodec-dir", default=SRC)
 AP.add_argument("--facodec-repo", default=ROOT_DIR + "/naturalspeech3_facodec")
 AP.add_argument("--wavlm", default=None)
 AP.add_argument("--outdir", default=ROOT_DIR + "/out")
 A = AP.parse_args()
 A.wavlm = A.wavlm or _wavlm_default()
 
-sys.path.insert(0, A.facodec_repo); sys.path.insert(0, A.lscodec_dir)
+sys.path.insert(0, A.facodec_repo); sys.path.insert(0, A.lscodec_dir); add_src()
 import scipy.signal as _ss
 if not hasattr(_ss, "kaiser"):
     from scipy.signal.windows import kaiser as _k

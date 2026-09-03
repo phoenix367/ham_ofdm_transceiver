@@ -58,29 +58,17 @@ AP.add_argument("--prompt-int8", action="store_true",
 AP.add_argument("--measure", action="store_true",
                 help="report log-mel distance to the input and air time")
 AP.add_argument("--rung", type=int, default=12, help="rung for the air-time estimate")
-# The codec tree, checkpoints and WavLM live OUTSIDE the repo (LSCodec is
-# a large third-party tree with its own venv). LSCODEC_HOME points at the
-# directory holding LSCodec-Inference/ and ckpt/ -- same knob the web app
-# uses -- and the default matches this stand.
-LSHOME = os.environ.get("LSCODEC_HOME", "/mnt/data/lscodec/adapter")
-AP.add_argument("--ckpt", default=os.path.join(LSHOME, "ckpt", "lscodec_25hz"))
+# Code from the vendored submodule; weights from _lscodec.CKPT.
+from _lscodec import SRC, CKPT, WAVLM, add_src
+AP.add_argument("--ckpt", default=os.path.join(CKPT, "lscodec_25hz"))
 AP.add_argument("--wavlm", default=None)
-AP.add_argument("--lscodec-dir", default=os.path.join(LSHOME, "LSCodec-Inference"))
+AP.add_argument("--lscodec-dir", default=SRC)
 A = AP.parse_args()
 
-def wavlm_default():
-    env = os.environ.get("WAVLM_CKPT")
-    cands = ([env] if env else []) + [
-        os.path.join(LSHOME, "ckpt", "WavLM-Large.pt"),
-        os.path.expanduser("~/Downloads/WavLM-Large.pt")]
-    for p in cands:
-        if os.path.exists(p):
-            return p
-    return os.path.expanduser("~/Downloads/WavLM-Large.pt")
-A.wavlm = A.wavlm or wavlm_default()
+A.wavlm = A.wavlm or WAVLM
 A.out = A.out or os.path.splitext(A.input)[0] + ".restored.wav"
 
-sys.path.insert(0, A.lscodec_dir)
+sys.path.insert(0, A.lscodec_dir); add_src()
 import scipy.signal as _ss
 if not hasattr(_ss, "kaiser"):                     # removed in scipy 1.13
     from scipy.signal.windows import kaiser as _k

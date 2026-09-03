@@ -19,7 +19,8 @@ import argparse, glob, os, sys
 import numpy as np, torch, torch.nn as nn, yaml
 
 AP = argparse.ArgumentParser()
-LSHOME = os.environ.get("LSCODEC_HOME", "/mnt/data/lscodec/adapter")
+from _lscodec import SRC, CKPT, WORK, add_src
+LSHOME = WORK
 AP.add_argument("--data", default=os.path.join(LSHOME, "data_dl"))
 AP.add_argument("--epochs", type=int, default=40)
 AP.add_argument("--hidden", type=int, default=256)
@@ -27,14 +28,14 @@ AP.add_argument("--dropout", type=float, default=0.5)
 AP.add_argument("--lr", type=float, default=1e-3)
 AP.add_argument("--batch", type=int, default=8)
 AP.add_argument("--val-speakers", type=float, default=0.15)
-AP.add_argument("--ckpt", default=os.path.join(LSHOME, "ckpt"))
-AP.add_argument("--lscodec-dir", default=os.path.join(LSHOME, "LSCodec-Inference"))
+AP.add_argument("--ckpt", default=CKPT)
+AP.add_argument("--lscodec-dir", default=SRC)
 AP.add_argument("--target", default="enc", choices=("enc", "mel", "both"),
                 help="what the L1 is taken on. 'mel' is the frontend's\nAUXILIARY 80-dim projection -- a training aid, NOT what HiFiGAN consumes.\n'enc' is enc_out, the hidden state that fully determines the waveform.")
 AP.add_argument("--out", default=os.path.join(LSHOME, "adapter_dl.pt"))
 A = AP.parse_args()
 
-sys.path.insert(0, A.lscodec_dir)
+sys.path.insert(0, A.lscodec_dir); add_src()
 import scipy.signal as _ss
 if not hasattr(_ss, "kaiser"):
     from scipy.signal.windows import kaiser as _k

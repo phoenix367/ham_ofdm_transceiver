@@ -27,7 +27,8 @@ import argparse, glob, io as _io, json, os, shutil, sys, time
 import urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 import collections, threading
-ROOT_DIR = os.environ.get("LSCODEC_HOME", "/mnt/data/lscodec/adapter")
+from _lscodec import SRC, CKPT, WORK, WAVLM, add_src
+ROOT_DIR = WORK  # data shards + trained adapters live here
 
 def _wavlm_default():
     """Prefer a copy on /mnt/data; fall back to ~/Downloads."""
@@ -57,8 +58,8 @@ AP.add_argument("--shard", type=int, default=250, help="utterances per shard")
 AP.add_argument("--split", default="train.clean.360",
                 help="LibriTTS split (train.clean.360 = 1151 speakers)")
 AP.add_argument("--wavlm", default=None)
-AP.add_argument("--facodec-dir", default=ROOT_DIR + "/ckpt")
-AP.add_argument("--lscodec-dir", default=ROOT_DIR + "/LSCodec-Inference")
+AP.add_argument("--facodec-dir", default=CKPT)
+AP.add_argument("--lscodec-dir", default=SRC)
 AP.add_argument("--facodec-repo", default=ROOT_DIR + "/naturalspeech3_facodec")
 AP.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
 AP.add_argument("--full-prompt", action="store_true",
@@ -97,7 +98,7 @@ if dev == "cuda" and not torch.cuda.is_available():
 print("device: %s | torch %s" % (dev, torch.__version__), flush=True)
 
 sys.path.insert(0, A.facodec_repo)
-sys.path.insert(0, A.lscodec_dir)
+sys.path.insert(0, A.lscodec_dir); add_src()
 import scipy.signal as _ss                       # lscodec imports a removed scipy name
 if not hasattr(_ss, "kaiser"):
     from scipy.signal.windows import kaiser as _k

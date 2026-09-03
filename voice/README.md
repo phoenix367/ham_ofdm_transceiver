@@ -36,20 +36,31 @@ path, which is a different and much larger job.
 
 ## Where things live
 
-The scripts are in the repo (`voice/`); everything heavy is **not**. The
-venv, the third-party trees (LSCodec-Inference, naturalspeech3_facodec),
-the checkpoints, the dataset shards and the trained adapters live under
-`LSCODEC_HOME` -- the same knob the web app (`host/webvoice/`) reads --
-defaulting to `/mnt/data/lscodec/adapter` on this stand. `setup.sh` builds
-that directory; nothing it produces belongs in version control, and
-`voice/.gitignore` keeps it out even if the pipeline is run in-tree.
+The scripts are in the repo (`voice/`), and so is the LSCodec **code** --
+vendored as a git submodule at `voice/third_party/LSCodec-Inference` (the
+`phoenix367` fork, pinned by commit), so it always matches the checkpoints
+it was tested against:
 
-Every script takes `LSCODEC_HOME` from the environment (and `WAVLM_CKPT`
-for the WavLM checkpoint); the CLI flags still override per run.
+    git submodule update --init --depth 1 voice/third_party/LSCodec-Inference
+
+Everything HEAVY stays out of git: the venv, the FACodec clone
+(training-only), the checkpoints (~580 MB), the dataset shards and the
+trained adapters. `voice/_lscodec.py` is the one place that resolves
+paths, and it needs no `LSCODEC_HOME`:
+
+- **code** comes from the submodule -- no configuration;
+- **checkpoints** from `LSCODEC_CKPT` (default `/mnt/data/lscodec/adapter/ckpt`
+  on this stand), which is also where the training shards and adapters
+  land (its parent);
+- **WavLM** from `WAVLM_CKPT` (default `~/Downloads/WavLM-Large.pt`).
+
+On this stand the defaults hit the existing files, so nothing needs
+setting. `setup.sh` builds the weights/work area; the web app
+(`host/webvoice/`) reads the same resolver.
 
 ## Setup
 
-    LSCODEC_HOME=/path/to/home voice/setup.sh   # venv, repos, checkpoints (~600 MB)
+    LSCODEC_CKPT=/path/to/ckpt voice/setup.sh   # venv, FACodec, checkpoints
 
 The default torch index is **cu121**, deliberately. The GTX 1050 is Pascal
 (sm_61) and **CUDA 13 dropped Pascal support entirely** -- a cu126/cu128/cu13
@@ -67,19 +78,18 @@ and the Google Drive mirror throttles to tens of kB/s. Put it at
 
 ## Run
 
-    H=$LSCODEC_HOME
-    LSCODEC_HOME=$H $H/venv/bin/python voice/extract.py --n 5000   # ~26 min
-    LSCODEC_HOME=$H $H/venv/bin/python voice/train_adapter.py --data $H/data/
-    LSCODEC_HOME=$H $H/venv/bin/python voice/eval_adapter.py \
-        --adapter $H/adapter.pt --wav held_out.wav
+    P=/path/to/venv/bin/python        # the LSCodec venv (setup.sh builds it)
+    $P voice/extract.py --n 5000                       # ~26 min
+    $P voice/train_adapter.py --data $LSCODEC_CKPT/../data/
+    $P voice/eval_adapter.py --adapter adapter.pt --wav held_out.wav
 
 There is also a standalone codec round-trip that needs no training --
 encode a wav to the 250 bit/s token stream and decode it back, the exact
-path the radio uses minus the air:
+path the radio uses minus the air. On this stand it needs no environment
+at all:
 
-    LSCODEC_HOME=$H $H/venv/bin/python voice/roundtrip.py in.wav \
-        --prompt speaker.wav -o out.wav --bitstream out.lsc
-    LSCODEC_HOME=$H $H/venv/bin/python voice/restore.py out.lsc prompt.bin
+    $P voice/roundtrip.py in.wav --prompt speaker.wav -o out.wav --bitstream out.lsc
+    $P voice/restore.py out.lsc prompt.bin
 
 Extraction is **network-bound, not compute-bound** -- each utterance waits on
 an HTTP fetch from the HF datasets server, and the models are the cheap part.

@@ -11,7 +11,8 @@ speaker into training and the validation number becomes meaningless.
     ./train_adapter.py --data data/ --epochs 60
 """
 import argparse, glob, os
-ROOT_DIR = os.environ.get("LSCODEC_HOME", "/mnt/data/lscodec/adapter")
+from _lscodec import SRC, CKPT, WORK, WAVLM, add_src
+ROOT_DIR = WORK  # data shards + trained adapters live here
 import numpy as np, torch, torch.nn as nn
 
 AP = argparse.ArgumentParser()

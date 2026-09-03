@@ -30,10 +30,10 @@ AP.add_argument("--b", default="240041000551333438363436")
 AP.add_argument("--out", default="/mnt/data/lscodec/audition/bcast_rx.wav")
 A = AP.parse_args()
 
-LSHOME = os.environ.get("LSCODEC_HOME", "/mnt/data/lscodec/adapter")
+from _lscodec import SRC, CKPT, WAVLM, add_src
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "host"))
-sys.path.insert(0, os.path.join(LSHOME, "LSCodec-Inference"))
+add_src()
 import scipy.signal as _ss
 if not hasattr(_ss, "kaiser"):
     from scipy.signal.windows import kaiser as _k
@@ -44,7 +44,7 @@ from ofdm_modem import OfdmModem, encode
 from lscodec.utils import load_model, load_vocoder
 from lscodec.ssl_models.wavlm_extractor import Extractor
 
-PD = os.path.join(LSHOME, "ckpt", "lscodec_25hz")
+PD = os.path.join(CKPT, "lscodec_25hz")
 ec = yaml.load(open(f"{PD}/encoder_config.yml"), Loader=yaml.Loader)
 ec["pretrain_codebook"] = f"{PD}/codebook.npy"
 vc = yaml.load(open(f"{PD}/vocoder_config.yml"), Loader=yaml.Loader)
@@ -52,8 +52,7 @@ vc["vq_codebook"] = f"{PD}/codebook.npy"
 print("loading codec ...", flush=True)
 enc = load_model(ec, f"{PD}/lscodec_encoder.pt").eval()
 voc = load_vocoder(vc, f"{PD}/lscodec_vocoder.pt").eval()
-wl = Extractor(checkpoint=os.environ.get("WAVLM_CKPT",
-    os.path.expanduser("~/Downloads/WavLM-Large.pt")), device="cpu")
+wl = Extractor(checkpoint=WAVLM, device="cpu")
 cb = torch.tensor(np.load(vc["vq_codebook"], allow_pickle=True))
 if cb.ndim == 2:
     cb = cb.unsqueeze(0)

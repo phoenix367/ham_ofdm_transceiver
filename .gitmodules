@@ -21,3 +21,7 @@
 	path = cport/third_party/CMSIS_5
 	url = https://github.com/ARM-software/CMSIS_5
 	shallow = true
+[submodule "voice/third_party/LSCodec-Inference"]
+	shallow = true
+	path = voice/third_party/LSCodec-Inference
+	url = https://github.com/phoenix367/LSCodec-Inference

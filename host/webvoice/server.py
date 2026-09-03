@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Push-to-talk voice over the OFDM radio, driven from a browser.
 
-    LSCODEC_HOME=/mnt/data/lscodec/adapter \
-        /mnt/data/lscodec/adapter/venv/bin/python host/webvoice/server.py
+    /mnt/data/lscodec/adapter/venv/bin/python host/webvoice/server.py
     then open http://localhost:8080
+
+The LSCodec code is a vendored submodule (voice/third_party); the
+checkpoints are external -- set LSCODEC_CKPT if they are not at the
+default /mnt/data/lscodec/adapter/ckpt, and WAVLM_CKPT for WavLM.
 
 Pick a transmit board and a receive board, warm the link, hold TRANSMIT
 and speak. The far station's audio is written to a .wav file.
@@ -27,14 +30,16 @@ import http.server, io, json, os, socketserver, sys, threading, time, wave
 import urllib.parse
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-# The OFDM host tools ship beside this file; the CODEC does not. LSCodec
-# is a large third-party tree with its own checkpoints and its own venv,
-# so its location is a knob rather than a path baked in here -- point
-# LSCODEC_HOME at the directory holding LSCodec-Inference/ and ckpt/.
-sys.path.insert(0, os.path.dirname(HERE))
-ROOT = os.environ.get("LSCODEC_HOME", "/mnt/data/lscodec/adapter")
-sys.path.insert(0, os.path.join(ROOT, "LSCodec-Inference"))
+HERE = os.path.dirname(os.path.abspath(__file__))       # host/webvoice
+REPO = os.path.dirname(os.path.dirname(HERE))            # repo root
+sys.path.insert(0, os.path.dirname(HERE))               # host/ (ofdm_modem)
+# The LSCodec CODE is vendored as a submodule and located, along with the
+# external checkpoints, by voice/_lscodec.py -- the single source of truth
+# the training/round-trip scripts share. No LSCODEC_HOME: the code comes
+# from git, the weights from LSCODEC_CKPT (default matches this stand).
+sys.path.insert(0, os.path.join(REPO, "voice"))
+from _lscodec import CKPT, WAVLM, add_src
+add_src()
 
 import scipy.signal as _ss
 if not hasattr(_ss, "kaiser"):
@@ -111,7 +116,7 @@ os.makedirs(OUTDIR, exist_ok=True)
 DEV = os.environ.get("VOICE_DEVICE") or ("cuda" if torch.cuda.is_available()
                                          else "cpu")
 print("loading codec on %s (about 20 s) ..." % DEV, flush=True)
-PD = os.path.join(ROOT, "ckpt", "lscodec_25hz")
+PD = os.path.join(CKPT, "lscodec_25hz")
 _ec = yaml.load(open(f"{PD}/encoder_config.yml"), Loader=yaml.Loader)
 _ec["pretrain_codebook"] = f"{PD}/codebook.npy"
 _vc = yaml.load(open(f"{PD}/vocoder_config.yml"), Loader=yaml.Loader)
@@ -120,10 +125,7 @@ ENC = load_model(_ec, f"{PD}/lscodec_encoder.pt").eval().to(DEV)
 VOC = load_vocoder(_vc, f"{PD}/lscodec_vocoder.pt").eval().to(DEV)
 # WavLM stays on the CPU: it runs ONCE per session to derive the speaker
 # prompt, so it would buy nothing on the GPU and costs ~1.3 GB there.
-WLM = Extractor(checkpoint=os.environ.get(
-                    "WAVLM_CKPT",
-                    os.path.expanduser("~/Downloads/WavLM-Large.pt")),
-                device="cpu")
+WLM = Extractor(checkpoint=WAVLM, device="cpu")
 _cb = torch.tensor(np.load(_vc["vq_codebook"], allow_pickle=True))
 if _cb.ndim == 2:
     _cb = _cb.unsqueeze(0)

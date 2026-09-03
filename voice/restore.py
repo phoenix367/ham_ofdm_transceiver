@@ -30,14 +30,13 @@ AP.add_argument("--gap-fill", choices=("silence", "none"), default="silence",
                      "so the timeline stays true)")
 AP.add_argument("--chunk-seconds", type=float, default=1.0,
                 help="chunk length, only used to size a gap")
-LSHOME = os.environ.get("LSCODEC_HOME", "/mnt/data/lscodec/adapter")
-AP.add_argument("--ckpt", default=os.path.join(LSHOME, "ckpt", "lscodec_25hz"))
-AP.add_argument("--lscodec-dir", default=os.path.join(
-    LSHOME, "LSCodec-Inference"))
+from _lscodec import SRC, CKPT, add_src
+AP.add_argument("--ckpt", default=os.path.join(CKPT, "lscodec_25hz"))
+AP.add_argument("--lscodec-dir", default=SRC)
 A = AP.parse_args()
 A.out = A.out or os.path.splitext(A.lsc)[0] + ".restored.wav"
 
-sys.path.insert(0, A.lscodec_dir)
+sys.path.insert(0, A.lscodec_dir); add_src()
 import scipy.signal as _ss
 if not hasattr(_ss, "kaiser"):
     from scipy.signal.windows import kaiser as _k

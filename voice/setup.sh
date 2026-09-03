@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # One-time setup: venv, repos, checkpoints. Safe to re-run.
 set -euo pipefail
-# Build the codec HOME off-tree, not in the repo: this clones ~6 GB of
-# third-party trees plus a venv and checkpoints, none of which belong in
-# version control. LSCODEC_HOME is the same knob the scripts and the web
-# app read; the default matches this stand.
-TARGET="${LSCODEC_HOME:-/mnt/data/lscodec/adapter}"
+# Build the weights/work area off-tree: a venv, the FACodec clone, and the
+# checkpoints -- none of which belong in git. The LSCodec CODE is a repo
+# submodule and is NOT built here. LSCODEC_CKPT (read by voice/_lscodec.py)
+# points at the ckpt subdir; its parent, set here, holds the venv, FACodec
+# and the training shards. Default matches this stand.
+TARGET="$(dirname "${LSCODEC_CKPT:-/mnt/data/lscodec/adapter/ckpt}")"
 mkdir -p "$TARGET"
 cd "$TARGET"
-echo "building LSCodec home in $TARGET"
+echo "building LSCodec weights/work area in $TARGET"
 
 # --- venv -----------------------------------------------------------------
 # CUDA (cu121) by default -- the GTX 1050 is Pascal. Set TORCH_INDEX to
@@ -28,8 +29,10 @@ fi
 ./venv/bin/python -c "import numpy, scipy, soundfile, yaml, einops, kaldiio, h5py, pyworld, librosa" 2>/dev/null || \
     ./venv/bin/pip install numpy scipy soundfile pyyaml einops kaldiio h5py pyworld librosa tqdm
 
-# --- code: LSCodec (for its WavLM extractor) and FACodec ------------------
-[ -d LSCodec-Inference ] || git clone --depth 1 https://github.com/X-LANCE/LSCodec-Inference
+# --- code -----------------------------------------------------------------
+# LSCodec is a SUBMODULE of the repo now (voice/third_party), not cloned
+# here -- run `git submodule update --init --depth 1` in the repo. FACodec
+# is training-only and stays an on-demand clone into the work area.
 [ -d naturalspeech3_facodec ] || git clone --depth 1 https://github.com/lifeiteng/naturalspeech3_facodec
 
 # --- checkpoints ----------------------------------------------------------
@@ -55,4 +58,5 @@ if [ ! -s "ckpt/WavLM-Large.pt" ] && [ ! -s "$HOME/Downloads/WavLM-Large.pt" ]; 
 fi
 echo
 echo "setup complete in $TARGET"
-echo "Next:  LSCODEC_HOME=$TARGET $TARGET/venv/bin/python <repo>/voice/extract.py --n 5000"
+echo "Next (from the repo):  git submodule update --init --depth 1 voice/third_party/LSCodec-Inference"
+echo "                       $TARGET/venv/bin/python voice/roundtrip.py in.wav"

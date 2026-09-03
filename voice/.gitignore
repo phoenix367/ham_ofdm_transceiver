@@ -3,7 +3,6 @@
 # /mnt/data/lscodec/adapter. Nothing heavy should ever land here even if
 # the pipeline is run in-tree by mistake.
 venv/
-LSCodec-Inference/
 naturalspeech3_facodec/
 ckpt/
 data/
