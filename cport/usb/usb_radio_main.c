@@ -1012,7 +1012,24 @@ static int bc_open_group(void)
                                  g_bc_rung, BURST_STREAM_RESYNC);
         if (n > 0) {
             g_bc_block_air += (double)n / 12000.0;
-            if (g_bc_block_air >= g_bc_block_len
+            /* NOT in real time. The block/stats exchange cuts the stream,
+             * keys a dataless EOB and then HOLDS the transmitter for the
+             * reply window -- 8.1 s here (5.0 + 2.0*air(floor,8B)). For a
+             * file that is a good trade: the pause buys a re-rung and the
+             * sender was going to take minutes anyway. For speech it is an
+             * 8-second silence every 45 s of talking, and the listener has
+             * no way to tell it from a dead link.
+             *
+             * It does not ACCUMULATE -- measured: the pause queues ~253 B,
+             * BC_RT then keys 4-frame groups (55.1 B/s against 31.25 B/s
+             * of arriving speech, because a bigger group amortizes the
+             * shared preamble) and drains it in ~11 s, well inside the
+             * 45 s block period. The end-to-end delay is a sawtooth, not
+             * a ramp. But a bounded 8 s stall is still a stall, and voice
+             * cannot use what the pause buys: the codec rate is fixed at
+             * 250 bit/s and the rung is settled by the warm-up before the
+             * operator speaks, not renegotiated mid-utterance. */
+            if (g_bc_block_air >= g_bc_block_len && !g_bc_realtime
                 && g_st.peer.valid && (g_st.peer.flags & CAP_BC_STATS)
                 && !(g_bc_complete && g_bc_src_off >= g_bc_src_len))
                 g_bc_eob_due = 1;   /* cut here; EOS ends the last block */
