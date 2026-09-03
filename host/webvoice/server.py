@@ -155,6 +155,21 @@ class Link:
         self.buf = np.zeros(0, dtype=np.float32)
         self._nat = np.zeros(0, dtype=np.float32)
         self._tail_guard = 0
+        self._consumed = 0        # native samples already turned into buf
+        self._up = self._down = 1
+        self._pad_n = self._pad_o = 0
+        # Transmit PRIORITY over the two USB drain loops. self.lock is
+        # contended by _rx_loop and _tx_loop, which each acquire it and
+        # block up to 50 ms in events(), then re-acquire immediately.
+        # Python locks are not fair, so a sender competing with two such
+        # spinners starves: measured 73.7 s of a 79.6 s feed() budget
+        # spent inside _send_chunk for 60 s of speech -- 92.5% of the
+        # host's time, and the reason the radio sat idle a third of the
+        # wall clock while end-to-end lag grew. The drain loops now stand
+        # aside whenever a send is waiting; they lose nothing by it,
+        # because the device buffers events and the next poll collects
+        # them. */
+        self._send_want = 0
         self.k = 0
         self.pending = []
         self.prompt = None
@@ -210,7 +225,7 @@ class Link:
     def _rx_loop(self):
         while not self.stop.is_set():
             try:
-                with self.lock:
+                with self._drain_lock():
                     evs = list(self.rx.events(timeout=0.05))
             except Exception:
                 time.sleep(0.2); continue
@@ -370,9 +385,49 @@ class Link:
             self.t0 = time.time()
             self.t_first_audio = self.t0
         if in_sr != SR:
+            # INCREMENTAL, by overlap-save. Resampling the whole accumulated
+            # buffer on every post is O(n) per post and therefore O(n^2) in
+            # the length of the transmission: measured 11.9 ms at a 10 s
+            # buffer, 231.7 ms at 200 s, against posts arriving every
+            # 0.1-0.26 s. Past ~100 s the encoder drops below real time and
+            # STARVES the radio -- on a 200 s stream the board idled 31% of
+            # the wall clock, keyed only 0.84x real-time worth of air, and
+            # end-to-end lag grew +0.207 s per second of speech to +41 s.
+            # (Serializing feed() did not cause this, but it did stop
+            # threads from hiding part of it.)
+            #
+            # Only the NEW tail is resampled, with PAD_N native samples of
+            # real history so the FIR sees no implicit zero-padding, and
+            # the last PAD_O output samples held back because the segment
+            # END carries the same transient. Verified bit-identical to the
+            # whole-buffer result (max abs diff 0.0 over 112000 samples),
+            # which is the property the chunker relies on: the prefix of
+            # self.buf must never change once emitted.
+            if self._down == 1 and self._up == 1:
+                # first post of the session fixes the ratio and the guards.
+                # resample_poly's default FIR is 2*10*max(up,down)+1 taps at
+                # the UP rate, so 4x its half-length is a generous guard.
+                from math import gcd
+                g = gcd(SR, in_sr)
+                self._up, self._down = SR // g, in_sr // g
+                self._pad_o = 10 * max(self._up, self._down) * 4
+                self._pad_n = self._pad_o * self._down // self._up
             self._nat = np.concatenate([self._nat, pcm])
-            full = _ss.resample_poly(self._nat, SR, in_sr).astype(np.float32)
-            self.buf = full                # prefix is stable; tail is guarded
+            end = (len(self._nat) // self._down) * self._down
+            if end > self._consumed:
+                lo = max(0, self._consumed - self._pad_n)
+                y = _ss.resample_poly(self._nat[lo:end], SR,
+                                      in_sr).astype(np.float32)
+                drop = (self._consumed - lo) // self._down * self._up
+                keep = max(0, len(y) - drop - self._pad_o)
+                if keep > 0:
+                    self.buf = np.concatenate([self.buf, y[drop:drop + keep]])
+                    self._consumed += keep * self._down // self._up
+            # drop native history that can no longer affect any output
+            if self._consumed > 4 * self._pad_n:
+                cut = self._consumed - 2 * self._pad_n
+                self._nat = self._nat[cut:]
+                self._consumed -= cut
             self._tail_guard = int(0.05 * SR)   # keep chunks out of the edge
         else:
             self.buf = np.concatenate([self.buf, pcm])
@@ -440,7 +495,12 @@ class Link:
         as a normal close injects a byte of payload into the stream, which
         the receiver then decodes as token data."""
         MORE, CONT = 0x80, 0x40
-        with self.lock:
+        self._send_want += 1
+        try:
+            self._acquire_tx()
+        finally:
+            self._send_want -= 1
+        try:
             # bc_open is read, the command is written, and bc_open is
             # updated as ONE step. Reading it before the write and
             # assigning after -- the shape this had -- lets a second
@@ -451,6 +511,8 @@ class Link:
             self.tx.t.write(encode(0x06, bytes([ptype, 0xFF]) + raw))
             self.bc_open = not final
             self.tx_stream += raw
+        finally:
+            self.lock.release()
         self.tx_bytes += len(raw)
         self.say("%s%s %s%d B"
                  % ("stream +" if ptype & CONT else "broadcast start",
@@ -468,7 +530,7 @@ class Link:
         missing audio with no explanation anywhere."""
         while not self.stop.is_set():
             try:
-                with self.lock:
+                with self._drain_lock():
                     evs = list(self.tx.events(timeout=0.05))
             except Exception:
                 time.sleep(0.2); continue
@@ -481,6 +543,16 @@ class Link:
                         self.rung = r
                 elif name == "log":
                     self.say("board(tx): %s" % str(p).strip())
+
+    def _acquire_tx(self):
+        """Take the USB lock for a transmit, ahead of the drain loops."""
+        self.lock.acquire()
+
+    def _drain_lock(self):
+        """Drain loops defer to any waiting transmit."""
+        while self._send_want:
+            time.sleep(0.002)
+        return self.lock
 
     def bc_free(self):
         """Free bytes in the board's 8 kB broadcast source buffer."""
