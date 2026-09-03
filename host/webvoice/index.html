@@ -239,9 +239,14 @@ $('warm').onclick=async()=>{
 async function startTalk(){
   if(talking||$('ptt').disabled) return;
   shownFile=shownSource=null;   // the next result is a new file
-  talking=true; $('warm').disabled=true; $('ptt').className='live'; $('ptt').textContent='ON AIR — CLICK TO STOP';
+  talking=true; $('warm').disabled=true; $('ptt').className='ready';
+  // /api/start warms a stale link before letting the session begin, and
+  // that can take a few seconds -- the button must not claim ON AIR
+  // while the server is still negotiating the channel.
+  $('ptt').textContent='PREPARING THE LINK…';
   await api('/api/start?profile='+encodeURIComponent($('profile').value),
             {method:'POST'});
+  $('ptt').className='live'; $('ptt').textContent='ON AIR — CLICK TO STOP';
   stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,
     echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
   ctx=new AudioContext({sampleRate:16000});

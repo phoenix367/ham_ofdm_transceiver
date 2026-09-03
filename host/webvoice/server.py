@@ -221,6 +221,9 @@ class Link:
                                     # for warmup() -- see there
         self.prompt_up = None       # uploaded prompt, survives reset_session
         self.prompt_up_name = None
+        self.last_link_t = 0.0      # when the peer last answered us --
+                                    # NOT per-session: link freshness
+                                    # spans transmissions
         self.stop = threading.Event()
         self.thread = None
         self.tx_thread = None
@@ -413,6 +416,7 @@ class Link:
                         time.sleep(0.2)
                     if settle:
                         self.settle()
+                    self.last_link_t = time.time()
                     self.say("link warm in %.1f s, rung %s" % (el, self.rung))
                     return {"ok": True, "rung": self.rung,
                             "seconds": round(el, 2)}
@@ -1130,7 +1134,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                    "frames": int(P.shape[0]),
                                    "seconds": round(P.shape[0] / 50.0, 2)})
             if u.path == "/api/start":
-                if q.get("settle", ["1"])[0] != "0":
+                # A STALE LINK MUST BE WARMED FIRST. The station's rung
+                # memory decays one rung per 90 s of peer silence, and a
+                # broadcast entering with a decayed rung is HELD by the
+                # firmware while probes rebuild the ladder -- correct for
+                # an unattended broadcast, but for push-to-talk it means
+                # the operator speaks into a held stream and the first
+                # audio lands 20+ s late, keyed as one batch at release.
+                # A broadcast refreshes nothing (the peer says nothing
+                # back), so any pause longer than the decay goes stale;
+                # warming here costs ~1-3 s and skips the 20 s hold.
+                if (q.get("settle", ["1"])[0] != "0"
+                        and time.time() - LINK.last_link_t > 60.0):
+                    LINK.say("link is stale -- warming before transmit")
+                    LINK.warmup()
+                elif q.get("settle", ["1"])[0] != "0":
                     LINK.settle(budget=3.0, need=1)
                 LINK.reset_session(); LINK.talking = True
                 prof = q.get("profile", [DEFAULT_PROFILE])[0]
