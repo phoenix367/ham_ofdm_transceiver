@@ -3632,13 +3632,14 @@ decoder uses none.
     \end{tabular}
 \end{table}
 
-Measured end to end on the two-board stand, the first audio becomes
-available \textbf{3.8--4.2\,s} after the talker starts, against the
-length of the utterance before --- and the assembled output measures
-0.2044 against a one-shot decode of the identical received bytes, at
-identical length, slightly better than the offline sweep predicted.  A
-200\,s transmission delivers 325 frames, zero lost, byte-exact, with
-end-to-end lag flat at 0.000\,s per second of speech.
+Measured end to end on the two-board stand, the assembled output
+measures 0.2044 against a one-shot decode of the identical received
+bytes, at identical length, slightly better than the offline sweep
+predicted; a 200\,s transmission delivers 325 frames, zero lost,
+byte-exact, with end-to-end lag flat at 0.000\,s per second of
+speech.  The first-audio figures moved twice more after this
+paragraph was first written and are reported with the profiles below,
+where they belong.
 
 One methodological note, because it cost a measurement.  The first
 version of this sweep used waveform RMS error and reported $\approx
@@ -3648,6 +3649,91 @@ decodes of the same tokens differ in phase and agree perceptually, so a
 waveform metric is uncorrelated with quality by construction.  The
 encoder study in \S\ref{sec:voice_stream} already used a spectral
 metric for this reason; the right move was to read it first.
+
+\paragraph{Profiles: the decode latency becomes a knob, and grows a
+cost axis.}
+The left context above is fixed at 2\,s and free; two other quantities
+are not, and together they define a decode \emph{profile}: the
+\textbf{chunk} (how much speech each step emits --- the listener waits
+for the first one to fill) and the \textbf{lookahead} (tokens beyond
+the chunk fed to the vocoder and discarded --- each second of it is a
+second of added latency).  Both improve quality.  What forced the
+profile table through three revisions is that they also cost
+\emph{compute}, and a step must finish inside its own chunk's duration
+or the decoder falls behind speech without bound.
+
+\begin{table}[H]
+    \centering
+    \caption{Chunk and lookahead against quality and cost.  $L_1$ is
+             log-spectral distance to the one-shot decode of the same
+             received bytes; duty is measured step time over the chunk
+             duration, on both devices the host supports.}
+    \label{tab:voice_profiles}
+    \small
+    \begin{tabular}{@{}llrrrrl@{}}
+    \toprule
+    \textbf{Chunk} & \textbf{Ahead} & \textbf{Latency} &
+    \textbf{$L_1$} & \textbf{GPU} & \textbf{CPU} & \\
+    \midrule
+    1\,s & 0\,s & 1\,s & 0.2240 & 15\,\% &  77\,\% & \texttt{live} \\
+    1\,s & 1\,s & 2\,s & 0.1236 & 19\,\% & \textbf{100\,\%} &
+        \texttt{balanced} (GPU) \\
+    2\,s & 1\,s & 3\,s & 0.1113 & 12\,\% &  63\,\% &
+        \texttt{balanced} (CPU) \\
+    2\,s & 2\,s & 4\,s & 0.1108 & 15\,\% &  83\,\% & dominated \\
+    3\,s & 2\,s & 5\,s & 0.0941 & 11\,\% &  60\,\% & \texttt{quality} \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Three lessons are in this table, each paid for.  First, the 1\,s/1\,s
+shape was shipped as \texttt{balanced} after measuring only its
+quality; at exactly 100\,\% CPU duty it could not keep up, and the
+processor it saturated starved the browser's main-thread capture into
+delivering silence --- the cost column exists because the quality
+column alone chose an infeasible configuration.  Second, on the CPU a
+\emph{bigger chunk is both better and cheaper}: the fixed left context
+is paid once per step, so amortising it over more output lowers the
+duty and removes seams together --- the best row is also the cheapest,
+and varying lookahead alone was the wrong knob.  Third, the entire
+constraint was an artefact: nothing had ever moved the models off the
+CPU.  On the GPU a decode step falls from 830\,ms to 148\,ms, every
+shape in the table is idle-cheap, and the choice collapses to latency
+against quality --- which is what a profile should have been all
+along.  The operator picks \texttt{live}, \texttt{balanced} or
+\texttt{quality} per transmission; the page's option list is generated
+from the server's own table so the interface cannot drift from what
+was measured.
+
+Measured on the air, 40\,s per profile, all byte-exact with zero loss:
+first audio \textbf{3.6\,s} (\texttt{live}), \textbf{4.8\,s}
+(\texttt{balanced}), \textbf{8.5\,s} (\texttt{quality}) after the
+talker starts, with end-to-end lag drift of $-0.005$, $-0.014$ and
+$-0.005$\,s per second of speech --- every profile holding steady where
+the mis-costed one drifted without bound.
+
+\paragraph{The codec gets a name on the wire.}
+While one codec was the only voice on the air it rode on the OPAQUE
+payload type and a receiver could only guess from the byte rate.  Two
+small protocol changes make a second codec possible before it exists.
+The broadcast SYNC descriptor's payload-type registry --- which had
+reserved Codec2 entries from the start --- gains
+\texttt{BC\_PT\_LSCODEC\_25}; the ptype is a label rather than a
+demultiplexer, so a receiver that does not know the codec still stores
+the bytes exactly as before.  And the capability record
+(\S\ref{sec:cport_caps}) gains a codec bitmap: which voice codecs a
+station can \emph{decode}, so a sender picks one the far end can play.
+The record grew from 10 to 11 bytes and the version deliberately did
+not move --- an older record parses with the new field reading
+``never said'', an older peer takes the prefix it knows, and both
+directions keep working, which is the one property a capability
+mechanism cannot trade away.  The codec itself lives in the HOST, not
+the board --- the board moves bytes --- so the host declares its
+codecs over USB (a config key) and reads the peer's declaration back
+from the status frame, both under the same grow-only contract the
+temperature and rung fields established.  Verified on the stand: the
+handshake completes with the codec bit crossing the air and arriving
+at the far host.
 
 \paragraph{Group loss on a clean wire, and the wrong answer first.}
 The transmissions kept reporting losses --- 7.7\,\%, 11.8\,\%,
