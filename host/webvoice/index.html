@@ -286,6 +286,7 @@ async function stopTalk(){
   talking=false; $('ptt').className='ready'; $('ptt').textContent='DECODING AT THE FAR STATION…';
   $('ptt').disabled=true;
   if(node){node.disconnect(); node=null;}
+  micPeak=0;              // the meter idles with the mic
   await chain;            // every captured block has reached the server
   if(ctx){ctx.close(); ctx=null;}
   if(stream){stream.getTracks().forEach(t=>t.stop()); stream=null;}
@@ -367,6 +368,13 @@ setInterval(async()=>{
     $('mictext').className='chip'+(micPeak<0.002?' fault':' ok');
     $('mictext').textContent=micPeak<0.002?'no signal from the microphone'
                                           :'peak '+micPeak.toFixed(2);
+  }else if($('micbar').style.width!=='0%'||$('mictext').textContent!=='—'){
+    // idle: the meter must SAY idle. Leaving the last live value (or
+    // worse, a red "no signal") standing after key-up reads as a live
+    // fault on a mic that is simply off.
+    $('micbar').style.width='0%';
+    $('mictext').className='chip';
+    $('mictext').textContent='—';
   }
   $('log').textContent=(s.log||[]).join('\n');
   $('log').scrollTop=$('log').scrollHeight;

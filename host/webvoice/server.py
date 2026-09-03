@@ -187,22 +187,46 @@ def unpack10(raw, n):
 
 class Link:
     def __init__(self):
-        self.lock = threading.Lock()
+        # LOCKS ARE CREATED HERE AND ONLY HERE. reset_session() used to
+        # recreate _inq_lock while the encoder worker still held the old
+        # object -- two locks, no mutual exclusion, and every guarantee
+        # built on it silently void. A lock object must outlive every
+        # thread that can touch it.
+        self.lock = threading.Lock()          # the USB devices
+        self.airlock = threading.RLock()      # encode/finish serialization
+        self._inq_lock = threading.Lock()     # ingest queue + worker busy
+        self._dec_lock = threading.Lock()     # decoded audio + position
+        self.gen = 0          # SESSION GENERATION. Long-running steps
+                              # (a vocode, a queued batch) capture it and
+                              # discard their result if a reset moved it:
+                              # an in-flight decode from session N used to
+                              # land its audio and its position into
+                              # session N+1.
+        self._send_want = 0   # in __init__, not reset: zeroing it while a
+                              # send was between increment and decrement
+                              # left it at -1 forever, and the drain loops
+                              # treat nonzero as "stand aside" -- both USB
+                              # pumps spinning uselessly for the rest of
+                              # the process.
+        self._enc_busy = False
         self.tx = self.rx = None
         self.tx_serial = self.rx_serial = None
         self.rung = None
         self.tx_status = self.rx_status = None
         self.rx_times = []
         self.tx_stream = bytearray()
-        self.airlock = threading.RLock()
         self.feed_races = 0
         self.log = []
+        self.rx_msgs = []           # station messages seen by _rx_loop,
+                                    # for warmup() -- see there
         self.prompt_up = None       # uploaded prompt, survives reset_session
         self.prompt_up_name = None
-        self.reset_session()
         self.stop = threading.Event()
         self.thread = None
         self.tx_thread = None
+        self.dec_thread = None
+        self.enc_thread = None
+        self.reset_session()
 
     def say(self, msg):
         self.log.append("%s  %s" % (time.strftime("%H:%M:%S"), msg))
@@ -210,64 +234,55 @@ class Link:
         print(msg, flush=True)
 
     def reset_session(self):
-        self.buf = np.zeros(0, dtype=np.float32)
-        self._nat = np.zeros(0, dtype=np.float32)
-        self._tail_guard = 0
-        self._consumed = 0        # native samples already turned into buf
-        self.profile = DEFAULT_PROFILE
-        self._inq = []            # microphone audio awaiting the encoder
-        self._inq_lock = threading.Lock()
-        self._enc_busy = False    # worker is inside feed() right now
-        self._closed = False      # a final chunk has gone out
-        self._dec_pos = 0         # tokens already vocoded and emitted
-        self._pcm_out = []        # progressive decoded audio
-        self.t_first_out = None   # when the listener could first hear audio
-        self._up = self._down = 1
-        self._pad_n = self._pad_o = 0
-        # Transmit PRIORITY over the two USB drain loops. self.lock is
-        # contended by _rx_loop and _tx_loop, which each acquire it and
-        # block up to 50 ms in events(), then re-acquire immediately.
-        # Python locks are not fair, so a sender competing with two such
-        # spinners starves: measured 73.7 s of a 79.6 s feed() budget
-        # spent inside _send_chunk for 60 s of speech -- 92.5% of the
-        # host's time, and the reason the radio sat idle a third of the
-        # wall clock while end-to-end lag grew. The drain loops now stand
-        # aside whenever a send is waiting; they lose nothing by it,
-        # because the device buffers events and the next poll collects
-        # them. */
-        self._send_want = 0
-        self.k = 0
-        self.pending = []
-        self.prompt = None
-        self.rx_bytes = bytearray()
-        self.rx_times = []
-        self.tx_stream = bytearray()
-        self._dec_pos = 0
-        self._pcm_out = []
-        self.t_first_out = None
-        self._closed = False
-        with self._inq_lock:
-            self._inq = []
-        self.tx_bytes = 0
-        self.groups = 0
-        self.eos = False
-        self.eos_ok = self.eos_lost = 0
-        self.t0 = None
-        self.t_first_audio = None
-        self.t_first_enc = None
-        self.t_first_tx = None
-        self.t_first_rx = None
-        self.enc_ms = 0
-        self.last_file = None
-        self.src_file = None
-        self.talking = False
-        self.draining = False
-        self.realtime = True
-        self.per_msg = PER_MSG
-        self.bc_open = False
-        self._tokcarry = None
-        self.tail_marker = 0
-        self._bcfree = 8192
+        """Data only -- locks and counters shared with live threads stay.
+
+        Serialized against the encode path (airlock) so a reset cannot
+        interleave with an in-flight feed() or finish(): pressing START
+        while the previous STOP was still flushing used to reset the
+        buffers under a running flush. The generation bump is what makes
+        every long step from the old session inert."""
+        with self.airlock:
+            self.gen += 1
+            self.buf = np.zeros(0, dtype=np.float32)
+            self._nat = np.zeros(0, dtype=np.float32)
+            self._tail_guard = 0
+            self._consumed = 0    # native samples already turned into buf
+            self.profile = DEFAULT_PROFILE
+            self._closed = False  # a final chunk has gone out
+            with self._dec_lock:
+                self._dec_pos = 0     # tokens already vocoded and emitted
+                self._pcm_out = []    # progressive decoded audio
+            self.t_first_out = None
+            self._up = self._down = 1
+            self._pad_n = self._pad_o = 0
+            self.k = 0
+            self.pending = []
+            self.prompt = None
+            self.rx_bytes = bytearray()
+            self.rx_times = []
+            self.tx_stream = bytearray()
+            with self._inq_lock:
+                self._inq = []
+            self.tx_bytes = 0
+            self.groups = 0
+            self.eos = False
+            self.eos_ok = self.eos_lost = 0
+            self.t0 = None
+            self.t_first_audio = None
+            self.t_first_enc = None
+            self.t_first_tx = None
+            self.t_first_rx = None
+            self.enc_ms = 0
+            self.last_file = None
+            self.src_file = None
+            self.talking = False
+            self.draining = False
+            self.realtime = True
+            self.per_msg = PER_MSG
+            self.bc_open = False
+            self._tokcarry = None
+            self.tail_marker = 0
+            self._bcfree = 8192
 
     # ---- boards ------------------------------------------------------
     def open(self, tx_serial, rx_serial):
@@ -295,15 +310,24 @@ class Link:
 
     def close(self):
         self.stop.set()
-        for t in (self.thread, self.tx_thread):
+        # ALL four workers, not just the drain loops. dec/enc were left
+        # out of this list, so a second Connect started fresh ones while
+        # the old pair was still running -- two encoders taking turns on
+        # the ingest queue feed the stream out of order, and two decoders
+        # double-advance the position. join(4) covers the longest decode
+        # step; a worker that survives it is caught by the generation
+        # check and can only waste cycles, not corrupt a session.
+        for t in (self.thread, self.tx_thread, self.dec_thread,
+                  self.enc_thread):
             if t:
-                t.join(timeout=2)
+                t.join(timeout=4)
         for m in (self.tx, self.rx):
             try:
                 m and m.close()
             except Exception:
                 pass
         self.tx = self.rx = self.thread = self.tx_thread = None
+        self.dec_thread = self.enc_thread = None
 
     def _rx_loop(self):
         while not self.stop.is_set():
@@ -315,6 +339,14 @@ class Link:
             for name, p in evs:
                 if name == "log":
                     self.say("board(rx): %s" % str(p).strip())
+                elif name == "message" and isinstance(p, dict):
+                    # kept for warmup(): it used to poll rx.events()
+                    # itself, racing THIS loop for the echo -- whichever
+                    # side polled first consumed the event, and this side
+                    # dropped it on the floor. A warm link then reported
+                    # "did NOT warm up" purely by who won the race.
+                    self.rx_msgs.append((time.time(), bytes(p.get("data", b""))))
+                    del self.rx_msgs[:-16]
                 elif name == "status" and isinstance(p, dict):
                     self.rx_status = p
                 elif name == "0x88" and p:
@@ -324,6 +356,13 @@ class Link:
                         # END OF STREAM, carrying the radio's own verdict:
                         # frames_ok, frames_lost. Authoritative -- byte
                         # counts say what arrived, not what the air cost.
+                        # Only honoured when a drain can be waiting on it:
+                        # while TALKING we have not sent our close, so an
+                        # EOS now is the tail of some earlier stream and
+                        # believing it truncates this one at the stop.
+                        if self.talking:
+                            self.say("stale end-of-stream ignored")
+                            continue
                         if len(p) >= 5:
                             self.eos_ok = int.from_bytes(p[1:3], "little")
                             self.eos_lost = int.from_bytes(p[3:5], "little")
@@ -351,42 +390,33 @@ class Link:
         """An idle station decays to EXTREME-only listening and its
         remembered rung decays with it. Exchange real frames until the
         peer answers, so the broadcast goes out at a rung it is on."""
-        seen = []
+        # The echo is read from _rx_loop's mailbox, NOT by polling the
+        # device here: two threads polling the same event stream race for
+        # every event, and _rx_loop used to win the warm-up echo and drop
+        # it -- a warm link then reported "did NOT warm up" depending on
+        # nothing but scheduling. One reader per device; everyone else
+        # reads what the reader kept.
         deadline = time.time() + budget
         for n in range(8):
             tag = bytes([0xE0 + n])
+            t = time.time()
             with self.lock:
                 self.tx.submit(tag + b"warm", qos=1)
-            t = time.time()
             while time.time() < min(deadline, t + 20):
-                with self.lock:
-                    evs = list(self.rx.events(timeout=0.1))
-                    for _n, _p in self.tx.events(timeout=0.02):
-                        if _n == "status" and isinstance(_p, dict):
-                            self.rung = _p.get("rung_now", self.rung)
-                for name, p in evs:
-                    if name == "message" and p["data"][:1] == tag:
-                        # the rung comes from a STATUS event, which may not
-                        # have arrived yet -- ask for one rather than
-                        # reporting a stale 0 that reads as a dead ladder
-                        el = time.time() - t
-                        rdl = time.time() + 4.0
-                        while time.time() < rdl:
-                            with self.lock:
-                                for _n, _p in self.tx.events(timeout=0.2):
-                                    if _n == "status" and isinstance(_p, dict):
-                                        r = _p.get("rung_now", _p.get("rung"))
-                                        if r is not None and r >= 0:
-                                            self.rung = r
-                            if self.rung:
-                                break
-                        if settle:
-                            self.settle()
-                        self.say("link warm in %.1f s, rung %s" % (el, self.rung))
-                        return {"ok": True, "rung": self.rung,
-                                "seconds": round(el, 2)}
-                    if name == "status" and isinstance(p, dict):
-                        self.rung = p.get("rung_now", self.rung)
+                if any(ts >= t and d[:1] == tag for ts, d in self.rx_msgs):
+                    el = time.time() - t
+                    # the rung comes from a STATUS event via _tx_loop; it
+                    # may not have arrived yet, so give it a moment rather
+                    # than reporting a stale 0 that reads as a dead ladder
+                    rdl = time.time() + 4.0
+                    while time.time() < rdl and not self.rung:
+                        time.sleep(0.2)
+                    if settle:
+                        self.settle()
+                    self.say("link warm in %.1f s, rung %s" % (el, self.rung))
+                    return {"ok": True, "rung": self.rung,
+                            "seconds": round(el, 2)}
+                time.sleep(0.1)
             if time.time() > deadline:
                 break
         self.say("link did NOT warm up")
@@ -414,15 +444,13 @@ class Link:
         stopped keying. The queues have to be empty too, or a warm-up
         frame still waiting its turn goes out mid-broadcast and costs a
         group the same way."""
+        # tx_status is kept fresh by _tx_loop -- the one reader of that
+        # device. Polling it from here as well raced the loop for every
+        # event, same class of bug as warmup's echo.
         end = time.time() + budget
         clean = 0
         while time.time() < end:
-            with self.lock:
-                for n, p in self.tx.events(timeout=0.2):
-                    if n == "status" and isinstance(p, dict):
-                        self.tx_status = p
-                    elif n == "log":
-                        self.say("board(tx): %s" % str(p).strip())
+            time.sleep(0.25)
             s = self.tx_status
             if s and not s.get("pending") and not any(s.get("queues") or [1]):
                 clean += 1
@@ -445,6 +473,8 @@ class Link:
         audio. The worklet batches now, but the server should not depend
         on a client being well behaved, so ingest only queues and a
         single worker does resample, encode and send at its own pace."""
+        if not self.talking:
+            return                # a straggler after stop, or no session
         with self._inq_lock:
             self._inq.append((pcm, in_sr))
 
@@ -458,19 +488,24 @@ class Link:
             with self._inq_lock:
                 batch, self._inq = self._inq, []
                 self._enc_busy = bool(batch)
+                g = self.gen      # the batch belongs to THIS session; a
+                                  # reset clears the queue, but a batch
+                                  # already swapped out is past that --
+                                  # feed() checks the generation under
+                                  # the airlock and drops it
             if not batch:
                 continue
             try:
-            # one feed per contiguous run of the same rate: concatenating
-            # first means the chunk loop runs once for many small posts
+                # one feed per contiguous run of the same rate: the chunk
+                # loop then runs once for many small posts
                 sr = batch[0][1]
                 run = []
                 for pcm, r in batch:
                     if r != sr and run:
-                        self.feed(np.concatenate(run), sr); run = []; sr = r
+                        self.feed(np.concatenate(run), sr, g); run = []; sr = r
                     run.append(pcm)
                 if run:
-                    self.feed(np.concatenate(run), sr)
+                    self.feed(np.concatenate(run), sr, g)
             except Exception as e:
                 self.say("encode step failed: %r" % (e,))
                 time.sleep(0.5)
@@ -478,7 +513,7 @@ class Link:
                 with self._inq_lock:
                     self._enc_busy = False
 
-    def feed(self, pcm, in_sr):
+    def feed(self, pcm, in_sr, gen=None):
         """Accept a block of microphone audio and broadcast what is ready.
 
         SERIALIZED. The HTTP server is threaded and the browser posts
@@ -503,6 +538,8 @@ class Link:
             self.feed_races += 1
             self.airlock.acquire()
         try:
+            if gen is not None and gen != self.gen:
+                return            # audio from a session that was reset
             self._feed(pcm, in_sr)
         finally:
             self.airlock.release()
@@ -739,10 +776,15 @@ class Link:
             pr = self._prompt()
             if pr is None:
                 continue
+            g = self.gen          # a vocode step takes 150 ms - 2 s; a
+                                  # reset during it must make it INERT,
+                                  # or session N's audio and position
+                                  # land in session N+1
+            lo = self._dec_pos
             usable = avail - ahead
-            hi = self._dec_pos + ((usable - self._dec_pos) // chunk) * chunk
+            hi = lo + ((usable - lo) // chunk) * chunk
             try:
-                y = self._vocode(self._dec_pos, hi, pr, ahead)
+                y = self._vocode(lo, hi, pr, ahead)
             except Exception as e:
                 # back off rather than spin: a step that fails every
                 # 50 ms would rotate the log clean before anyone reads it
@@ -751,8 +793,11 @@ class Link:
                 continue
             if y is None or not len(y):
                 continue
-            self._pcm_out.append(y)
-            self._dec_pos = hi
+            with self._dec_lock:
+                if g != self.gen or self._dec_pos != lo:
+                    continue      # a reset (or a rival worker) moved on
+                self._pcm_out.append(y)
+                self._dec_pos = hi
             if self.t_first_out is None:
                 self.t_first_out = time.time()
                 if self.t0:
@@ -774,6 +819,10 @@ class Link:
         return self._bcfree
 
     def finish(self):
+        if self._closed and not self.talking:
+            # a second stop for the same session: everything already went
+            # out, and re-running the flush would write a duplicate file
+            return {"ok": False, "reason": "nothing in flight"}
         # Drain what the ingest queue still holds: the encoder worker
         # runs behind the requests by design, so the last blocks of
         # speech are typically still queued when the button is released.
@@ -880,9 +929,15 @@ class Link:
         # the listener has had it for a while; only the tail is left. The
         # abort marker can put the true end slightly behind the streaming
         # decoder, so clamp rather than assume.
-        head = np.concatenate(self._pcm_out) if self._pcm_out \
-            else np.zeros(0, np.float32)
-        done = min(self._dec_pos, n)
+        # position and audio as ONE snapshot: reading them separately
+        # loses whatever chunk the decoder lands between the two reads --
+        # its tokens counted as done, its audio absent from head, and the
+        # gap inaudible until someone lines the output up against the
+        # source.
+        with self._dec_lock:
+            done = min(self._dec_pos, n)
+            head = np.concatenate(self._pcm_out) if self._pcm_out \
+                else np.zeros(0, np.float32)
         head = head[:int(round(done / 25.0 * OUT_SR))]
         tail = self._vocode(done, n, pr) if n > done else None
         y = np.concatenate([head, tail]) if tail is not None and len(tail) \
