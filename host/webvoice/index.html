@@ -237,7 +237,36 @@ async function startTalk(){
     echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
   ctx=new AudioContext({sampleRate:16000});
   const src=ctx.createMediaStreamSource(stream);
-  node=ctx.createScriptProcessor(4096,1,1);
+  // CAPTURE ON THE AUDIO THREAD. createScriptProcessor runs its callback
+  // on the MAIN thread, so anything that blocks the page -- a status
+  // poll, a fetch, or just the machine being busy because the far end is
+  // vocoding -- makes it underrun and hand us a buffer of ZEROS. That is
+  // not a dropout the server can see: the samples arrive, they are
+  // simply silent, and the gap lands in the source recording and in
+  // everything decoded from it. Measured: 26-79 ms of exact zeros
+  // mid-utterance in browser sessions, never in a synthetic feed.
+  // AudioWorklet runs on the audio thread and is immune to it.
+  chain=Promise.resolve();          // one post in flight, per session
+  let usedWorklet=false;
+  if(ctx.audioWorklet){
+    try{
+      const src_js=`class C extends AudioWorkletProcessor{
+        process(inputs){const c=inputs[0]&&inputs[0][0];
+          if(c&&c.length) this.port.postMessage(new Float32Array(c));
+          return true;}}
+        registerProcessor('cap',C);`;
+      await ctx.audioWorklet.addModule(
+        URL.createObjectURL(new Blob([src_js],{type:'application/javascript'})));
+      node=new AudioWorkletNode(ctx,'cap');
+      node.port.onmessage=e=>{
+        if(!talking) return;
+        chain=chain.then(()=>fetch('/api/audio?sr='+ctx.sampleRate,
+          {method:'POST',body:e.data.buffer})).catch(()=>{});
+      };
+      usedWorklet=true;
+    }catch(err){ node=null; }
+  }
+  if(!usedWorklet) node=ctx.createScriptProcessor(4096,1,1);
   // ONE post in flight at a time. These were fire-and-forget, and two
   // concurrent fetches have no ordering guarantee on the wire at all --
   // the browser is free to open a second connection and let it land
@@ -245,13 +274,14 @@ async function startTalk(){
   // starts a rival broadcast on the board. Chaining them keeps the
   // audio callback non-blocking (it just extends the chain) while the
   // network sees a strict sequence.
-  chain=Promise.resolve();
-  node.onaudioprocess=e=>{
-    if(!talking) return;
-    const f=new Float32Array(e.inputBuffer.getChannelData(0));
-    chain=chain.then(()=>fetch('/api/audio?sr='+ctx.sampleRate,
-      {method:'POST',body:f.buffer})).catch(()=>{});
-  };
+  if(!usedWorklet){
+    node.onaudioprocess=e=>{
+      if(!talking) return;
+      const f=new Float32Array(e.inputBuffer.getChannelData(0));
+      chain=chain.then(()=>fetch('/api/audio?sr='+ctx.sampleRate,
+        {method:'POST',body:f.buffer})).catch(()=>{});
+    };
+  }
   src.connect(node); node.connect(ctx.destination);
 }
 async function stopTalk(){

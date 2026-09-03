@@ -54,26 +54,43 @@ PER_MSG = 1.0                              # speech per broadcast
 # ended, so the listener heard the first word only after the last one was
 # spoken -- on a 200 s transmission, ~202 s of latency for word one, which
 # throws away the 1.32 s the codec was tuned to. Decode as the tokens land
-# instead: DEC_CH tokens per step, with DEC_LEFT tokens of already-decoded
-# history as context. The left context is FREE in latency terms (those
-# tokens are already in hand); lookahead would not be, and is not used.
-DEC_CH, DEC_LEFT = 25, 50                  # 1.0 s step, 2.0 s of history
+# instead: a chunk of tokens per step (PROFILES below sets how many),
+# with DEC_LEFT tokens of already-decoded history as context. The left
+# context is FREE in latency terms -- those tokens are already in hand
+# and already played -- so it is fixed; what a profile varies is the
+# chunk and the lookahead, which are what cost latency and compute.
+DEC_LEFT = 50                              # 2.0 s of history, always
 
-# DECODE PROFILES. Left context is free (already-received tokens); the
-# lookahead is not -- every chunk of it is a chunk of added latency, and
-# it is the only axis worth exposing. Measured on a received stream, as
-# log-spectral L1 against the one-shot decode of the same bytes:
+# DECODE PROFILES: (chunk, lookahead), both in tokens, 25 = 1 s.
 #
-#     lookahead 0 s : 0.2240      1 s : 0.1236      2 s : 0.1138
+# A step vocodes DEC_LEFT + chunk + lookahead and keeps only the chunk,
+# so it must finish within the chunk's own duration or the decoder falls
+# behind speech. The first version of this table varied ONLY the
+# lookahead and was never cost-checked; "balanced" came out at exactly
+# 100% duty, i.e. it could not keep up, and the CPU it burned starved the
+# browser's main-thread capture into emitting buffers of silence. Both
+# axes are measured now -- log-spectral L1 against the one-shot decode of
+# the same received bytes, and wall time per step against the budget:
 #
-# so one chunk buys back 45% of the chunking penalty and the second buys
-# 8%. "live" is the real-time choice, "balanced" is the knee and the
-# default for anything that is not a conversation, "quality" is for a
-# recording where latency does not matter.
+#     chunk  ahead  latency   L1      duty
+#      1 s    0 s    1 s     0.2240    77%   live
+#      1 s    1 s    2 s     0.1236   100%   INFEASIBLE (was "balanced")
+#      2 s    1 s    3 s     0.1113    63%   balanced
+#      2 s    2 s    4 s     0.1108    83%   dominated: no better than 2/1
+#      3 s    2 s    5 s     0.0941    60%   quality
+#
+# The useful result is that a BIGGER CHUNK is both better and cheaper:
+# the fixed left context is paid once per step, so amortising it over
+# more output lowers the duty AND removes seams. Quality is the cheapest
+# profile here, not the most expensive -- which is why varying lookahead
+# alone was the wrong knob.
 PROFILES = {
-    "live":     {"lookahead": 0,  "desc": "lowest latency, no lookahead"},
-    "balanced": {"lookahead": 25, "desc": "+1.0 s, ~45% less chunking loss"},
-    "quality":  {"lookahead": 50, "desc": "+2.0 s, best match to one-shot"},
+    "live":     {"chunk": 25, "lookahead": 0,
+                 "desc": "1 s steps, no lookahead -- 1 s decode latency"},
+    "balanced": {"chunk": 50, "lookahead": 25,
+                 "desc": "2 s steps, +1 s lookahead -- half the chunking loss"},
+    "quality":  {"chunk": 75, "lookahead": 50,
+                 "desc": "3 s steps, +2 s lookahead -- closest to one-shot"},
 }
 DEFAULT_PROFILE = "live"
 BC_PT_LSCODEC_25 = 3   # broadcast.h: this codec's own payload type. It
@@ -636,16 +653,17 @@ class Link:
         prevent, in the other direction."""
         while not self.stop.is_set():
             time.sleep(0.05)
-            ahead = PROFILES[self.profile]["lookahead"]
+            prof = PROFILES[self.profile]
+            ahead, chunk = prof["lookahead"], prof["chunk"]
             avail = (len(self.rx_bytes) * 8) // 10
             # a chunk is only decodable once its lookahead has landed too
-            if avail - self._dec_pos < DEC_CH + ahead:
+            if avail - self._dec_pos < chunk + ahead:
                 continue
             pr = self._prompt()
             if pr is None:
                 continue
             usable = avail - ahead
-            hi = self._dec_pos + ((usable - self._dec_pos) // DEC_CH) * DEC_CH
+            hi = self._dec_pos + ((usable - self._dec_pos) // chunk) * chunk
             try:
                 y = self._vocode(self._dec_pos, hi, pr, ahead)
             except Exception as e:
