@@ -1,0 +1,17 @@
+# The codec HOME (venv, third-party trees, checkpoints, shards, adapters)
+# lives OUTSIDE the repo -- LSCODEC_HOME points at it, default
+# /mnt/data/lscodec/adapter. Nothing heavy should ever land here even if
+# the pipeline is run in-tree by mistake.
+venv/
+LSCodec-Inference/
+naturalspeech3_facodec/
+ckpt/
+data/
+data_dl*/
+out/
+*.pt
+*.bin
+*.wav
+*.lsc
+*.log
+__pycache__/
