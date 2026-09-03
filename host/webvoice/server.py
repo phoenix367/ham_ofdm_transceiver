@@ -215,6 +215,8 @@ class Link:
         self._tail_guard = 0
         self._consumed = 0        # native samples already turned into buf
         self.profile = DEFAULT_PROFILE
+        self._inq = []            # microphone audio awaiting the encoder
+        self._inq_lock = threading.Lock()
         self._dec_pos = 0         # tokens already vocoded and emitted
         self._pcm_out = []        # progressive decoded audio
         self.t_first_out = None   # when the listener could first hear audio
@@ -241,6 +243,8 @@ class Link:
         self._dec_pos = 0
         self._pcm_out = []
         self.t_first_out = None
+        with self._inq_lock:
+            self._inq = []
         self.tx_bytes = 0
         self.groups = 0
         self.eos = False
@@ -280,6 +284,8 @@ class Link:
                 self.say("could not declare codecs: %r" % (e,))
         self.dec_thread = threading.Thread(target=self._dec_loop, daemon=True)
         self.dec_thread.start()
+        self.enc_thread = threading.Thread(target=self._enc_loop, daemon=True)
+        self.enc_thread.start()
         self.tx_thread = threading.Thread(target=self._tx_loop, daemon=True)
         self.tx_thread.start()
         self.say("opened TX %s / RX %s" % (tx_serial[:6], rx_serial[:6]))
@@ -425,6 +431,42 @@ class Link:
         return False
 
     # ---- transmit ----------------------------------------------------
+    def ingest(self, pcm, in_sr):
+        """Accept microphone audio and RETURN -- no codec work here.
+
+        The encode used to run inside the HTTP request, so the client's
+        post rate gated the encoder. An AudioWorklet posting one render
+        quantum (128 frames, every 8 ms) instead of a 4096-frame block
+        put 125 requests per second through this path and starved the
+        pipeline to 0.17x real time: 93 s of talking arrived as 17 s of
+        audio. The worklet batches now, but the server should not depend
+        on a client being well behaved, so ingest only queues and a
+        single worker does resample, encode and send at its own pace."""
+        with self._inq_lock:
+            self._inq.append((pcm, in_sr))
+
+    def _enc_loop(self):
+        while not self.stop.is_set():
+            time.sleep(0.02)
+            with self._inq_lock:
+                batch, self._inq = self._inq, []
+            if not batch:
+                continue
+            # one feed per contiguous run of the same rate: concatenating
+            # first means the chunk loop runs once for many small posts
+            sr = batch[0][1]
+            run = []
+            for pcm, r in batch:
+                if r != sr and run:
+                    self.feed(np.concatenate(run), sr); run = []; sr = r
+                run.append(pcm)
+            if run:
+                try:
+                    self.feed(np.concatenate(run), sr)
+                except Exception as e:
+                    self.say("encode step failed: %r" % (e,))
+                    time.sleep(0.5)
+
     def feed(self, pcm, in_sr):
         """Accept a block of microphone audio and broadcast what is ready.
 
@@ -710,6 +752,17 @@ class Link:
         return self._bcfree
 
     def finish(self):
+        # Drain what the ingest queue still holds: the encoder worker
+        # runs behind the requests by design, so the last blocks of
+        # speech are typically still queued when the button is released.
+        # Without this they are simply dropped.
+        end = time.time() + 30.0
+        while time.time() < end:
+            with self._inq_lock:
+                pending = len(self._inq)
+            if not pending:
+                break
+            time.sleep(0.05)
         with self.airlock:
             return self._finish()
 
@@ -993,7 +1046,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if u.path == "/api/audio":
                 sr = int(q.get("sr", ["48000"])[0])
                 pcm = np.frombuffer(body, dtype="<f4").astype(np.float32)
-                LINK.feed(pcm, sr)
+                LINK.ingest(pcm, sr)
                 return self._json({"ok": True, "tx_bytes": LINK.tx_bytes})
             if u.path == "/api/stop":
                 LINK.say("transmit released")

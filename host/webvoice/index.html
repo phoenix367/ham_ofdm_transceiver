@@ -250,10 +250,27 @@ async function startTalk(){
   let usedWorklet=false;
   if(ctx.audioWorklet){
     try{
-      const src_js=`class C extends AudioWorkletProcessor{
-        process(inputs){const c=inputs[0]&&inputs[0][0];
-          if(c&&c.length) this.port.postMessage(new Float32Array(c));
-          return true;}}
+      // BATCH inside the worklet. process() is called once per render
+      // quantum -- 128 frames, i.e. every 8 ms at 16 kHz -- so posting
+      // each one is 125 HTTP requests per second against the
+      // ScriptProcessor's 4. Doing that starved the encoder to 0.17x
+      // real time (measured: one 1 s chunk emitted every 5.5 s, 93 s of
+      // talking arriving as 17 s of audio). Accumulate to the same 4096
+      // frames the ScriptProcessor delivered and post that.
+      const src_js=`const N=4096;
+        class C extends AudioWorkletProcessor{
+          constructor(){super(); this.buf=new Float32Array(N); this.n=0;}
+          process(inputs){
+            const c=inputs[0]&&inputs[0][0];
+            if(!c||!c.length) return true;
+            let i=0;
+            while(i<c.length){
+              const k=Math.min(N-this.n, c.length-i);
+              this.buf.set(c.subarray(i,i+k), this.n);
+              this.n+=k; i+=k;
+              if(this.n===N){ this.port.postMessage(this.buf.slice(0,N)); this.n=0; }
+            }
+            return true;}}
         registerProcessor('cap',C);`;
       await ctx.audioWorklet.addModule(
         URL.createObjectURL(new Blob([src_js],{type:'application/javascript'})));
