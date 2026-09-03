@@ -217,6 +217,8 @@ class Link:
         self.profile = DEFAULT_PROFILE
         self._inq = []            # microphone audio awaiting the encoder
         self._inq_lock = threading.Lock()
+        self._enc_busy = False    # worker is inside feed() right now
+        self._closed = False      # a final chunk has gone out
         self._dec_pos = 0         # tokens already vocoded and emitted
         self._pcm_out = []        # progressive decoded audio
         self.t_first_out = None   # when the listener could first hear audio
@@ -243,6 +245,7 @@ class Link:
         self._dec_pos = 0
         self._pcm_out = []
         self.t_first_out = None
+        self._closed = False
         with self._inq_lock:
             self._inq = []
         self.tx_bytes = 0
@@ -448,24 +451,32 @@ class Link:
     def _enc_loop(self):
         while not self.stop.is_set():
             time.sleep(0.02)
+            # busy is set WITH the swap, under the same lock: the queue
+            # goes empty the moment a batch is taken, so "queue empty" on
+            # its own says nothing about whether the encoder is still
+            # inside feed() -- see finish().
             with self._inq_lock:
                 batch, self._inq = self._inq, []
+                self._enc_busy = bool(batch)
             if not batch:
                 continue
+            try:
             # one feed per contiguous run of the same rate: concatenating
             # first means the chunk loop runs once for many small posts
-            sr = batch[0][1]
-            run = []
-            for pcm, r in batch:
-                if r != sr and run:
-                    self.feed(np.concatenate(run), sr); run = []; sr = r
-                run.append(pcm)
-            if run:
-                try:
+                sr = batch[0][1]
+                run = []
+                for pcm, r in batch:
+                    if r != sr and run:
+                        self.feed(np.concatenate(run), sr); run = []; sr = r
+                    run.append(pcm)
+                if run:
                     self.feed(np.concatenate(run), sr)
-                except Exception as e:
-                    self.say("encode step failed: %r" % (e,))
-                    time.sleep(0.5)
+            except Exception as e:
+                self.say("encode step failed: %r" % (e,))
+                time.sleep(0.5)
+            finally:
+                with self._inq_lock:
+                    self._enc_busy = False
 
     def feed(self, pcm, in_sr):
         """Accept a block of microphone audio and broadcast what is ready.
@@ -613,6 +624,15 @@ class Link:
         as a normal close injects a byte of payload into the stream, which
         the receiver then decodes as token data."""
         MORE, CONT = 0x80, 0x40
+        if self._closed and not final:
+            # The stream is already closed. Sending now would go out as a
+            # NON-continuation command, which the board treats as a NEW
+            # broadcast and which supersedes whatever is still on the air
+            # -- turning a late chunk into a truncated transmission
+            # rather than a late one. Drop it and say so.
+            self.say("late chunk after end-of-stream, dropped (%d B)"
+                     % len(raw))
+            return
         self._send_want += 1
         try:
             self._acquire_tx()
@@ -628,6 +648,8 @@ class Link:
                      | (CONT if self.bc_open else 0))
             self.tx.t.write(encode(0x06, bytes([ptype, 0xFF]) + raw))
             self.bc_open = not final
+            if final:
+                self._closed = True
             self.tx_stream += raw
         finally:
             self.lock.release()
@@ -756,11 +778,21 @@ class Link:
         # runs behind the requests by design, so the last blocks of
         # speech are typically still queued when the button is released.
         # Without this they are simply dropped.
+        # Wait for the queue to empty AND the worker to go idle. Waiting
+        # on the queue alone is a race that TRUNCATES the transmission:
+        # the worker swaps the queue out before processing it, so finish()
+        # saw "empty", closed the stream with a final chunk, and the
+        # worker's in-flight feed() then sent more -- which the board
+        # reads as a NON-continuation command and supersedes the stream it
+        # is still transmitting. Measured: 78.2% of bytes lost with
+        # "0 lost on the air", 13 s of speech delivered as 3 s, and no
+        # "last group keying now" because the close never came from the
+        # real last chunk.
         end = time.time() + 30.0
         while time.time() < end:
             with self._inq_lock:
-                pending = len(self._inq)
-            if not pending:
+                idle = not self._inq and not self._enc_busy
+            if idle:
                 break
             time.sleep(0.05)
         with self.airlock:
