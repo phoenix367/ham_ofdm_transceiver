@@ -131,6 +131,14 @@ a{color:var(--ok)}
 
   <div class="panel">
     <button id="ptt" disabled>START TRANSMIT</button>
+    <div class="row" style="margin-top:10px">
+      <span class="lab" style="min-width:64px">input</span>
+      <span id="mic" style="flex:1;height:10px;border:1px solid var(--rule);
+            display:inline-block;position:relative">
+        <span id="micbar" style="position:absolute;left:0;top:0;bottom:0;
+              width:0;background:var(--ok)"></span></span>
+      <span id="mictext" class="chip"><span class="dot"></span>&mdash;</span>
+    </div>
     <div class="grid">
       <div class="cell"><div class="val" id="v-rung">&mdash;</div><div class="lab">rung</div></div>
       <div class="cell"><div class="val" id="v-tx">0</div><div class="lab">bytes sent</div></div>
@@ -172,6 +180,7 @@ let ctx=null, node=null, stream=null, talking=false, warm=false;
 // be able to DRAIN it, or the close command overtakes the last block of
 // speech still queued behind it
 let chain=Promise.resolve();
+let micPeak=0;
 
 async function api(p,o){const r=await fetch(p,o);return r.json();}
 
@@ -237,53 +246,20 @@ async function startTalk(){
     echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
   ctx=new AudioContext({sampleRate:16000});
   const src=ctx.createMediaStreamSource(stream);
-  // CAPTURE ON THE AUDIO THREAD. createScriptProcessor runs its callback
-  // on the MAIN thread, so anything that blocks the page -- a status
-  // poll, a fetch, or just the machine being busy because the far end is
-  // vocoding -- makes it underrun and hand us a buffer of ZEROS. That is
-  // not a dropout the server can see: the samples arrive, they are
-  // simply silent, and the gap lands in the source recording and in
-  // everything decoded from it. Measured: 26-79 ms of exact zeros
-  // mid-utterance in browser sessions, never in a synthetic feed.
-  // AudioWorklet runs on the audio thread and is immune to it.
+  // CAPTURE. This uses createScriptProcessor deliberately, despite it
+  // being deprecated and running its callback on the MAIN thread, where
+  // a blocked page makes it underrun and emit 26-79 ms of zeros.
+  //
+  // An AudioWorklet replacement (audio thread, immune to that) was
+  // written and shipped, and it captured NOTHING: every browser session
+  // against it came back a flat zero -- peak 0.0000 in the source
+  // recording, and the far end faithfully decoding silence. The graph
+  // was connected and the processor was posting, so the fault is
+  // somewhere I cannot see without a browser to step through. Silence
+  // is far worse than an occasional 60 ms gap, so the proven path is
+  // back until a worklet version can actually be verified in one.
   chain=Promise.resolve();          // one post in flight, per session
-  let usedWorklet=false;
-  if(ctx.audioWorklet){
-    try{
-      // BATCH inside the worklet. process() is called once per render
-      // quantum -- 128 frames, i.e. every 8 ms at 16 kHz -- so posting
-      // each one is 125 HTTP requests per second against the
-      // ScriptProcessor's 4. Doing that starved the encoder to 0.17x
-      // real time (measured: one 1 s chunk emitted every 5.5 s, 93 s of
-      // talking arriving as 17 s of audio). Accumulate to the same 4096
-      // frames the ScriptProcessor delivered and post that.
-      const src_js=`const N=4096;
-        class C extends AudioWorkletProcessor{
-          constructor(){super(); this.buf=new Float32Array(N); this.n=0;}
-          process(inputs){
-            const c=inputs[0]&&inputs[0][0];
-            if(!c||!c.length) return true;
-            let i=0;
-            while(i<c.length){
-              const k=Math.min(N-this.n, c.length-i);
-              this.buf.set(c.subarray(i,i+k), this.n);
-              this.n+=k; i+=k;
-              if(this.n===N){ this.port.postMessage(this.buf.slice(0,N)); this.n=0; }
-            }
-            return true;}}
-        registerProcessor('cap',C);`;
-      await ctx.audioWorklet.addModule(
-        URL.createObjectURL(new Blob([src_js],{type:'application/javascript'})));
-      node=new AudioWorkletNode(ctx,'cap');
-      node.port.onmessage=e=>{
-        if(!talking) return;
-        chain=chain.then(()=>fetch('/api/audio?sr='+ctx.sampleRate,
-          {method:'POST',body:e.data.buffer})).catch(()=>{});
-      };
-      usedWorklet=true;
-    }catch(err){ node=null; }
-  }
-  if(!usedWorklet) node=ctx.createScriptProcessor(4096,1,1);
+  node=ctx.createScriptProcessor(4096,1,1);
   // ONE post in flight at a time. These were fire-and-forget, and two
   // concurrent fetches have no ordering guarantee on the wire at all --
   // the browser is free to open a second connection and let it land
@@ -291,14 +267,18 @@ async function startTalk(){
   // starts a rival broadcast on the board. Chaining them keeps the
   // audio callback non-blocking (it just extends the chain) while the
   // network sees a strict sequence.
-  if(!usedWorklet){
-    node.onaudioprocess=e=>{
-      if(!talking) return;
-      const f=new Float32Array(e.inputBuffer.getChannelData(0));
-      chain=chain.then(()=>fetch('/api/audio?sr='+ctx.sampleRate,
-        {method:'POST',body:f.buffer})).catch(()=>{});
-    };
-  }
+  node.onaudioprocess=e=>{
+    if(!talking) return;
+    const f=new Float32Array(e.inputBuffer.getChannelData(0));
+    // INPUT LEVEL, shown live. A silent microphone is otherwise
+    // invisible until the far end writes a recording of nothing --
+    // which is exactly how a broken capture path survived six
+    // transmissions with every counter reading healthy.
+    let pk=0; for(let i=0;i<f.length;i++){const a=Math.abs(f[i]); if(a>pk)pk=a;}
+    micPeak=Math.max(micPeak*0.85, pk);
+    chain=chain.then(()=>fetch('/api/audio?sr='+ctx.sampleRate,
+      {method:'POST',body:f.buffer})).catch(()=>{});
+  };
   src.connect(node); node.connect(ctx.destination);
 }
 async function stopTalk(){
@@ -379,6 +359,14 @@ setInterval(async()=>{
   if(s.profile){
     $('profchip').className='chip ok';
     $('proftext').textContent='far end decoding: '+s.profile;
+  }
+  if(talking){
+    const pct=Math.min(100,Math.round(micPeak*140));
+    $('micbar').style.width=pct+'%';
+    $('micbar').style.background=micPeak<0.002?'var(--fault)':'var(--ok)';
+    $('mictext').className='chip'+(micPeak<0.002?' fault':' ok');
+    $('mictext').textContent=micPeak<0.002?'no signal from the microphone'
+                                          :'peak '+micPeak.toFixed(2);
   }
   $('log').textContent=(s.log||[]).join('\n');
   $('log').scrollTop=$('log').scrollHeight;

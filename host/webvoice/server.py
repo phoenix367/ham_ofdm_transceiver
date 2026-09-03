@@ -884,6 +884,15 @@ class Link:
                 bytes(self.rx_bytes))
         except Exception:
             pass
+        # A SILENT SOURCE is a capture fault, not a link fault, and it
+        # used to be reported as a clean transfer: every counter healthy,
+        # 0% lost, and a recording of nothing. An AudioWorklet that posted
+        # flat zeros went unnoticed for six transmissions that way. Say it
+        # where the operator is already looking.
+        if len(self.buf) and float(np.abs(self.buf).max()) < 1e-6:
+            self.say("SOURCE WAS SILENT -- the microphone delivered no "
+                     "audio, so there was nothing to send. The link is "
+                     "fine; check the input device and its permission.")
         loss = 0.0 if not self.tx_bytes else 100.0 * (1 - len(self.rx_bytes) / self.tx_bytes)
         self.say("wrote %s (%.1f s, %.1f%% of bytes lost, %d frames ok / "
                  "%d lost on the air)"
