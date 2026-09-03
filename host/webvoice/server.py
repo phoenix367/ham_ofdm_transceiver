@@ -50,6 +50,14 @@ from lscodec.ssl_models.wavlm_extractor import Extractor
 SR, H = 16000, 640
 CHUNK, LEFT, RIGHT = 1.0, 1.28, 0.32      # 1.32 s codec latency
 PER_MSG = 1.0                              # speech per broadcast
+# Streaming DECODE. The far end used to vocode nothing until the stream
+# ended, so the listener heard the first word only after the last one was
+# spoken -- on a 200 s transmission, ~202 s of latency for word one, which
+# throws away the 1.32 s the codec was tuned to. Decode as the tokens land
+# instead: DEC_CH tokens per step, with DEC_LEFT tokens of already-decoded
+# history as context. The left context is FREE in latency terms (those
+# tokens are already in hand); lookahead would not be, and is not used.
+DEC_CH, DEC_LEFT = 25, 50                  # 1.0 s step, 2.0 s of history
 BC_RT = 0x20        # firmware: key what is queued, do not wait for
                     # a full 96-byte group (that wait WAS the latency)
 OUTDIR = os.path.expanduser("~/voice_rx")
@@ -156,6 +164,9 @@ class Link:
         self._nat = np.zeros(0, dtype=np.float32)
         self._tail_guard = 0
         self._consumed = 0        # native samples already turned into buf
+        self._dec_pos = 0         # tokens already vocoded and emitted
+        self._pcm_out = []        # progressive decoded audio
+        self.t_first_out = None   # when the listener could first hear audio
         self._up = self._down = 1
         self._pad_n = self._pad_o = 0
         # Transmit PRIORITY over the two USB drain loops. self.lock is
@@ -176,6 +187,9 @@ class Link:
         self.rx_bytes = bytearray()
         self.rx_times = []
         self.tx_stream = bytearray()
+        self._dec_pos = 0
+        self._pcm_out = []
+        self.t_first_out = None
         self.tx_bytes = 0
         self.groups = 0
         self.eos = False
@@ -206,6 +220,8 @@ class Link:
         self.stop.clear()
         self.thread = threading.Thread(target=self._rx_loop, daemon=True)
         self.thread.start()
+        self.dec_thread = threading.Thread(target=self._dec_loop, daemon=True)
+        self.dec_thread.start()
         self.tx_thread = threading.Thread(target=self._tx_loop, daemon=True)
         self.tx_thread.start()
         self.say("opened TX %s / RX %s" % (tx_serial[:6], rx_serial[:6]))
@@ -544,6 +560,72 @@ class Link:
                 elif name == "log":
                     self.say("board(tx): %s" % str(p).strip())
 
+    # ---- streaming decode -------------------------------------------
+    def _vocode(self, lo, hi, pr):
+        """Vocode tokens [lo,hi) with [lo-DEC_LEFT,lo) as context, and
+        return only the audio belonging to [lo,hi)."""
+        ctx = max(0, lo - DEC_LEFT)
+        data = bytes(self.rx_bytes)
+        n = (len(data) * 8) // 10
+        hi = min(hi, n)
+        if hi <= lo:
+            return None
+        idx = torch.tensor(unpack10(data, hi)[ctx:hi],
+                           dtype=torch.long).unsqueeze(1)
+        with torch.no_grad():
+            i = (idx.repeat_interleave(2, dim=0)
+                 if _vc.get("repeat_input_tokens") else idx)
+            v = torch.cat([CBM[g](i[:, g]) for g in range(NG)],
+                          dim=-1).unsqueeze(0)
+            y = VOC.inference(v, torch.from_numpy(pr).float()
+                              .unsqueeze(0))[-1].view(-1).numpy()
+        skip = int(round((lo - ctx) / 25.0 * OUT_SR))
+        return y[skip:]
+
+    def _prompt(self):
+        """The speaker prompt, or None if it is not available yet."""
+        if self.prompt_up is not None:
+            return self.prompt_up
+        if self.prompt is not None:
+            return self.prompt
+        if len(self.buf) >= 2 * SR:
+            return WLM.extract(self.buf[:2 * SR]).numpy()
+        return None
+
+    def _dec_loop(self):
+        """Vocode arriving tokens as they land, a chunk at a time.
+
+        Its own thread on purpose: vocoding one chunk costs far more than
+        a USB poll, and doing it inside _rx_loop would stall event
+        draining -- the same starvation that _drain_lock exists to
+        prevent, in the other direction."""
+        while not self.stop.is_set():
+            time.sleep(0.05)
+            avail = (len(self.rx_bytes) * 8) // 10
+            if avail - self._dec_pos < DEC_CH:
+                continue
+            pr = self._prompt()
+            if pr is None:
+                continue
+            hi = self._dec_pos + ((avail - self._dec_pos) // DEC_CH) * DEC_CH
+            try:
+                y = self._vocode(self._dec_pos, hi, pr)
+            except Exception as e:
+                # back off rather than spin: a step that fails every
+                # 50 ms would rotate the log clean before anyone reads it
+                self.say("decode step failed: %r" % (e,))
+                time.sleep(1)
+                continue
+            if y is None or not len(y):
+                continue
+            self._pcm_out.append(y)
+            self._dec_pos = hi
+            if self.t_first_out is None:
+                self.t_first_out = time.time()
+                if self.t0:
+                    self.say("first audio decodable %.1f s after the talker "
+                             "started" % (self.t_first_out - self.t0))
+
     def _acquire_tx(self):
         """Take the USB lock for a transmit, ahead of the drain loops."""
         self.lock.acquire()
@@ -637,18 +719,30 @@ class Link:
         if self.tail_marker and len(data) >= self.tail_marker:
             data = data[:-self.tail_marker]     # the abort marker is not audio
         n = (len(data) * 8) // 10
-        idx = torch.tensor(unpack10(data, n),
-                           dtype=torch.long).unsqueeze(1)
-        if self.prompt_up is not None:
-            pr = self.prompt_up          # an uploaded prompt wins: it is the
-        elif self.prompt is not None:    # correspondent a receiver has cached
-            pr = self.prompt
-        else:
+        pr = self._prompt()
+        if pr is None:
             pr = WLM.extract(self.buf[:2 * SR]).numpy()
-        with torch.no_grad():
-            i = idx.repeat_interleave(2, dim=0) if _vc.get("repeat_input_tokens") else idx
-            v = torch.cat([CBM[g](i[:, g]) for g in range(NG)], dim=-1).unsqueeze(0)
-            y = VOC.inference(v, torch.from_numpy(pr).float().unsqueeze(0))[-1].view(-1).numpy()
+        # Everything up to _dec_pos was already vocoded AS IT ARRIVED and
+        # the listener has had it for a while; only the tail is left. The
+        # abort marker can put the true end slightly behind the streaming
+        # decoder, so clamp rather than assume.
+        head = np.concatenate(self._pcm_out) if self._pcm_out \
+            else np.zeros(0, np.float32)
+        done = min(self._dec_pos, n)
+        head = head[:int(round(done / 25.0 * OUT_SR))]
+        tail = self._vocode(done, n, pr) if n > done else None
+        y = np.concatenate([head, tail]) if tail is not None and len(tail) \
+            else head
+        if not len(y):        # nothing streamed (very short transmission)
+            idx = torch.tensor(unpack10(data, n),
+                               dtype=torch.long).unsqueeze(1)
+            with torch.no_grad():
+                i = (idx.repeat_interleave(2, dim=0)
+                     if _vc.get("repeat_input_tokens") else idx)
+                v = torch.cat([CBM[g](i[:, g]) for g in range(NG)],
+                              dim=-1).unsqueeze(0)
+                y = VOC.inference(v, torch.from_numpy(pr).float()
+                                  .unsqueeze(0))[-1].view(-1).numpy()
         stamp = time.strftime("%Y%m%d_%H%M%S")
         path = os.path.join(OUTDIR, "rx_%s.wav" % stamp)
         sf.write(path, y, OUT_SR, "PCM_16")
@@ -677,7 +771,8 @@ class Link:
             return round(a - self.t0, 2) if (a and self.t0) else None
         return {"ok": True, "file": path, "source": self.src_file,
                 "t_first_enc": dt(self.t_first_enc), "t_first_tx": dt(self.t_first_tx),
-                "t_first_rx": dt(self.t_first_rx), "enc_ms": round(self.enc_ms),
+                "t_first_rx": dt(self.t_first_rx),
+                "t_first_out": dt(self.t_first_out), "enc_ms": round(self.enc_ms),
                 "frames_ok": self.eos_ok, "frames_lost": self.eos_lost,
                 "seconds": round(len(y) / OUT_SR, 2),
                 "tx_bytes": self.tx_bytes, "rx_bytes": len(self.rx_bytes),
