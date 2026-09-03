@@ -3595,6 +3595,60 @@ transmission.  Warming the graphs at startup moves it where nobody is
 listening.  Together: first audio at the far station about
 \textbf{3.6\,s} after the talker starts, against roughly 6\,s before.
 
+\paragraph{The receiver has to decode as it listens.}
+An algorithmic latency of 1.32\,s is a property of the codec, not of a
+system, and the first working receiver threw all of it away: it
+accumulated the whole transmission and vocoded once at end-of-stream,
+so the listener heard the first word only after the last one had been
+spoken.  On a 200\,s transmission that is $\sim$202\,s of latency for
+word one --- a store-and-forward voicemail wearing a real-time
+codec's clothes.
+
+Decoding a chunk at a time as the tokens land is not free, because the
+vocoder normalises over time exactly as the encoder does
+(\S\ref{sec:voice_stream}): a chunk decoded in isolation drifts from
+what the one-shot decode would have produced.  Left context repairs it,
+and --- this is the part that makes streaming decode viable at all ---
+left context costs \emph{no latency}, because those tokens have already
+arrived and already been played.  Lookahead would cost latency, and the
+decoder uses none.
+
+\begin{table}[H]
+    \centering
+    \caption{Chunked vocoding against the one-shot decode of the same
+             received bytes, 1\,s decode steps.  Log-spectral $L_1$; a
+             waveform metric cannot measure this at all (below).}
+    \label{tab:voice_decctx}
+    \small
+    \begin{tabular}{@{}lrl@{}}
+    \toprule
+    \textbf{Left context} & \textbf{log-spec $L_1$} & \\
+    \midrule
+    0.0\,s & 0.3169 & chunks decoded in isolation \\
+    1.0\,s & 0.2341 & \\
+    \textbf{2.0\,s} & \textbf{0.2240} & the knee, and what ships \\
+    4.0\,s & 0.2174 & twice the context for 3\,\% \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Measured end to end on the two-board stand, the first audio becomes
+available \textbf{3.8--4.2\,s} after the talker starts, against the
+length of the utterance before --- and the assembled output measures
+0.2044 against a one-shot decode of the identical received bytes, at
+identical length, slightly better than the offline sweep predicted.  A
+200\,s transmission delivers 325 frames, zero lost, byte-exact, with
+end-to-end lag flat at 0.000\,s per second of speech.
+
+One methodological note, because it cost a measurement.  The first
+version of this sweep used waveform RMS error and reported $\approx
+1.0$ at every context length --- which reads as ``chunking destroys the
+audio'' and is meaningless.  A vocoder is \emph{generative}: two
+decodes of the same tokens differ in phase and agree perceptually, so a
+waveform metric is uncorrelated with quality by construction.  The
+encoder study in \S\ref{sec:voice_stream} already used a spectral
+metric for this reason; the right move was to read it first.
+
 \paragraph{Group loss on a clean wire, and the wrong answer first.}
 The transmissions kept reporting losses --- 7.7\,\%, 11.8\,\%,
 14.4\,\% of bytes --- on a cross-wired pair at rung~12 carrying
@@ -3784,7 +3838,10 @@ A voice mode is a host program, like KISS and the IP tunnel, and
 \S\ref{sec:voice_onair} is that program working between two boards.
 It is also not store-and-forward: \S\ref{sec:voice_latency} settles
 the codec at 1.32\,s of algorithmic latency with flat memory, an order
-of magnitude below the link's own turnaround.
+of magnitude below the link's own turnaround --- provided the receiver
+decodes as it listens rather than at end-of-stream
+(\S\ref{sec:voice_onair}), which is a property of the implementation
+and not of the codec, and which the first working receiver got wrong.
 
 The single firmware change is worth recording, because the earlier
 draft of this section predicted none and was wrong for an instructive
