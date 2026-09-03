@@ -64,31 +64,31 @@ DEC_LEFT = 50                              # 2.0 s of history, always
 # DECODE PROFILES: (chunk, lookahead), both in tokens, 25 = 1 s.
 #
 # A step vocodes DEC_LEFT + chunk + lookahead and keeps only the chunk,
-# so it must finish within the chunk's own duration or the decoder falls
-# behind speech. The first version of this table varied ONLY the
-# lookahead and was never cost-checked; "balanced" came out at exactly
-# 100% duty, i.e. it could not keep up, and the CPU it burned starved the
-# browser's main-thread capture into emitting buffers of silence. Both
-# axes are measured now -- log-spectral L1 against the one-shot decode of
-# the same received bytes, and wall time per step against the budget:
+# so it must finish inside the chunk's own duration or the decoder falls
+# behind speech. Quality is log-spectral L1 against the one-shot decode
+# of the same received bytes; duty is measured wall time over that
+# budget, and it depends entirely on where the codec runs:
 #
-#     chunk  ahead  latency   L1      duty
-#      1 s    0 s    1 s     0.2240    77%   live
-#      1 s    1 s    2 s     0.1236   100%   INFEASIBLE (was "balanced")
-#      2 s    1 s    3 s     0.1113    63%   balanced
-#      2 s    2 s    4 s     0.1108    83%   dominated: no better than 2/1
-#      3 s    2 s    5 s     0.0941    60%   quality
+#     chunk ahead latency    L1     duty(GPU)  duty(CPU)
+#      1 s   0 s    1 s    0.2240      15%        77%    live
+#      1 s   1 s    2 s    0.1236      19%       100%    balanced
+#      2 s   1 s    3 s    0.1113      12%        63%
+#      2 s   2 s    4 s    0.1108      15%        83%
+#      3 s   2 s    5 s    0.0941      11%        60%    quality
 #
-# The useful result is that a BIGGER CHUNK is both better and cheaper:
-# the fixed left context is paid once per step, so amortising it over
-# more output lowers the duty AND removes seams. Quality is the cheapest
-# profile here, not the most expensive -- which is why varying lookahead
-# alone was the wrong knob.
+# On a GPU every shape is cheap, so the choice is purely latency against
+# quality and "balanced" can take the 2 s shape. On CPU the 1 s/1 s shape
+# does NOT fit (100% duty) -- it was shipped that way once and the CPU it
+# burned starved the browser's main-thread capture into emitting silence.
+# If VOICE_DEVICE=cpu, prefer larger chunks: the fixed left context is
+# paid once per step, so amortising it over more output lowers the duty
+# AND removes seams, which is why 3 s/2 s is the CHEAPEST row on CPU as
+# well as the best.
 PROFILES = {
     "live":     {"chunk": 25, "lookahead": 0,
-                 "desc": "1 s steps, no lookahead -- 1 s decode latency"},
-    "balanced": {"chunk": 50, "lookahead": 25,
-                 "desc": "2 s steps, +1 s lookahead -- half the chunking loss"},
+                 "desc": "1 s steps, no lookahead -- lowest latency"},
+    "balanced": {"chunk": 25, "lookahead": 25,
+                 "desc": "1 s steps, +1 s lookahead -- half the chunking loss"},
     "quality":  {"chunk": 75, "lookahead": 50,
                  "desc": "3 s steps, +2 s lookahead -- closest to one-shot"},
 }
@@ -102,14 +102,24 @@ BC_RT = 0x20        # firmware: key what is queued, do not wait for
 OUTDIR = os.path.expanduser("~/voice_rx")
 os.makedirs(OUTDIR, exist_ok=True)
 
-print("loading codec (about 20 s) ...", flush=True)
+# The codec runs on the GPU when there is one. It was on the CPU only
+# because nothing ever moved it, and that single omission set the whole
+# profile table: a decode step costs 830 ms on this CPU against 148 ms on
+# the GPU, so the configuration measured at 115% duty (and therefore
+# dropped) runs at 20% there. VOICE_DEVICE overrides -- "cpu" forces the
+# old path, which is also the fallback when no CUDA device is present.
+DEV = os.environ.get("VOICE_DEVICE") or ("cuda" if torch.cuda.is_available()
+                                         else "cpu")
+print("loading codec on %s (about 20 s) ..." % DEV, flush=True)
 PD = os.path.join(ROOT, "ckpt", "lscodec_25hz")
 _ec = yaml.load(open(f"{PD}/encoder_config.yml"), Loader=yaml.Loader)
 _ec["pretrain_codebook"] = f"{PD}/codebook.npy"
 _vc = yaml.load(open(f"{PD}/vocoder_config.yml"), Loader=yaml.Loader)
 _vc["vq_codebook"] = f"{PD}/codebook.npy"
-ENC = load_model(_ec, f"{PD}/lscodec_encoder.pt").eval()
-VOC = load_vocoder(_vc, f"{PD}/lscodec_vocoder.pt").eval()
+ENC = load_model(_ec, f"{PD}/lscodec_encoder.pt").eval().to(DEV)
+VOC = load_vocoder(_vc, f"{PD}/lscodec_vocoder.pt").eval().to(DEV)
+# WavLM stays on the CPU: it runs ONCE per session to derive the speaker
+# prompt, so it would buy nothing on the GPU and costs ~1.3 GB there.
 WLM = Extractor(checkpoint=os.environ.get(
                     "WAVLM_CKPT",
                     os.path.expanduser("~/Downloads/WavLM-Large.pt")),
@@ -119,7 +129,7 @@ if _cb.ndim == 2:
     _cb = _cb.unsqueeze(0)
 NG = _cb.shape[0]
 CBM = nn.ModuleList([nn.Embedding.from_pretrained(_cb[i], freeze=True)
-                     for i in range(NG)])
+                     for i in range(NG)]).to(DEV)
 OUT_SR = _vc["sampling_rate"]
 
 # Warm the graphs. The models are loaded above, but torch pays lazy
@@ -129,8 +139,9 @@ OUT_SR = _vc["sampling_rate"]
 _t = time.time()
 with torch.no_grad():
     _w = np.zeros(int(1.6 * SR), dtype=np.float32)
-    _, _, _i = ENC.encode(torch.from_numpy(_w).view(1, 1, -1))
-    _p = WLM.extract(_w[:2 * SR] if len(_w) >= 2 * SR else _w).float().unsqueeze(0)
+    _, _, _i = ENC.encode(torch.from_numpy(_w).view(1, 1, -1).to(DEV))
+    _p = WLM.extract(_w[:2 * SR] if len(_w) >= 2 * SR else _w) \
+            .float().unsqueeze(0).to(DEV)
     _e = _i.repeat_interleave(2, dim=0) if _vc.get("repeat_input_tokens") else _i
     _v = torch.cat([CBM[g](_e[:, g]) for g in range(NG)], dim=-1).unsqueeze(0)
     VOC.inference(_v, _p)
@@ -502,15 +513,17 @@ class Link:
             seg = self.buf[lo:hi]
             _t_enc = time.time()
             with torch.no_grad():
-                _, _, t = ENC.encode(torch.from_numpy(seg).view(1, 1, -1))
+                _, _, t = ENC.encode(
+                    torch.from_numpy(seg).view(1, 1, -1).to(DEV))
             if self.t_first_enc is None:
                 self.t_first_enc = time.time()
                 self.enc_ms = (self.t_first_enc - _t_enc) * 1000
             skip = (self.k * CH - lo) // H
-            self.pending.append(t[skip:skip + min(CH // H, t.shape[0] - skip)])
+            self.pending.append(
+                t[skip:skip + min(CH // H, t.shape[0] - skip)].cpu())
             self.k += 1
             if self.prompt is None and len(self.buf) >= 2 * SR:
-                self.prompt = WLM.extract(self.buf[:2 * SR]).numpy()
+                self.prompt = WLM.extract(self.buf[:2 * SR]).cpu().numpy()
             if len(self.pending) >= max(1, int(round(self.per_msg / CHUNK))):
                 idx = torch.cat(self.pending, 0); self.pending = []
                 # pace against the board, as bcastfile does; a chunk that
@@ -622,14 +635,14 @@ class Link:
             return None
         end = min(hi + ahead, n)
         idx = torch.tensor(unpack10(data, end)[ctx:end],
-                           dtype=torch.long).unsqueeze(1)
+                           dtype=torch.long).unsqueeze(1).to(DEV)
         with torch.no_grad():
             i = (idx.repeat_interleave(2, dim=0)
                  if _vc.get("repeat_input_tokens") else idx)
             v = torch.cat([CBM[g](i[:, g]) for g in range(NG)],
                           dim=-1).unsqueeze(0)
             y = VOC.inference(v, torch.from_numpy(pr).float()
-                              .unsqueeze(0))[-1].view(-1).numpy()
+                              .unsqueeze(0).to(DEV))[-1].view(-1).cpu().numpy()
         skip = int(round((lo - ctx) / 25.0 * OUT_SR))
         take = int(round((hi - lo) / 25.0 * OUT_SR))
         return y[skip:skip + take] if ahead else y[skip:]
@@ -641,7 +654,7 @@ class Link:
         if self.prompt is not None:
             return self.prompt
         if len(self.buf) >= 2 * SR:
-            return WLM.extract(self.buf[:2 * SR]).numpy()
+            return WLM.extract(self.buf[:2 * SR]).cpu().numpy()
         return None
 
     def _dec_loop(self):
@@ -777,7 +790,7 @@ class Link:
         n = (len(data) * 8) // 10
         pr = self._prompt()
         if pr is None:
-            pr = WLM.extract(self.buf[:2 * SR]).numpy()
+            pr = WLM.extract(self.buf[:2 * SR]).cpu().numpy()
         # Everything up to _dec_pos was already vocoded AS IT ARRIVED and
         # the listener has had it for a while; only the tail is left. The
         # abort marker can put the true end slightly behind the streaming
@@ -791,14 +804,14 @@ class Link:
             else head
         if not len(y):        # nothing streamed (very short transmission)
             idx = torch.tensor(unpack10(data, n),
-                               dtype=torch.long).unsqueeze(1)
+                               dtype=torch.long).unsqueeze(1).to(DEV)
             with torch.no_grad():
                 i = (idx.repeat_interleave(2, dim=0)
                      if _vc.get("repeat_input_tokens") else idx)
                 v = torch.cat([CBM[g](i[:, g]) for g in range(NG)],
                               dim=-1).unsqueeze(0)
                 y = VOC.inference(v, torch.from_numpy(pr).float()
-                                  .unsqueeze(0))[-1].view(-1).numpy()
+                                  .unsqueeze(0).to(DEV))[-1].view(-1).cpu().numpy()
         stamp = time.strftime("%Y%m%d_%H%M%S")
         path = os.path.join(OUTDIR, "rx_%s.wav" % stamp)
         sf.write(path, y, OUT_SR, "PCM_16")
