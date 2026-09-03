@@ -72,8 +72,16 @@
  * apply -- the fallback property streaming already relied on. */
 #define FLAG_CAPS (FLAG_NO_DATA | FLAG_LAST_FRAGMENT | FLAG_PRIO_STREAM) /* 7 */
 #define CAPS_VER 1
-#define CAPS_LEN 10          /* ver flags msg_max(2) win pool fw(2) frags
+/* GROW-ONLY, and the version does NOT move with it. A record is accepted
+ * on CAPS_MIN_LEN so an older 10-byte record from a peer that predates a
+ * field still parses (its new fields read as "unspecified"), and an
+ * older peer reading OUR longer record takes the prefix it knows and
+ * ignores the rest -- the same contract the status frame uses for
+ * temp_q8. Bumping CAPS_VER instead would make both directions refuse
+ * each other, which is exactly what a capability record must not do. */
+#define CAPS_MIN_LEN 10      /* ver flags msg_max(2) win pool fw(2) frags
                               * max_rung+1 (0 = unspecified: older record) */
+#define CAPS_LEN 11          /* + codecs: which voice codecs we DECODE */
 #define CAP_STREAM (1 << 0)  /* can follow streamed burst windows */
 #define CAP_EXT    (1 << 1)  /* EXT_DATA frames (255-byte payloads) */
 #define CAP_LDPC   (1 << 2)
@@ -83,6 +91,15 @@
                                * marker with a stats frame (typ BCSTAT):
                                * frames ok, lost, SNR, desired rung */
 #define CAP_ACK    (1 << 7)  /* this record answers yours */
+/* Codec bitmap (record byte 10). Which codecs this station can DECODE --
+ * a sender picks one the peer declares rather than transmitting into a
+ * receiver that will store bytes it cannot turn into audio. 0 means the
+ * peer never said (an older record), which is NOT "none": the caller
+ * decides what an unspecified peer gets, and today that is the historical
+ * behaviour of sending anyway. */
+#define CODEC_LSCODEC_25 (1 << 0)   /* 250 bit/s, ptype BC_PT_LSCODEC_25 */
+#define CODEC_CODEC2_700 (1 << 1)
+#define CODEC_CODEC2_450 (1 << 2)
 #define CAPS_TRIES 2         /* unanswered probes before "legacy peer" */
 #define CAPS_RETRY_S 300.0   /* ...and how long that verdict holds */
 #define CAPS_STALE_S 900.0   /* a record older than this is re-asked */
@@ -92,6 +109,7 @@ typedef struct {
     int legacy;     /* probes went unanswered: assume nothing */
     int flags, msg_max, win_max, pool_slots, fw_ver, max_frags;
     int max_rung;   /* fastest rung the peer accepts; -1 = unspecified */
+    int codecs;     /* CODEC_* the peer decodes; 0 = it never said */
     double t;       /* when the record arrived */
 } st_caps_t;
 
@@ -255,6 +273,7 @@ typedef struct {
     /* capability handshake (see FLAG_CAPS) */
     st_caps_t peer;        /* what the peer declared */
     int my_caps;           /* what we declare (CAP_*, set by the caller) */
+    int my_codecs;         /* CODEC_* we can decode (set by the caller) */
     /* operator knobs, declared in the record and enforced locally:
      * my_win_max caps the streamed window we ASK a peer to follow (and
      * the one we send); my_max_rung is the fastest rung we transmit at

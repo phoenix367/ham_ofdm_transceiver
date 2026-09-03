@@ -58,7 +58,16 @@ RSP_INFO, EVT_MESSAGE, EVT_STATUS, EVT_DIAG, RSP_PONG, EVT_LOG, EVT_AUDIO = (
 
 CFG = {"rung_ceiling": 1, "burst_window": 2, "burst_stream": 3,
        "freq_trim_mhz": 4, "audio_tap": 5, "anchor": 6,
-       "diag_stream": 7, "win_max": 8}
+       "diag_stream": 7, "win_max": 8, "codecs": 9}
+
+# Voice codecs, as declared in the capability record (station.h CODEC_*).
+# The board has no codec of its own -- it moves bytes -- so the program
+# on this side of USB is the only thing that can answer "what can you
+# play?", and says so with config("codecs", ...). 0 means never said,
+# which a sender must not read as "supports none".
+CODEC_LSCODEC_25 = 1 << 0     # 250 bit/s, broadcast ptype 3
+CODEC_CODEC2_700 = 1 << 1
+CODEC_CODEC2_450 = 1 << 2
 
 TYPE_NAME = {RSP_INFO: "info", EVT_MESSAGE: "message", EVT_STATUS: "status",
              EVT_DIAG: "diag", RSP_PONG: "pong", EVT_LOG: "log",
@@ -138,7 +147,7 @@ def decode_status(p):
          # (older firmware, emulator, a part whose calibration words
          # did not check out). None, not a number: 0 is a plausible
          # temperature and must not stand in for "no sensor".
-         "temp_c": None, "rung_now": None}
+         "temp_c": None, "rung_now": None, "peer_codecs": 0}
     if len(p) >= 40:
         d["peer_state"], d["peer_caps"] = p[32], p[33]
         d["peer_msg_max"] = struct.unpack_from("<H", p, 34)[0]
@@ -148,6 +157,10 @@ def decode_status(p):
     if len(p) >= 42:
         q8 = struct.unpack_from("<h", p, 40)[0]
         d["temp_c"] = None if q8 == -32768 else q8 / 256.0
+    if len(p) >= 44:
+        # what the PEER declared it can decode (station.h CODEC_*).
+        # 0 = never said, which is not "supports none".
+        d["peer_codecs"] = p[43]
     if len(p) >= 43:
         # the rung the NEXT frame would use, as opposed to "rung" above
         # which is the last one transmitted. -1 = none yet; None here

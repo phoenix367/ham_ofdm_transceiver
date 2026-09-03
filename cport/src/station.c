@@ -616,15 +616,18 @@ static void caps_encode(const station_t *st, int ack, uint8_t *p)
     p[7] = (uint8_t)(st->fw_ver >> 8);
     p[8] = (uint8_t)BURST_MAX_FRAGS;
     p[9] = (uint8_t)(st->my_max_rung + 1);  /* 0 = unspecified */
+    p[10] = (uint8_t)st->my_codecs;         /* 0 = we never said */
 }
 
 static int caps_decode(const uint8_t *pkt_bits, int pkt_n, st_caps_t *c)
 {
-    int plen = (pkt_n - 36) / 8, j;
+    int plen = (pkt_n - 36) / 8, j, have;
     uint8_t p[CAPS_LEN];
-    if (plen < CAPS_LEN)
-        return -1;
-    for (j = 0; j < CAPS_LEN; j++) {
+    if (plen < CAPS_MIN_LEN)
+        return -1;                    /* not even the original record */
+    memset(p, 0, sizeof(p));          /* absent fields read as unspecified */
+    have = plen < CAPS_LEN ? plen : CAPS_LEN;
+    for (j = 0; j < have; j++) {
         int v = 0, b;
         for (b = 0; b < 8; b++)
             v = (v << 1) | (pkt_bits[20 + 8 * j + b] & 1);
@@ -639,6 +642,7 @@ static int caps_decode(const uint8_t *pkt_bits, int pkt_n, st_caps_t *c)
     c->fw_ver = p[6] | (p[7] << 8);
     c->max_frags = p[8];
     c->max_rung = p[9] > 0 ? p[9] - 1 : -1;
+    c->codecs = p[10];                /* 0 = older record, said nothing */
     return 0;
 }
 

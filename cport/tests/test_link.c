@@ -616,6 +616,10 @@ static void test_burst_stream(void)
 
 /* run one 250-byte bulk transfer A -> B with the given caps masks and
  * report what each side learned */
+/* codecs for the next caps_case(); station_init() clears the station, so
+ * a caller cannot set my_codecs before the call */
+static int g_case_codecs_a, g_case_codecs_b;
+
 static void caps_case(int a_caps, int b_caps, int b_answers,
                       station_t *A, station_t *B, int *frames_out)
 {
@@ -635,6 +639,10 @@ static void caps_case(int a_caps, int b_caps, int b_answers,
     A->burst_stream = B->burst_stream = 1;
     A->my_caps = a_caps;
     B->my_caps = b_caps;
+    /* station_init() zeroed the station, so these are set HERE and not
+     * by the caller before the call */
+    A->my_codecs = g_case_codecs_a;
+    B->my_codecs = g_case_codecs_b;
     B->fw_ver = 0x0201;
     B->caps_disabled = !b_answers;    /* a peer from before the handshake */
 
@@ -893,6 +901,32 @@ static void test_caps(void)
     printf("  caps: %d frames on air, A tx %d, B tx %d\n", frames,
            A.stats.tx_frames, B.stats.tx_frames);
     plain = frames;
+
+    /* CODEC declaration, and the compatibility contract around it.
+     * The record GREW (10 -> 11 bytes) without moving CAPS_VER, so both
+     * directions must still parse: a peer that predates the codec byte
+     * must read as "never said" (0) rather than "supports none", and a
+     * short record must not be refused outright. Getting this wrong is
+     * silent -- the peer simply looks capability-less forever. */
+    {
+        static station_t A3, B3;
+        g_case_codecs_a = CODEC_LSCODEC_25;
+        g_case_codecs_b = CODEC_LSCODEC_25 | CODEC_CODEC2_700;
+        caps_case(all, all, 1, &A3, &B3, &frames);
+        g_case_codecs_a = g_case_codecs_b = 0;
+        check("caps: codec bitmap crosses the link",
+              A3.peer.codecs == (CODEC_LSCODEC_25 | CODEC_CODEC2_700)
+              && B3.peer.codecs == CODEC_LSCODEC_25);
+        check("caps: a codec the peer did not declare is visibly absent",
+              !(A3.peer.codecs & CODEC_CODEC2_450));
+    }
+    {   /* a peer that never sets my_codecs declares 0 = "never said",
+         * which callers must not read as "supports nothing" */
+        static station_t A4, B4;
+        caps_case(all, all, 1, &A4, &B4, &frames);
+        check("caps: a silent peer reads as unspecified (0), not refused",
+              A4.peer.valid && A4.peer.codecs == 0);
+    }
 
     /* B declares no streaming: A must never try it, and never strike out */
     caps_case(all, all & ~CAP_STREAM, 1, &A, &B, &frames);

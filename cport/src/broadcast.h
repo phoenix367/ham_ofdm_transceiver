@@ -39,6 +39,14 @@
 #define BC_PT_TELEMETRY 0
 #define BC_PT_CODEC2_700 1
 #define BC_PT_CODEC2_450 2
+#define BC_PT_LSCODEC_25 3   /* LSCodec-25Hz, 250 bit/s: 25 tokens/s, each
+                              * a 10-bit index, packed 4 tokens = 5 bytes
+                              * so a group boundary is always a whole
+                              * number of tokens (see the alignment
+                              * invariant in the voice section). A
+                              * receiver that does not know this codec
+                              * still stores the bytes -- ptype is a
+                              * label, not a demux. */
 #define BC_PT_OPAQUE 15
 
 #ifndef BC_MAX_GROUP

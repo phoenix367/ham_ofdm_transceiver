@@ -43,7 +43,7 @@ if not hasattr(_ss, "kaiser"):
 import torch, torch.nn as nn, yaml, soundfile as sf
 _o = torch.load
 torch.load = lambda *a, **k: _o(*a, **{**k, "weights_only": False})
-from ofdm_modem import OfdmModem, encode
+from ofdm_modem import OfdmModem, encode, CODEC_LSCODEC_25
 from lscodec.utils import load_model, load_vocoder
 from lscodec.ssl_models.wavlm_extractor import Extractor
 
@@ -58,6 +58,28 @@ PER_MSG = 1.0                              # speech per broadcast
 # history as context. The left context is FREE in latency terms (those
 # tokens are already in hand); lookahead would not be, and is not used.
 DEC_CH, DEC_LEFT = 25, 50                  # 1.0 s step, 2.0 s of history
+
+# DECODE PROFILES. Left context is free (already-received tokens); the
+# lookahead is not -- every chunk of it is a chunk of added latency, and
+# it is the only axis worth exposing. Measured on a received stream, as
+# log-spectral L1 against the one-shot decode of the same bytes:
+#
+#     lookahead 0 s : 0.2240      1 s : 0.1236      2 s : 0.1138
+#
+# so one chunk buys back 45% of the chunking penalty and the second buys
+# 8%. "live" is the real-time choice, "balanced" is the knee and the
+# default for anything that is not a conversation, "quality" is for a
+# recording where latency does not matter.
+PROFILES = {
+    "live":     {"lookahead": 0,  "desc": "lowest latency, no lookahead"},
+    "balanced": {"lookahead": 25, "desc": "+1.0 s, ~45% less chunking loss"},
+    "quality":  {"lookahead": 50, "desc": "+2.0 s, best match to one-shot"},
+}
+DEFAULT_PROFILE = "live"
+BC_PT_LSCODEC_25 = 3   # broadcast.h: this codec's own payload type. It
+                       # rode on OPAQUE (15) while it was the only voice
+                       # on the air; a receiver can now tell what it is
+                       # holding instead of guessing from the byte rate.
 BC_RT = 0x20        # firmware: key what is queued, do not wait for
                     # a full 96-byte group (that wait WAS the latency)
 OUTDIR = os.path.expanduser("~/voice_rx")
@@ -164,6 +186,7 @@ class Link:
         self._nat = np.zeros(0, dtype=np.float32)
         self._tail_guard = 0
         self._consumed = 0        # native samples already turned into buf
+        self.profile = DEFAULT_PROFILE
         self._dec_pos = 0         # tokens already vocoded and emitted
         self._pcm_out = []        # progressive decoded audio
         self.t_first_out = None   # when the listener could first hear audio
@@ -220,6 +243,13 @@ class Link:
         self.stop.clear()
         self.thread = threading.Thread(target=self._rx_loop, daemon=True)
         self.thread.start()
+        # Tell both boards what this host can decode, so the capability
+        # record carries it to the peer.
+        for m in (self.tx, self.rx):
+            try:
+                m.config("codecs", CODEC_LSCODEC_25)
+            except Exception as e:
+                self.say("could not declare codecs: %r" % (e,))
         self.dec_thread = threading.Thread(target=self._dec_loop, daemon=True)
         self.dec_thread.start()
         self.tx_thread = threading.Thread(target=self._tx_loop, daemon=True)
@@ -521,7 +551,7 @@ class Link:
             # updated as ONE step. Reading it before the write and
             # assigning after -- the shape this had -- lets a second
             # sender see it stale and start a rival broadcast.
-            ptype = (15 | (BC_RT if self.realtime else 0)
+            ptype = (BC_PT_LSCODEC_25 | (BC_RT if self.realtime else 0)
                      | (0 if final else MORE)
                      | (CONT if self.bc_open else 0))
             self.tx.t.write(encode(0x06, bytes([ptype, 0xFF]) + raw))
@@ -561,16 +591,20 @@ class Link:
                     self.say("board(tx): %s" % str(p).strip())
 
     # ---- streaming decode -------------------------------------------
-    def _vocode(self, lo, hi, pr):
-        """Vocode tokens [lo,hi) with [lo-DEC_LEFT,lo) as context, and
-        return only the audio belonging to [lo,hi)."""
+    def _vocode(self, lo, hi, pr, ahead=0):
+        """Vocode tokens [lo,hi) and return ONLY that audio.
+
+        [lo-DEC_LEFT,lo) is fed as left context and [hi,hi+ahead) as
+        lookahead; both are trimmed off the result. The context is free
+        in latency terms, the lookahead is not -- see PROFILES."""
         ctx = max(0, lo - DEC_LEFT)
         data = bytes(self.rx_bytes)
         n = (len(data) * 8) // 10
         hi = min(hi, n)
         if hi <= lo:
             return None
-        idx = torch.tensor(unpack10(data, hi)[ctx:hi],
+        end = min(hi + ahead, n)
+        idx = torch.tensor(unpack10(data, end)[ctx:end],
                            dtype=torch.long).unsqueeze(1)
         with torch.no_grad():
             i = (idx.repeat_interleave(2, dim=0)
@@ -580,7 +614,8 @@ class Link:
             y = VOC.inference(v, torch.from_numpy(pr).float()
                               .unsqueeze(0))[-1].view(-1).numpy()
         skip = int(round((lo - ctx) / 25.0 * OUT_SR))
-        return y[skip:]
+        take = int(round((hi - lo) / 25.0 * OUT_SR))
+        return y[skip:skip + take] if ahead else y[skip:]
 
     def _prompt(self):
         """The speaker prompt, or None if it is not available yet."""
@@ -601,15 +636,18 @@ class Link:
         prevent, in the other direction."""
         while not self.stop.is_set():
             time.sleep(0.05)
+            ahead = PROFILES[self.profile]["lookahead"]
             avail = (len(self.rx_bytes) * 8) // 10
-            if avail - self._dec_pos < DEC_CH:
+            # a chunk is only decodable once its lookahead has landed too
+            if avail - self._dec_pos < DEC_CH + ahead:
                 continue
             pr = self._prompt()
             if pr is None:
                 continue
-            hi = self._dec_pos + ((avail - self._dec_pos) // DEC_CH) * DEC_CH
+            usable = avail - ahead
+            hi = self._dec_pos + ((usable - self._dec_pos) // DEC_CH) * DEC_CH
             try:
-                y = self._vocode(self._dec_pos, hi, pr)
+                y = self._vocode(self._dec_pos, hi, pr, ahead)
             except Exception as e:
                 # back off rather than spin: a step that fails every
                 # 50 ms would rotate the log clean before anyone reads it
@@ -873,7 +911,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "prompt": LINK.prompt_up_name, "log": LINK.log[-12:],
                 "tx_status": LINK.tx_status, "rx_status": LINK.rx_status,
                 "full_log": LINK.log, "rx_times": LINK.rx_times,
-                "feed_races": LINK.feed_races})
+                "feed_races": LINK.feed_races, "profile": LINK.profile,
+                "profiles": {k: v["desc"] for k, v in PROFILES.items()}})
         self.send_error(404)
 
     def do_POST(self):
@@ -885,6 +924,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if u.path == "/api/select":
                 d = json.loads(body or b"{}")
                 LINK.open(d["tx"], d["rx"]); LINK.reset_session()
+                return self._json({"ok": True})
+            if u.path == "/api/capsprobe":
+                # BULK traffic is what triggers the capability handshake
+                # (a chat message gains nothing from the peer's window),
+                # so this is the only way to exercise it from here.
+                with LINK.lock:
+                    LINK.tx.submit(b"caps probe" * 20, qos=2)
                 return self._json({"ok": True})
             if u.path == "/api/warmup":
                 # ?settle=0 reproduces the pre-fix behaviour, for A/B
@@ -907,6 +953,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if q.get("settle", ["1"])[0] != "0":
                     LINK.settle(budget=3.0, need=1)
                 LINK.reset_session(); LINK.talking = True
+                prof = q.get("profile", [DEFAULT_PROFILE])[0]
+                LINK.profile = prof if prof in PROFILES else DEFAULT_PROFILE
                 LINK.realtime = q.get("rt", ["1"])[0] != "0"
                 LINK.per_msg = float(q.get("per", [str(PER_MSG)])[0])
                 LINK.say("transmit pressed")

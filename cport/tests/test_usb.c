@@ -235,6 +235,17 @@ int main(void)
               out3.temp_q8 == (int16_t)(37 * 256));
         check("the current rung survives the round trip",
               out3.rung_now == 9);
+        {   /* the record GREW for peer_codecs: a 43-byte frame from a
+             * firmware that predates it must still decode, with the
+             * codec field reading 0 = "never said" rather than being
+             * refused. Same contract temp_q8 and rung_now established. */
+            up_status_t o43;
+            /* `exact` holds a full frame; its payload truncated to 43
+             * bytes is precisely what a pre-codec firmware would send */
+            check("a 43-byte status decodes, peer_codecs absent",
+                  up_decode_status(exact + UP_HDR_LEN, 43, &o43) == 0
+                  && o43.peer_codecs == 0 && o43.rung_now == 9);
+        }
         /* an older firmware's 40-byte status must still decode, with
          * the temperature reported ABSENT rather than as 0 C */
         memset(&out3, 0, sizeof(out3));

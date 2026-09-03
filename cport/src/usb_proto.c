@@ -89,6 +89,7 @@ int up_encode_status(const up_status_t *st, uint8_t *out, int out_cap)
         put_u16(q + 38, st->bc_free);
         put_u16(q + 40, (uint16_t)st->temp_q8);
         q[42] = (uint8_t)st->rung_now;
+        q[43] = st->peer_codecs;
         return up_encode(UP_EVT_STATUS, q, UP_STATUS_LEN, out, out_cap);
     }
 }
@@ -216,6 +217,7 @@ int up_decode_status(const uint8_t *payload, int len, up_status_t *out)
         out->temp_q8 = len >= 42 ? (int16_t)get_u16(payload + 40)
                                  : UP_TEMP_NONE;
         out->rung_now = len >= 43 ? (int8_t)payload[42] : UP_RUNG_ABSENT;
+        out->peer_codecs = len >= 44 ? payload[43] : 0;
     } else {
         out->peer_state = out->peer_caps = out->peer_win_max = 0;
         out->peer_msg_max = 0;
@@ -223,6 +225,7 @@ int up_decode_status(const uint8_t *payload, int len, up_status_t *out)
         out->bc_free = 0;
         out->temp_q8 = UP_TEMP_NONE;
         out->rung_now = UP_RUNG_ABSENT;
+        out->peer_codecs = 0;
     }
     return 0;
 }

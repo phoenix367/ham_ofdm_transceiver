@@ -93,6 +93,14 @@ enum {
     UP_CFG_AUDIO_TAP    = 5, /* 0 = off, else decimation factor */
     UP_CFG_ANCHOR       = 6, /* 0/1, AFC frequency reference */
     UP_CFG_DIAG_STREAM  = 7, /* 0/1, default OFF -- see usb_modem.c */
+    UP_CFG_CODECS       = 9, /* CODEC_* bitmap the ATTACHED HOST can
+                              * decode. The board moves bytes and has no
+                              * codec of its own, so the only station that
+                              * can answer "what voice can you play?" is
+                              * the program on the far side of USB -- it
+                              * declares here and the board carries it
+                              * into the capability record. Unset = 0 =
+                              * "never said", which is not "none". */
     UP_CFG_WIN_MAX      = 8  /* streamed-window ceiling we accept AND
                               * send (1..BURST_STREAM_MAX); declared to
                               * the peer in the capability record, as
@@ -150,6 +158,14 @@ typedef struct {
                               * calibration words did not check out.
                               * Absent from an older firmware's frame;
                               * decoders default it to UP_TEMP_NONE. */
+    uint8_t  peer_codecs;    /* CODEC_* the PEER declared it can decode
+                              * (station.h). 0 = it never said, which is
+                              * NOT "supports none": a peer predating the
+                              * field, or one whose host never called
+                              * config("codecs", ...). A sender chooses a
+                              * codec from this; what it does about 0 is
+                              * its own policy. Absent from an older
+                              * firmware's frame; decoders default 0. */
 } up_status_t;
 
 /* "no reading" -- must equal TEMP_Q8_NONE in src/temp.h */
@@ -162,7 +178,7 @@ typedef struct {
  * refused the frame, and the board simply stopped pushing status --
  * enumeration and commands all still worked, which is what made it
  * look like a firmware hang rather than an arithmetic slip. */
-#define UP_STATUS_LEN 43
+#define UP_STATUS_LEN 44
 
 /* the status frame carried no rung_now (firmware older than this field) */
 #define UP_RUNG_ABSENT ((int8_t)-128)

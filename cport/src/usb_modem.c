@@ -147,6 +147,7 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
                 break;
             case UP_CFG_ANCHOR: m->st->afc_anchor = v ? 1 : 0; break;
             case UP_CFG_DIAG_STREAM: m->diag_on = v ? 1 : 0; break;
+            case UP_CFG_CODECS: m->st->my_codecs = (int)(v & 0xFF); break;
             default: break;
             }
         }
@@ -257,6 +258,7 @@ void usb_modem_tick(usb_modem_t *m, double now, int status)
         s.bc_free = m->bcast_free;
         s.temp_q8 = m->temp_q8;
         s.rung_now = (int8_t)station_tx_rung(m->st, now);
+        s.peer_codecs = (uint8_t)(m->st->peer.valid ? m->st->peer.codecs : 0);
         n = up_encode_status(&s, out, (int)sizeof(out));
         if (n > 0)
             txq_push(m, out, n);
