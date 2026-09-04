@@ -15,26 +15,28 @@ the air-side machinery the commands drive is in [link.md](link.md) and
 
 ## Table of contents
 
-1. Introduction
-2. Conventions and notation
-3. Transport
-4. Framing
-5. Message type registry
-6. Host-to-device commands
-7. Device-to-host responses and events
-8. Fixed-layout structures
-9. Configuration registry
-10. Broadcast
-11. Application envelopes
-12. The over-the-air capability record, as surfaced
-13. Diagnostic stream
-14. Versioning and compatibility
-15. Timing constants
-16. Security considerations
-17. References
+1. Introduction (informative)
+2. Conventions and notation (normative)
+3. Transport (normative)
+4. Framing (normative)
+5. Message type registry (normative)
+6. Host-to-device commands (normative)
+7. Device-to-host responses and events (normative)
+8. Fixed-layout structures (normative)
+9. Configuration registry (normative)
+10. Broadcast (normative; §10.3 and §10.6 informative)
+11. Application envelopes (informative -- host conventions)
+12. The over-the-air capability record, as surfaced (informative)
+13. Diagnostic stream (normative)
+14. Versioning and compatibility (normative)
+15. Assignment considerations (normative)
+16. Timing constants (informative)
+17. Security considerations (informative)
+18. References
 
 Appendix A. Byte-offset tables
 Appendix B. Registries
+Appendix C. Worked example (informative)
 
 ---
 
@@ -70,6 +72,19 @@ broadcast SYNC descriptor) is a separate layer beneath the station and is
 NOT described here except where its state is surfaced to the host (§10,
 §12).
 
+### 1.3 Applicability statement
+
+This specification applies to any program that opens the modem's USB
+interface, and to the framed stream the `usb_modem_emu` bench speaks on
+stdio, which is the same stream without the bus. It assumes a reliable,
+ordered, lossless byte stream in each direction (USB bulk provides this;
+so does a pipe) and does not itself recover from loss -- a resynchronising
+parser (§4.2) tolerates a *truncated* transfer, not a missing one. It is
+a point-to-point host interface: there is one host per board and no
+addressing in the frame. It is not a transport for audio samples; the
+byte rate it carries is a few hundred bytes per second, and a host that
+wants signal samples must obtain them elsewhere.
+
 ## 2. Conventions and notation
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
@@ -83,17 +98,63 @@ is required for the two ends to interoperate or where departing from it
 has been measured to cause harm (lost frames, a wedged endpoint, a
 truncated transmission). Everything else -- how the reference host
 happens to do something -- is stated in plain prose and binds nobody.
-§16 lists what goes wrong when a requirement is not met.
+§17 lists what goes wrong when a requirement is not met.
 
-- `u8`, `u16le`, `u32le`, `i8`, `i16le`, `i32le`: unsigned/signed
-  integers of the given width; all multi-byte fields are
-  **little-endian**.
-- `Qn`: fixed-point with `n` fractional bits (`snr_q8` = dB × 256).
-- Bit numbering is LSB = bit 0.
+### 2.1 Terminology
+
 - "The board" and "the device" are the modem; "the host" is the program
   across USB. "The peer" is the *other* station reached over the air.
+- A **frame** is one unit of the byte stream (§4); its **payload** is
+  the bytes after the 5-byte header. A **structure** is a fixed-layout
+  payload (§8). An **element** is any field or composite of fields named
+  in the syntax (§2.2).
 - Byte offsets in tables are relative to the start of the **payload**,
   not the frame.
+
+### 2.2 Data types and syntax notation
+
+Field types: `u8`, `u16le`, `u32le`, `i8`, `i16le`, `i32le` are
+unsigned/signed integers of the given width; all multi-byte fields are
+**little-endian** (least significant octet first). `Qn` is fixed-point
+with `n` fractional bits (`snr_q8` = dB × 256). Bit numbering within an
+octet is **LSB = bit 0**, MSB = bit 7. (Note the two differences from
+the IETF convention of RFC 5444: byte order and bit numbering are both
+reversed, because the boards and the reference host are little-endian
+and the code names bits by shift count.)
+
+Elements are written `<element>`. An element is either a field of the
+stated width or a composite written as a concatenation of elements.
+The syntax uses regular-expression operators: `<a> <b>` concatenation,
+`(...)` grouping, `?` zero or one, `*` zero or more, `+` one or more,
+`|` alternation. Every element has a length that is either fixed or
+determined by an earlier field, so any conforming frame can be parsed in
+one forward pass with no lookahead (§4.4).
+
+A value written `name` without brackets is a variable computed from
+fields, not a field itself (e.g. `want := 5 + <len>`).
+
+### 2.3 Bit diagrams
+
+Where a byte carries flags, it is drawn with bit 7 on the left:
+
+```
+   7   6   5   4   3   2   1   0
+ +---+---+---+---+---+---+---+---+
+ | a | b | c |  rsv  |   value   |
+ +---+---+---+---+---+---+---+---+
+```
+
+**Reserved bits and fields** (`rsv`, "reserved", "unassigned") MUST be
+cleared (0) on transmission and MUST be ignored on reception. This is
+what lets a later revision assign them without a version change (§14).
+
+### 2.4 Normative and informative content
+
+Sections are marked in the table of contents. Informative sections
+describe how the reference implementations behave or what the protocol
+is used for; they contain no requirements, and a conforming
+implementation may differ from them. Measured figures quoted beside a
+requirement are its evidence, not part of the requirement.
 
 ## 3. Transport
 
@@ -144,14 +205,14 @@ transiently fail, and pyusb caches a failed language-ID fetch, after
 which every later string read on that handle fails instantly. A host
 MUST tolerate a transient failure of the serial-string read by
 retrying it for at least the device's worst blocking receive burst
-(§15; the reference host retries 10 × 300 ms). Implementation note: a
+(§16; the reference host retries 10 × 300 ms). Implementation note: a
 retry through pyusb is a no-op unless the handle's cached language IDs
 (`dev._langids`) are cleared between attempts.
 
 ### 3.5 Host write timeout
 
 The device may block for up to ~2.3 s inside a single receive commit
-(§15) during which it is not reading its OUT endpoint. A host's write
+(§16) during which it is not reading its OUT endpoint. A host's write
 timeout MUST exceed that; the reference hosts use 5000 ms. A host MUST
 NOT retry a timed-out write that moved any bytes -- repeating a partial
 frame desynchronises the device parser -- and MAY retry one that moved
@@ -210,6 +271,76 @@ tolerate frames coalesced into one read and frames split across reads.
 
 A receiver MUST ignore a frame whose `type` it does not recognise, after
 consuming it whole. This is what allows the type registry (§5) to grow.
+
+### 4.4 Formal syntax
+
+The whole protocol, in the notation of §2.2. Widths in octets follow
+each field in brackets; a bare name with no width is a composite defined
+below it.
+
+```
+<stream>      := <frame>*
+
+<frame>       := <sync0>[1] <sync1>[1] <type>[1] <len>[2] <payload>[len]
+                 <sync0> = 0xA5, <sync1> = 0x5A, 0 <= len <= 3336
+
+<payload>     := <cmd-info> | <cmd-submit> | <cmd-config> | <cmd-ping>
+               | <cmd-reset> | <cmd-bcast>
+               | <rsp-info> | <evt-message> | <evt-status> | <evt-diag>
+               | <rsp-pong> | <evt-log> | <evt-audio> | <evt-bcast>
+                 (selected by <type>; an unknown <type> is <opaque>)
+
+<opaque>      := <octet>*
+
+<cmd-info>    :=                                        (len = 0)
+<cmd-submit>  := <qos>[1] <data>[len-1]                 (len >= 2)
+<cmd-config>  := ( <key>[1] <value>[4] <octet>* )?      (len = 0 query;
+                                                         len >= 5 set)
+<cmd-ping>    := <token>[4] <octet>*                    (len >= 4)
+<cmd-reset>   :=                                        (len = 0)
+<cmd-bcast>   := <ptype>[1] <rung>[1] <data>[len-2]     (2 < len <= 8194)
+
+<rsp-info>    := <info-struct>[26]
+<evt-message> := <qos>[1] <data>[len-1]
+<evt-status>  := <status-struct>[44]
+<evt-diag>    := <ev>[1] <a>[4] <b>[4] <c>[4] <d>[4] <t_ms>[4]
+<rsp-pong>    := <token>[4]
+<evt-log>     := <utf8-octet>*                          (len <= 256)
+<evt-audio>   := <opaque>                               (reserved)
+<evt-bcast>   := <bc-start> | <bc-data> | <bc-eos>
+<bc-start>    := <bflags>[1]                            (bflags & 0x80)
+<bc-data>     := <bflags>[1] <data>[len-1]              (bflags = 0)
+<bc-eos>      := <bflags>[1] <frames_ok>[2] <frames_lost>[2] <snr_q8>[2]
+                                                        (bflags & 0x40)
+```
+
+Structure layouts (`<info-struct>`, `<status-struct>`) are in §8; a
+receiver takes the **prefix it knows** of each (§14.2), so the widths
+above are what a current encoder emits, not what a decoder requires.
+Where a command's syntax admits trailing octets (`<octet>*`), a device
+MUST ignore them; this is the same extension room as reserved bits.
+
+### 4.5 Malformed elements
+
+An element is **malformed** if it cannot be parsed according to its
+syntax, including when fewer octets are available than its width
+requires. Disposition is by level:
+
+| level | condition | disposition |
+|---|---|---|
+| stream | byte at frame start is not `0xA5 0x5A` | drop one byte, count `resyncs`, re-examine (§4.2) |
+| frame header | `len` > 3336 | header is false: drop one byte, count `resyncs` |
+| frame | `type` unknown | consume whole, ignore (§4.3) |
+| command | payload shorter than its minimum (`<cmd-submit>` < 2, `<cmd-config>` 1..4, `<cmd-ping>` < 4, `<cmd-bcast>` < 3) | consume whole, ignore silently -- no error frame exists |
+| command | `<cmd-bcast>` data > 8192 | ignore silently |
+| structure | payload shorter than its minimum decodable length (§8) | decoder rejects it; the host treats the frame as absent |
+| structure | payload longer than the decoder knows | decode the known prefix, ignore the rest (§14.2) |
+
+There is no negative-acknowledgement frame: a malformed command
+produces **no** response, and a host that needs to know whether a
+command was taken uses the state it changes (`EVT_STATUS`, the config
+query, `EVT_LOG`). The one exception is a refused `CMD_SUBMIT` (§6.2),
+which is well-formed but declined, and is logged.
 
 ## 5. Message type registry
 
@@ -418,7 +549,7 @@ every delivered file part as garbage.
 | offset | field | type | meaning |
 |---|---|---|---|
 | 0 | `rung` | i32le | rung of the last frame actually **transmitted**; −1 = none yet. May be hours stale. |
-| 4 | `snr_q8` | i32le | filtered SNR of the peer's frames, dB × 256 |
+| 4 | `snr_q8` | i32le | filtered SNR of the peer's frames, dB × 256; **−25344** (−99.0 dB) = no measurement within the last 60 s |
 | 8 | `tx_frames` | u32le | counters since boot |
 | 12 | `rx_frames` | u32le | |
 | 16 | `timeouts` | u32le | |
@@ -447,6 +578,10 @@ Minimum decodable length: **32**. Decoding rules for shorter frames
   the temperature to 0, which is a real temperature.
 - `len` < 43: `rung_now` = `UP_RUNG_ABSENT`.
 - `len` < 44: `peer_codecs` = 0.
+
+`snr_q8` = −25344 is a sentinel (`LC_SNR_NONE`), emitted whenever no
+SNR sample younger than 60 s exists -- at boot and whenever the peer has
+been silent. A host MUST NOT plot or average it as a reading.
 
 `rung` and `rung_now` are both carried on purpose: an overnight-idle
 station reported `rung 12` (the last transmission) and then sent at rung
@@ -509,14 +644,31 @@ say what arrived.
 ### 10.1 `CMD_BCAST` semantics
 
 ```
-  ptype:u8
-    bit 7   MORE  -- further chunks will follow
-    bit 6   CONT  -- continuation of the broadcast in flight
-    bit 5   RT    -- real time: key what is queued, do not wait for a full group
-    bits 3..0     payload type (Appendix B); bit 4 unassigned
+   7    6    5    4    3   2   1   0
+ +----+----+----+----+---+---+---+---+
+ |MORE|CONT| RT |rsv |     ptype     |     <ptype> octet
+ +----+----+----+----+---+---+---+---+
+
+  MORE  -- further chunks will follow
+  CONT  -- continuation of the broadcast in flight
+  RT    -- real time: key what is queued, do not wait for a full group
+  ptype -- payload type (Appendix B.4)
   rung:u8   0..12 pins the rung; any other value (conventionally 0xFF) = board chooses
   data[]    1..8192 bytes (BC_TX_CAP)
 ```
+
+The four MORE/CONT combinations and what each means for the stream:
+
+| MORE | CONT | meaning | source buffer |
+|---|---|---|---|
+| 0 | 0 | one-shot broadcast: `data` is the whole source | replaced |
+| 1 | 0 | first chunk of a new stream | replaced |
+| 1 | 1 | middle chunk | appended |
+| 0 | 1 | last chunk: completes the stream, EOS follows its last frame | appended |
+
+Every combination is valid. RT is orthogonal and is read from **every**
+chunk -- the board follows the most recent one -- so a host MUST set it
+identically on every chunk of one stream. Bit 4 is reserved (§2.3).
 
 `len` < 2, or `data` empty or longer than 8192, MUST be rejected
 silently.
@@ -599,11 +751,20 @@ receiver walks past the marker and appends zero bytes.
 ### 10.4 `EVT_BCAST` -- streamed reception
 
 ```
-  flags:u8
-    bit 7  START    -- low nibble carries the ptype; no further payload
-    bit 6  EOS      -- payload is the stats record (below)
-    0      DATA     -- payload is reassembled data bytes
+   7     6    5    4    3   2   1   0
+ +-----+----+----+----+---+---+---+---+
+ |START|EOS |   rsv   |     ptype     |     <bflags> octet
+ +-----+----+----+----+---+---+---+---+
 ```
+
+| START | EOS | payload after `bflags` | ptype nibble |
+|---|---|---|---|
+| 1 | 0 | none | the stream's payload type |
+| 0 | 0 | reassembled data bytes | 0 |
+| 0 | 1 | the 6-byte stats record | the stream's payload type |
+| 1 | 1 | -- | MUST NOT be emitted; a receiver MUST ignore the frame |
+
+Bits 5 and 4 are reserved (§2.3).
 
 **Start** (`flags & 0x80`): payload is the single flags byte; the stream
 sink SHOULD be reset. Exactly **one** start event per stream, not per
@@ -799,7 +960,46 @@ Unknown message types (§4.3), configuration keys (§9), diagnostic
 events and payload types MUST be ignored, not rejected, so each registry
 can grow.
 
-## 15. Timing constants
+## 15. Assignment considerations
+
+There is no external registrar; this section is the local analogue of
+an IANA considerations section. Every registry below is owned by
+`cport/src/usb_proto.h` (or the header named), and an assignment is
+made by a change there that (a) is mirrored in `host/ofdm_modem.py`,
+(b) is exercised by `cport/tests/test_usb.c` or `host/test_modem.py`,
+and (c) adds the row to Appendix B of this document. Because every
+registry's consumers ignore unknown values (§14.5), a new assignment
+never breaks an older implementation on the other side.
+
+| registry | owner | assigned | unassigned | experimental use |
+|---|---|---|---|---|
+| message types, host→device | `usb_proto.h` | `0x01`–`0x06` | `0x07`–`0x6F` | `0x70`–`0x7F` |
+| message types, device→host | `usb_proto.h` | `0x81`–`0x88` | `0x89`–`0xEF` | `0xF0`–`0xFF` |
+| configuration keys | `usb_proto.h` | 1–9 | 10–239, 0 | 240–255 |
+| `UP_CAP_*` bits | `usb_proto.h` | 0–4 | 5–31 | -- |
+| `CAP_*` bits (air record) | `station.h` | 0–5, 7 | 6 | -- |
+| `CODEC_*` bits | `station.h` | 0 (1–2 reserved) | 3–7 | -- |
+| broadcast payload types | `broadcast.h` | 0, 3, 15 (1–2 reserved) | 4–14 | -- |
+| diagnostic events | `station.h` | 0–16 | 17–255 | -- |
+| `EVT_BCAST` flag bits | `usb_radio_main.c` | 7, 6 | 5, 4 | -- |
+| `CMD_BCAST` flag bits | `usb_radio_main.c` | 7, 6, 5 | 4 | -- |
+| `FILE:` envelope magics | `demoapp/app.c` | `0x01`–`0x04` | `0x05`–`0xFF` | -- |
+
+**Experimental use** ranges are for a host or firmware under development
+and MUST NOT appear in a shipped image; a value from them carries no
+meaning outside the pair of implementations that agreed on it. Bit 7 of
+a message type is the direction bit and MUST be preserved: a host→device
+type MUST have it clear and a device→host type MUST have it set.
+
+A **reserved** value (Codec2 bits and payload types, key 5, `EVT_AUDIO`)
+has a name but no implementation. It stays reserved until an
+implementation exists on both ends; a document that assigns it MUST
+also remove the reservation note here.
+
+Structures (§8) are not registries: they grow by appending (§14.2), and
+the appended field's "absent" value is assigned with it.
+
+## 16. Timing constants
 
 | constant | value | where |
 |---|---|---|
@@ -819,7 +1019,7 @@ can grow.
 | ladder staleness decay | 1 rung / 90 s of peer silence | device |
 | caps: probes before legacy / legacy hold / record staleness | 2 / 300 s / 900 s | device |
 
-## 16. Security considerations
+## 17. Security considerations
 
 The transport provides no authentication, integrity beyond USB's own
 CRC, or confidentiality; it is a local bus to a device the host owns.
@@ -830,7 +1030,7 @@ the board. A host MUST bound what it accepts from `EVT_MESSAGE`,
 by the sender and MUST NOT be trusted to select a decoder without
 validating the content.
 
-### 16.1 Consequences of not meeting a requirement
+### 17.1 Consequences of not meeting a requirement
 
 RFC 2119 §7 asks that the effect of ignoring an imperative be spelled
 out. Each below was observed, not predicted.
@@ -850,7 +1050,7 @@ out. Each below was observed, not predicted.
 | `EVT_DIAG` shed under backpressure (§13) | command responses queue behind diagnostics and the session stalls (measured: 549 bytes, then silence) |
 | no broadcast into `pending` (§10.6) | speech keyed into a deaf receiver; nothing reports it |
 
-## 17. References
+## 18. References
 
 Normative references:
 
@@ -858,6 +1058,13 @@ Normative references:
   Requirement Levels", BCP 14, RFC 2119, March 1997.
 - [RFC 8174] Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC 2119
   Key Words", BCP 14, RFC 8174, May 2017.
+
+Informative references:
+
+- [RFC 5444] Clausen, T., Dearlove, C., Dean, J., and C. Adjih,
+  "Generalized Mobile Ad Hoc Network (MANET) Packet/Message Format",
+  RFC 5444, February 2009 -- the model for §2.2 syntax notation, §4.5
+  malformed-element rules, §15 registries and Appendix C.
 
 Normative code:
 
@@ -980,3 +1187,118 @@ only voice codec in the system today.
 Only `ST_SOFF_NOACK` is a statement about the peer and is remembered
 across transfers; `TIMEOUT` and `BUILD` describe the channel and local
 buffers and stay per-transfer.
+
+## Appendix C. Worked example
+
+Every byte below was captured from the device-side reference code
+(`cport/build/usb_modem_emu`, the firmware's protocol layer on stdio)
+driven by `host/ofdm_modem.py`'s encoder. Frames are shown as the octets
+on the wire; `H→D` is host to device.
+
+### C.1 Attach: `CMD_INFO`
+
+```
+H→D  a5 5a 01 00 00
+     └sync┘ ty len=0
+
+D→H  a5 5a 81 1a 00 | 01 03 04 01 | 24 00 41 00 05 51 33 34 38 36 34 36
+     └sync┘ ty len=26  ver n  fw     uid[12]
+                      | 07 00 00 00 | e0 2e 00 00 | 00 01
+                        caps=0x07     rate=12000    msg_max=256
+```
+
+`proto_ver` 1, three modes, firmware 1.4 (`0x0104`), caps LDPC | EXT |
+BURST, 12 kHz, and `msg_max` 256 -- this build's `ST_MSG_MAX`; a radio
+image reports 3328 here.
+
+### C.2 Keepalive: `CMD_PING` / `RSP_PONG`
+
+```
+H→D  a5 5a 04 04 00 | ef be ad de          token 0xDEADBEEF
+D→H  a5 5a 85 04 00 | ef be ad de          echoed verbatim
+```
+
+### C.3 Submit an interactive message
+
+```
+H→D  a5 5a 02 0c 00 | 01 | 43 51 20 64 65 20 52 32 41 42 43
+                      qos  "CQ de R2ABC"
+```
+
+No response. The effect is visible in the next status frame (C.5):
+`q_inter` = 1.
+
+### C.4 Configuration query and set
+
+```
+H→D  a5 5a 03 00 00                         empty = query
+
+D→H  a5 5a 86 6b 00 | 63 6f 6e 66 69 67 3a 20 ...   (107 bytes of text)
+     "config: rung_ceiling 12  win_max 8  burst_window 0  burst_stream 0
+      anchor 0  diag_stream 0  freq_trim_hz 0"
+
+H→D  a5 5a 03 05 00 | 09 | 01 00 00 00      key 9 (codecs) := 1 (LSCODEC_25)
+```
+
+The set produces no response; the bit reaches the peer in the next
+capability record.
+
+### C.5 An unsolicited `EVT_STATUS`, decoded
+
+```
+D→H  a5 5a 83 2c 00 |                                      len = 44
+       00 00 00 00   rung            0
+       00 9d ff ff   snr_q8          -25344  = -99.0 dB, no measurement (§8.2)
+       00 00 00 00   tx_frames       0
+       00 00 00 00   rx_frames       0
+       00 00 00 00   timeouts        0
+       00 00 00 00   retransmissions 0
+       00 00         q_ctl           0
+       01 00         q_inter         1       <- the message from C.3
+       00 00         q_bulk          0
+       00            busy            0
+       00            pending         0
+       00            peer_state      0       unknown
+       00            peer_caps       0
+       00 00         peer_msg_max    0
+       00            peer_win_max    0
+       00            peer_max_rung1  0       unspecified
+       00 00         bc_free         0       no broadcast source in this build
+       00 80         temp_q8         -32768  UP_TEMP_NONE: no sensor
+       00            rung_now        0
+       00            peer_codecs     0       never said
+```
+
+A 40-byte status from older firmware would end at `bc_free`; a decoder
+then reports `temp_q8` as `UP_TEMP_NONE`, `rung_now` as
+`UP_RUNG_ABSENT` and `peer_codecs` as 0 (§8.2) -- exactly the values
+this full frame happens to carry, which is the point of choosing them.
+
+### C.6 A chunked real-time broadcast (host side)
+
+The voice host sends LSCodec tokens as they are encoded, one profile
+step at a time -- here 24 tokens = 30 bytes, always a multiple of four
+tokens (§10.5) -- real-time, board-chosen rung:
+
+```
+H→D  a5 5a 06 20 00 | a3 ff | <30 bytes>     MORE|RT|ptype 3, rung 0xFF: start
+H→D  a5 5a 06 20 00 | e3 ff | <30 bytes>     MORE|CONT|RT: middle
+     ...
+H→D  a5 5a 06 20 00 | 63 ff | <30 bytes>     CONT|RT, MORE clear: last chunk
+```
+
+On the receiving board the same stream surfaces as:
+
+```
+D→H  a5 5a 88 01 00 | 83                     START, ptype 3
+D→H  a5 5a 88 61 00 | 00 | <96 bytes>        DATA, one 4-frame group
+     ...
+D→H  a5 5a 88 07 00 | 43 | 1c 00 | 00 00 | 8c 16
+                      EOS   ok=28   lost=0   snr_q8=5772 = +22.5 dB
+```
+
+The `CMD_BCAST` and `EVT_BCAST` octets in C.6 are constructed from the
+syntax in §4.4 and §10 rather than captured: the emulator has no radio,
+so it neither keys nor receives a broadcast. Their field values
+(28 frames, 0 lost, +22.5 dB) are from a measured 16-second
+clean-wire run.
