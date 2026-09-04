@@ -262,7 +262,9 @@ consistent with Table~\ref{tab:recal}.
 
 Alongside the static map, a per-frame temperature
 $\alpha = 2\,\mathbb{E}[Lx]/\mathrm{Var}[Lx]$ is fitted from the 96
-known bits of each decoded header (a Gaussian-consistency fit), which
+known positions of each decoded header --- its 93 coded bits plus the
+three zero-pad positions that fill the sixth symbol (a
+Gaussian-consistency fit) --- which
 keeps LLR scales consistent across frames --- a prerequisite for the
 HARQ combining of Section~\ref{sec:coding}.  Following the
 faithful-defaults principle, recalibration is \textbf{off} in the plain

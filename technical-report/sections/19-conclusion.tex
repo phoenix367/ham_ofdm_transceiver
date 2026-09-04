@@ -1,0 +1,61 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+The project set out to reproduce a published amateur-radio OFDM PHY
+layer and ended with two boards that are radios.  The reproduction
+itself is closed: 44/44 worked examples bit-exact, the BER/PER figures
+reproduced, and the sensitivity gap traced to three specific
+synchronization defects and eliminated to within 0.3\,dB of a
+genie-synchronized bound.  On that foundation the waveform was
+extended an order of magnitude in each direction --- down to
+$-17.9$\,dB and 7.8\,bit/s (78\,\% of Shannon capacity at $-20$\,dB)
+and up to $+4.7$\,dB and 1059\,bit/s with 16-QAM --- and wrapped in a
+link layer that measures everything it can observe and feeds all of it
+back: receiver-driven rate adaptation over a 13-rung measured ladder,
+CRC-gated HARQ from exported LLRs, learned per-rung sensitivity
+offsets, closed-loop AFC netting, streamed selective-repeat bursts, a
+capability handshake, and a broadcast mode that adapts between blocks
+on a statistics reply the receiver only sends when it can hear.
+
+The model was then implemented twice.  The fixed-point twin matched
+and then beat the floating-point chain at the sensitivity edge, and its
+two-lag unwrap recovered a defect worth 8\,\% of all acquisitions ---
+an RTL-oriented discipline producing the better algorithm.  The C
+implementation, verified bit for bit against that twin, was brought
+inside an STM32H743 by measurement rather than projection: a receiver
+whose memory follows the signal (561\,KB), an acquisition that keeps
+up (9.5\,\% of the core), and a front end that is DC-blind by
+construction.  Two of those boards, joined by a wire, then carried a
+68\,kB file at 87\,\% of the raw channel rate, a 73\,kB file by
+broadcast without a lost frame, AX.25 and TCP through host bridges,
+and push-to-talk speech at 250\,bit/s decoded as it arrived; an SDR
+put the same stack on a 7\,MHz carrier and recovered frames off the
+air.
+
+Three results deserve emphasis beyond the feature list.  First, the
+measured LLR recalibration --- 1.5--2\,dB from correcting the
+\emph{shape} of the demodulator's confidence, at zero over-the-air
+cost --- illustrates how much sensitivity can hide between a correct
+demodulator and a correct decoder.  Second, the boards changed what
+the report is about: every defect the stand found was in a time
+constant, an ownership boundary, or a policy that had been correct for
+the traffic it was written for, and none was in the DSP that the
+simulations had spent a year on.  Third, a mode that cannot
+retransmit turned out to be the instrument that measures the
+receiver.  Acknowledged modes had been hiding an 8\,\% acquisition
+defect and a commit-rule defect on a clean wire; broadcast, and then
+voice, exposed both, and the second cost two wrong explanations that
+each survived a round of measurement before a deterministic
+reproduction on the host settled it.  The methodological lesson is
+cheap and was learned expensively: interleave the arms, keep the raw
+artefact, and refuse ``statistics'' as an explanation until the
+statistic survives an attempt to reproduce it.
+
+Everything claimed here is regenerable from the repository.  Every
+channel a figure was measured on is defined in one place; the
+regression suites are self-verifying in three languages; every
+sensitivity figure has its sweep script and JSON dump; every board
+finding has a bench target that reproduces it without the board; and
+the demonstrations are recordings any copy of the receiver decodes
+blind.  The step that remains is the one the wire cannot take and the
+SDR has been readied for: the same frames over an ionospheric path.

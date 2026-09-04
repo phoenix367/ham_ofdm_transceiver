@@ -18,7 +18,7 @@ Everything runs through the local venv (`./venv/bin/python`); install deps with
   checks against worked examples from the article (CRCs, Base38/QTH, conv-code
   outputs, scrambler/interleaver sequences). Run after any change to `ofdm_phy/`.
 - `./venv/bin/python experiments/smoke_e2e.py` — end-to-end TX→channel→RX sanity
-  (6 cases incl. CFO and the −6 dB article channel).
+  (13 cases incl. CFO, modes, STF and the −6 dB article channel).
 - `./venv/bin/python experiments/ber_per_simulation.py [--trials N]` — the main
   result (Figures 23-24), multiprocess sweep; ~2 min at 120 trials on 8 cores.
   Use `--trials 10` as a quick regression check of the whole chain.
@@ -727,8 +727,8 @@ Cross-module invariants that are easy to break:
   54000-sample window that is a BOUND (+-56 ppm), not a figure.
 - `link.py` (controller/ladder/LC word) and `station.py` (full station: QoS
   queues, ARQ, simplex channel access) are the link layer;
-  `experiments/simplex_session.py` is their system test. Invariants: seq
-  numbers 0..7 are ALL legitimate — "nothing received yet" is
+  `experiments/simplex_session.py` is their system test. Invariants: every seq
+  value (2 bits, 0..3) is legitimate — "nothing received yet" is
   `last_rx_seq is None`, never a magic value; a reply timeout only counts as
   a loss when the channel is idle (a busy channel means the peer may be
   answering at a slower rung); stations reply only to frames that carried

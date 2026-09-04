@@ -3,8 +3,13 @@
 
 \subsection{Regression Suites}
 
-Every layer has a self-verifying suite
-(Table~\ref{tab:suites}); all pass at the state documented here.
+Every layer has a self-verifying suite (Table~\ref{tab:suites}); all
+pass at the state documented here, and the counts below were taken
+from a run of each at the time of writing rather than copied forward.
+The suites fall into three groups: the Python model against the
+article and against itself, the C implementation against golden
+vectors the Python model generates, and the hosts against the
+device-side C running as a process.
 
 \begin{table}[H]
     \centering
@@ -15,21 +20,56 @@ Every layer has a self-verifying suite
     \toprule
     \textbf{Suite} & \textbf{Checks} & \textbf{Scope} \\
     \midrule
+    \multicolumn{3}{@{}l}{\textit{Python model}} \\
     \texttt{verify\_article.py} & 44 & bit-exact article worked examples:
         CRCs, Base38/QTH, conv-code outputs at all rates,
         scrambler/interleaver sequences, ZC ACF
         (Appendix~\ref{app:verify}) \\
-    \texttt{smoke\_e2e.py}      & 10 & end-to-end TX$\to$channel$\to$RX
-        incl.\ CFO, modes, STF, auto-mode detection \\
-    \texttt{fixed\_point.py}    & 24 & fixed-point primitives, TX/RX
+    \texttt{smoke\_e2e.py}      & 13 & end-to-end TX$\to$channel$\to$RX
+        incl.\ CFO, all modes, STF, auto-mode detection \\
+    \texttt{fixed\_point.py}    & 28 & fixed-point primitives, TX/RX
         parity, LDPC and 16-QAM TX and RX, HARQ, calibration, SNR
-        estimator (Appendix~\ref{app:fixed}) \\
+        estimator and its output map (Appendix~\ref{app:fixed}) \\
     \texttt{rf\_channel.py}     &  6 & SSB transparency, LO-derived CFO
         to 0.1\,Hz, decode through the fading RF chain \\
     \texttt{afc\_netting.py}    & --- & netting convergence +
         trim-budget and anchor guard scenarios (PASS/FAIL) \\
     \texttt{simplex\_session.py}& --- & whole-system two-station test,
         bit-exact delivery assert (PASS/FAIL) \\
+    \midrule
+    \multicolumn{3}{@{}l}{\textit{C implementation (\texttt{make -C cport test})}} \\
+    \texttt{test\_primitives}   & 11 & FFT, Hilbert, NCO, CORDIC against
+        the fixed-point ROMs \\
+    \texttt{test\_bits}         & 16 & CRC, FEC, puncturing, interleaver,
+        scrambler, LDPC \\
+    \texttt{test\_tx}           & 15 & frames and bursts against golden
+        hashes, all modes and modulations \\
+    \texttt{test\_rx}           & 22 & detection and demodulation
+        against genie vectors, two-lag unwrap, SNR map \\
+    \texttt{test\_stream}       & 11 & streaming receiver: chunked
+        feeding, burst continuation, block-aligned leads, the
+        weak-spike soak seed \\
+    \texttt{test\_link}         & 80 & controller, station, ARQ, bursts,
+        capability handshake, operator ceilings, codec bitmap,
+        sentinel codes \\
+    \texttt{test\_broadcast}    &  4 & group build and walk \\
+    \texttt{test\_usb}          & 18 & framing, parser resync, structure
+        round trips and grow-only decoding \\
+    \texttt{make robust}        & --- & \texttt{burst\_repro} abuse matrix,
+        \texttt{bc\_repro}, \texttt{bc\_soak}, \texttt{cstest}
+        (Section~\ref{sec:chan_harness}); \texttt{make sanitize-ship}
+        runs the suites under ASan/UBSan at the shipping geometries \\
+    \midrule
+    \multicolumn{3}{@{}l}{\textit{Hosts}} \\
+    \texttt{host/test\_ofdm\_modem.py} & 11 & driver against the
+        device-side C on stdio \\
+    \texttt{host/test\_modem.py}       &  7 & driver in isolation: serial
+        retry, langid cache, payload cap \\
+    \texttt{host/test\_kiss.py}        & 41 & KISS codec, air-time
+        admission table never optimistic \\
+    \texttt{host/test\_ip\_tun.py}     & 32 & tunnel queueing policy \\
+    \texttt{demoapp/test\_board\_console.py} & --- & file envelope
+        offsets, window-aligned splitting \\
     \bottomrule
     \end{tabular}
 \end{table}
@@ -98,8 +138,10 @@ its diagnosed cause.
 \subsection{Measured Feature Gains}
 
 Table~\ref{tab:gains} consolidates every A/B-measured improvement.
-All A/B comparisons use fixed seeds (same channel realizations per
-arm); sensitivity points use 40--120 trials.
+All A/B comparisons use paired channel realizations
+(Section~\ref{sec:conventions}); sensitivity points use 40--300
+trials; the board-side rows are measured on the wire stand or the
+harness named in their section.
 
 \begin{table}[H]
     \centering
@@ -127,7 +169,37 @@ arm); sensitivity points use 40--120 trials.
         per-modulation LLR quantization (8-bit for $\mu = 4$) \\
     Integer SNR estimator & $\le$1.5\,dB error, $-17\ldots+8$\,dB, all
         modes; gain weighting essential (equal-weight pooling was
-        5--15\,dB pessimistic on faded EXTREME frames) \\
+        5--15\,dB pessimistic on faded EXTREME frames); output map
+        brings the twins to $\sim$0.3\,dB of each other \\
+    Two-lag CFO unwrap (fixed/C) & recovers $\sim$8\,\% of all
+        acquisitions; broadcast delivery 60\,\% $\to$ 87\,\% at
+        $-4.5$\,dB, 79\,\% $\to$ 100\,\% at $-3$\,dB \\
+    Streamed bursts & $1.73\times$ throughput for 0.08\,dB at NORMAL;
+        $1.21\times$ for $\sim$0.35\,dB at EXTREME \\
+    \midrule
+    \multicolumn{2}{@{}l}{\textit{C implementation and boards}} \\
+    RAM, three-mode receiver & 10\,MB host reference $\to$ 561\,KB
+        (bit-exact); 27\,KB transmit-only \\
+    Flash & 242\,KB $\to$ 57\,KB, bit-exact \\
+    EXTREME frame CPU (STM32H743) & 23.7\,\% $\to$ 9.5\,\% of a
+        480\,MHz core; acquisition 8.44\,s $\to$ 2.12\,s inside a
+        5.08\,s window; ring 288 $\to$ 160\,KB; $\le$0.01\,dB
+        sensitivity cost, 0 false alarms in 250 \\
+    ZC-anchor / weak-commit gates & commit gate: 28/720 $\to$ 0/1800
+        groups lost on \texttt{bc\_soak}; 24/24 live voice
+        transmissions ($\sim$900 frames) with zero loss \\
+    Capability handshake + window-aligned parts & 68\,kB over the
+        wire: 50 $\to$ 87 $\to$ 102 $\to$ 114\,B/s (87\,\% of the
+        rung-12 raw rate), zero retransmissions \\
+    Broadcast block statistics under fade & $+32$\,\% (floor $-5$\,dB)
+        and $+39$\,\% (floor $-2$\,dB) of the stream delivered vs.\
+        a held rung \\
+    DC-blind front end & 8\,kB stress transfer 255 $\to$ 241\,s,
+        8 $\to$ 5 timeouts; abuse matrix 8/8 rows bare; CS scenario
+        suite 7/7 \\
+    Voice on the air & first audio 3.6 / 4.8 / 8.5\,s after the
+        talker starts (live / balanced / quality); lag drift
+        $\le 0.014$\,s per second; GPU decode step 830 $\to$ 148\,ms \\
     \bottomrule
     \end{tabular}
 \end{table}
@@ -141,6 +213,14 @@ with realistic LO errors, EXTREME-mode negotiation, rate climb,
 AFC netting visible in the transcript's CFO column, HARQ, and
 bidirectional message transfer --- blind-decoded from the monitor's
 audio by \texttt{demod\_frame\_auto} with no side information.
+\texttt{experiments/demo\_wav.py} records a complete two-station
+session through the RF chain of Section~\ref{sec:rf}: station A at $+6$\,ppm and B at $-8$\,ppm
+on 7.1\,MHz (A$\rightarrow$B CFO $\approx +99.4$\,Hz, handled
+invisibly by the protocol).  The output WAV is the audio of a
+\emph{passive monitor} receiver with its own $+2$\,ppm LO --- A's
+frames appear at $\approx +28$\,Hz and B's at $\approx -71$\,Hz in the
+blind-decoded transcript (Appendix~\ref{app:demo}), per-station CFO
+fingerprints with the thermal drift visible across the session.
 
 \begin{figure}[H]
     \centering
@@ -164,6 +244,41 @@ Figure~\ref{fig:fixed_timeline} and Appendix~\ref{app:fixeddemo}).
              estimates drive the ladder into the 16-QAM rungs.}
     \label{fig:fixed_timeline}
 \end{figure}
+
+\subsection{Demonstrations on the Boards}
+
+The simulated demonstrations above have physical counterparts, each a
+recorded run of Part~\ref{part:impl} on the two-board stand:
+
+\begin{itemize}
+    \item \textbf{A file over the acknowledged link} --- a 68\,kB PNG,
+          byte-exact in 9.9\,min at rung~12 with the capability
+          handshake, window~16 and aligned 3.2\,kB parts
+          (\S\ref{sec:cport_levers}); the same file took 25\,min
+          before the handshake existed.
+    \item \textbf{A file over broadcast} --- 73\,362 bytes in
+          22.3\,min at rung~12, 3089 frames, 0 lost, one start event,
+          byte-identical (\S\ref{sec:cport_bcast}); and a $-r$~0
+          beacon reaching a board that had never exchanged a frame,
+          byte-exact at $+16.2$\,dB.
+    \item \textbf{An adaptive broadcast} --- 8192 bytes from rung~8,
+          re-rung to 12 after the first statistics reply, 350 frames,
+          0 lost, a minute faster than the held rung
+          (\S\ref{sec:bcstats}).
+    \item \textbf{Packet radio and IP} --- a 48-byte AX.25 UI frame
+          crossing byte-identical through the KISS bridge in 3.4\,s,
+          and a 4\,kB TCP transfer through the tunnel at 43.7\,B/s once
+          the queue discipline matched the link
+          (\S\ref{sec:cport_kiss}, \S\ref{sec:cport_iptun}).
+    \item \textbf{Voice} --- push-to-talk speech at 250\,bit/s over
+          broadcast, decoded as it arrives: 24 of 24 transmissions with
+          zero loss after the receiver fix, first audio 3.6\,s after
+          the talker starts (\S\ref{sec:voice_onair}).
+    \item \textbf{Off the air} --- three frames in two modes and two
+          modulations recovered over a 7\,MHz RF path through an SDR,
+          mode identified from the preamble root alone
+          (\S\ref{sec:cport_sdr}).
+\end{itemize}
 
 \subsection{Link Budget}
 
@@ -242,3 +357,4 @@ constraint rather than absolute accuracy.  The absolute levels in
 Table~\ref{tab:rx_calibration} inherit the calibration output's nominal
 $-25$\,dBm; the relative results --- linearity, frequency error, and
 the comparison against atmospheric noise --- do not.
+

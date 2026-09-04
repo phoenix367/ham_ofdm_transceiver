@@ -4,9 +4,12 @@
 \texttt{ofdm\_phy/fixed/} is an integer-only twin of the modem,
 structured the way an FPGA/ASIC datapath would be.  It is the golden
 reference a future RTL implementation verifies against;
-\texttt{experiments/fixed\_point.py} (24 checks,
+\texttt{experiments/fixed\_point.py} (28 checks,
 Appendix~\ref{app:fixed}) cross-validates it against the float model
-continuously.
+continuously, and the C implementation of Section~\ref{sec:cport} is
+in turn verified bit-exactly against golden vectors this model
+generates --- so the twin is not only a reference for an RTL that does
+not yet exist but the arbiter for the code that runs on the boards.
 
 \subsection{Receiver Datapath}
 
@@ -166,7 +169,13 @@ against the known $\pm 1$ bits (the re-encoded header always, plus the
 decoded data block for $\mu \le 2$), an integer $\log_2$ via bit-length
 and a 16-entry mantissa ROM, minus the tiling gain, plus one measured
 global calibration constant ($-7.2$\,dB, constant across all modes and
-modulations).  Two design points were forced by measurement.  First,
+modulations).  This raw estimate is what the boards report through a
+per-(mode, modulation) \emph{output map} added later
+(\S\ref{sec:cport_snrcal}): the raw statistic rails at a ceiling that
+differs by combination, and without the map an EXTREME decode read
+$+0.5$\,dB on a wire a NORMAL decode read at $+12$\,dB, which
+whipsawed the rate ladder.  Two design points were forced by
+measurement.  First,
 grouping moments \emph{per column} removes the multipath $|H|^2$
 spread across carriers.  Second, symbol rows must be
 \emph{gain-weighted} by their mean $|$LLR$|$: a tiled EXTREME frame
@@ -371,8 +380,10 @@ deliberately, and a caller that mixes the two must know which.
         LLR recalibration & measured monotone map &
             32-entry reliability ROM trained on the fixed chain itself \\
         SNR estimate & decision-directed $E_s/N_0$ &
-            gain-weighted symbol rows, $-7.2$\,dB measured constant;
-            reads low outside the regime it was calibrated in \\
+            gain-weighted symbol rows, $-7.2$\,dB measured constant,
+            then the per-(mode, modulation) output map of
+            \S\ref{sec:cport_snrcal} so both twins read alike
+            ($\sim$0.3\,dB across the grid) \\
         FFT scaling & unscaled &
             $1/N$ carried as a per-stage $\gg 1$, with BFP exponents
             tracked through every energy and LLR comparison \\

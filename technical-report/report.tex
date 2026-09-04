@@ -96,7 +96,8 @@
     {\Large\itshape An Adaptive Audio-Band OFDM Transceiver for Amateur
     HF Radio ---\\
     Article Reproduction, Sensitivity Extension to $-17.9$\,dB,\\
-    Adaptive Link Layer, and a Fixed-Point RTL Reference Model\par}
+    Adaptive Link Layer, Fixed-Point and C Implementations,\\
+    and Two Boards on the Air\par}
 
     \vspace{2cm}
 
@@ -117,50 +118,72 @@
 \thispagestyle{plain}
 \begin{abstract}
 \noindent
-This report documents a complete software prototype of an audio-band OFDM
-digital communication system for amateur HF radio, developed in Python
-(NumPy/SciPy) as a faithful reproduction --- and then a substantial
-extension --- of the PHY layer published by
-bashkirtsevich~\cite{habr_ofdm}.  The reproduction is bit-exact against
-every worked example in the article (44/44 checks: CRCs, Base38/QTH
-encodings, convolutional-code outputs, scrambler and interleaver
-sequences) and reaches $-7.2$\,dB sensitivity versus the article's
-$\approx-7.5$\,dB on the same channel model; the residual gap was
-diagnosed as synchronization loss, not the decode chain.  Three
-synchronization defects found during the diagnosis --- a Zadoff--Chu
-time--frequency ambiguity worth $\sim$1\,dB, an SNR-dependent tone-detection
-metric, and a preamble transmitted 7\,dB below data-symbol power --- are
-analysed and corrected.
+This report documents a complete prototype of an audio-band OFDM
+digital communication system for amateur HF radio, from a reproduction
+of the PHY layer published by bashkirtsevich~\cite{habr_ofdm} to two
+circuit boards exchanging files, packet radio, and speech over a wire.
+The reproduction is bit-exact against every worked example in the
+article (44/44 checks) and reaches $-7.2$\,dB sensitivity versus the
+article's $\approx-7.5$\,dB on the same channel model; the residual is
+diagnosed as synchronization loss, and three synchronization defects
+--- a Zadoff--Chu time--frequency ambiguity worth $\sim$1\,dB, an
+SNR-dependent tone metric, and a preamble transmitted 7\,dB below data
+power --- are analysed and corrected.
 
-The waveform is then extended with SNR-adaptive link modes that scale the
-coherent symbol-tiling factor ($4\times/16\times/64\times$), lowering the
-sensitivity floor to \textbf{$-17.9$\,dB} in the 6\,kHz
+The waveform is then extended with SNR-adaptive link modes that scale
+the coherent symbol-tiling factor ($4\times/16\times/64\times$),
+lowering the sensitivity floor to $-17.9$\,dB in the 6\,kHz
 band\footnote{Throughout this report, SNR follows the article's
 convention: total signal power versus total noise power in the full
 6\,kHz Nyquist band of the 12\,kHz-sampled audio.  The signal itself
 occupies only $\approx$2.1\,kHz (300--2400\,Hz), so the same operating
 point reads $\approx$4.5\,dB higher against in-band noise only, and
 $\approx$3.8\,dB higher in the ham-standard 2.5\,kHz convention
-($-17.9$\,dB here $\approx$ $-14.1$\,dB ham).} (78\,\% of
-Shannon capacity at $-20$\,dB); with a measured monotone LLR
-recalibration worth 1.5--2\,dB at the sensitivity edge; with an IRA LDPC
-code, Gray-mapped 16-QAM, and CRC-gated chase-combining HARQ; and with a
-complete link layer: a 13-rung rate ladder spanning 7.8--1059\,bit/s over
-$-17.9\ldots+4.7$\,dB, receiver-driven rate adaptation through a 20-bit
-piggybacked link-control word, QoS with fragment-boundary preemption,
-simplex channel access, and closed-loop AFC frequency netting that pulls
-a $+284$\,Hz initial offset inside a 12\,Hz deadband in five exchanges.
-An SSB RF-chain simulator with per-station reference oscillators makes
-carrier offsets emerge from oscillator physics rather than parameters,
-and an integer-only fixed-point twin of the receiver --- Q15 arithmetic,
+($-17.9$\,dB here $\approx$ $-14.1$\,dB ham).} (78\,\% of Shannon
+capacity at $-20$\,dB); with a measured monotone LLR recalibration
+worth 1.5--2\,dB at the sensitivity edge; with an IRA LDPC code,
+Gray-mapped 16-QAM, and CRC-gated chase-combining HARQ; and with a
+complete link layer: a 13-rung rate ladder spanning 7.8--1059\,bit/s
+over $-17.9\ldots+4.7$\,dB, receiver-driven adaptation through a
+20-bit piggybacked link-control word, QoS with fragment-boundary
+preemption, selective-repeat bursts streamed behind one preamble, a
+capability handshake, simplex channel access, closed-loop AFC netting
+that pulls a $+284$\,Hz offset inside a 12\,Hz deadband in five
+exchanges, and a non-acknowledged broadcast mode with a
+sender-signalled statistics exchange that re-rungs under fading.
+
+The model is followed by two implementations.  An integer-only
+fixed-point twin of the receiver --- Q15 arithmetic,
 block-floating-point FFT, NCO/CORDIC primitives, division-minimised
-channel estimation --- serves as a golden reference for a future RTL
-implementation, matching the floating-point receiver within 0.5\,dB and
-surpassing it at $-9/-10$\,dB.  All results are backed by self-verifying
-regression suites (44 article checks, 10 end-to-end cases, 24
-fixed-point checks, whole-system simplex and AFC scenario tests) and by
-a blind-decoded WAV demonstration of a complete two-station session over
-the fading RF channel.
+channel estimation --- matches the floating-point receiver within
+0.5\,dB and surpasses it at the edge, and serves both as a golden
+reference for a future RTL and as the arbiter for a bit-exact C99
+implementation of the whole stack.  That implementation runs as
+flash-resident firmware on two STM32H743 boards: a streaming receiver
+whose memory follows the signal rather than the capture (10\,MB
+$\to$ 561\,KB, flash 242 $\to$ 57\,KB), the EXTREME acquisition
+brought from not keeping up to 9.5\,\% of the core by measurement on
+the part, a DC-blind receive front end hardened by a stress campaign,
+and a USB vendor-class modem protocol with a written specification.
+On the two-board stand the link carries a 68\,kB file at 87\,\% of the
+raw rung-12 rate with zero retransmissions, a 73\,kB file by broadcast
+with none of 3089 frames lost, AX.25 through a KISS bridge and TCP
+through a tunnel; an SDR puts the same stack on a 7\,MHz carrier and
+decodes frames off the air.  Finally a 250\,bit/s neural speech codec
+is evaluated and put on the air with push-to-talk between the boards
+--- first audio 3.6\,s after the talker starts, decoded as it arrives
+--- and the group loss it exposed on a clean wire is traced, after two
+wrong explanations that survived their own measurements, to a receiver
+commit defect that acknowledged modes had been hiding by
+retransmission.
+
+Every channel a figure was measured on --- the article's simulator, an
+SSB RF chain with a physical oscillator model, a virtual-channel
+daemon, the wire stand, the SDR path, and host harnesses that
+reproduce board failures without boards --- is defined once, and every
+result is regenerable from the repository's self-verifying suites
+(44 article checks, 13 end-to-end, 28 fixed-point, 177 C, 91 host)
+and recorded sessions any copy of the receiver decodes blind.
 \end{abstract}
 
 \newpage
@@ -173,19 +196,35 @@ the fading RF channel.
 % -----------------------------------------------------------------------
 \input{sections/01-list-of-abbreviations}
 \input{sections/02-introduction}
-\input{sections/03-phy-layer}
-\input{sections/04-synchronization}
-\input{sections/05-adaptive-modes}
-\input{sections/06-llr-calibration}
-\input{sections/07-coding-extensions}
-\input{sections/08-link-layer}
-\input{sections/09-afc-netting}
-\input{sections/10-rf-channel}
+\input{sections/03-evaluation-channels}
+
+\part{Physical Layer}
+\label{part:phy}
+\input{sections/04-phy-layer}
+\input{sections/05-synchronization}
+\input{sections/06-adaptive-modes}
+\input{sections/07-llr-calibration}
+\input{sections/08-coding-extensions}
+
+\part{Link Layer}
+\label{part:link}
+\input{sections/09-link-layer}
+\input{sections/10-broadcast}
+
+\part{Implementations}
+\label{part:impl}
 \input{sections/11-fixed-point}
-\input{sections/12-validation-results}
-\input{sections/12b-c-implementation}
-\input{sections/13-discussion}
-\input{sections/14-conclusion}
+\input{sections/12-c-implementation}
+\input{sections/13-radio-firmware}
+\input{sections/14-host-interface}
+\input{sections/15-sdr}
+\input{sections/16-voice}
+
+\part{Validation and Outlook}
+\label{part:results}
+\input{sections/17-validation-results}
+\input{sections/18-discussion}
+\input{sections/19-conclusion}
 
 % -----------------------------------------------------------------------
 % References

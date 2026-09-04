@@ -1,0 +1,115 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{What Binds Performance Now}
+
+\paragraph{The front end, not the code.}  The clearest lesson of the
+coding work is that FEC choice stopped mattering before code quality
+did: LDPC's 0.7\,dB AWGN advantage compresses to 0.3--0.4\,dB
+end-to-end once the LLRs are calibrated, and to parity before, because
+the demodulator's LLR quality is the binding constraint.  The monotone
+recalibration recovered 1.5--2\,dB, but a standards-grade LDPC matrix
+(802.11n/NR-style~\cite{ieee80211}) \emph{plus} fully calibrated LLRs
+would be needed to realise the remaining $\sim$2\,dB.  Any further
+sensitivity work should start at the LLR front end, not the decoder.
+
+\paragraph{Synchronization is the sensitivity frontier --- and the
+reliability frontier.}  The original reproduction gap, the fade-loss
+analysis, and every whole-group loss measured on the boards point the
+same way: frames are lost to detection and timing, not to decoding.
+HARQ helps only in the noise-limited regime for exactly this reason ---
+a sync-level loss leaves no LLRs to combine.  The two-board stand made
+the point at the \emph{other} end of the SNR range, twice: the
+two-lag CFO unwrap recovered $\sim$8\,\% of all acquisitions that ARQ
+had been silently repairing, and the voice campaign found the
+streaming detector committing a weak spike two blocks early on a wire
+with 25\,dB of margin.  Both defects were in the acquisition path,
+both were invisible to every acknowledged mode, and both were found by
+a mode that cannot retransmit.  A link layer that repairs losses is
+also a link layer that hides them; broadcast is the instrument that
+measures the receiver.
+
+\paragraph{Physics caps EXTREME.}  The $64\times$ mode's 0.69\,s
+coherent integration assumes a channel coherent over that window
+($\lesssim$0.1\,Hz Doppler spread).  This is a physical ceiling, not
+an implementation one, and it is why the mode ladder --- rather than
+ever-longer integration --- is the right architecture.
+
+\paragraph{Feedback latency at the floor.}  Once a direction falls to
+EXTREME, the adaptation loop period is bounded by 25--45\,s frame air
+times.  The controller is designed around this (fade-aware filtering,
+loss fallback, silence decay), but no tuning can make a 7.8\,bit/s
+control loop fast.  The same arithmetic governs broadcast: a
+statistics block is 45\,s and a reply window 9.4\,s because the
+exchange has to fit inside a plausible fade, and a stream to a peer
+whose ladder has decayed is held while probes bring it up rather than
+sent into a deaf receiver.
+
+\paragraph{On the boards, the binding constraints were time constants
+and ownership, not DSP.}  The demodulator passed the whole
+input-abuse matrix bare (Section~\ref{sec:cport_harden}); every field
+failure of the stress campaign lived in carrier sense, in a timer
+shorter than the receiver's 2.3-s end-of-frame commit, in a DAC parked
+off mid-rail, or in a piece of state that two owners disagreed about
+(Section~\ref{sec:cport_review}).  The recurring shape was a policy
+correct for the traffic it was written for --- full groups only, a
+sentinel packed into a wire field, a probe that no code path cleared
+--- becoming a defect when a new class of traffic arrived.  The fixes
+that lasted made the policy a choice a caller can decline rather than
+changing it.
+
+\paragraph{Measurement on the part corrected the projections.}  Every
+processor figure quoted before the boards existed was a projection on
+an assumed 400\,MMAC/s; the part delivers 147, and the EXTREME
+acquisition that was projected at 10\,\% of the core measured 27\,\%
+and, in its first flash-resident form, did not keep up at all.  The
+figures that matter --- 9.5\,\% of the core, 561\,KB, 2283\,ms worst
+blocking commit --- are all measured, and two of the three
+architectural decisions they forced (re-anchoring the ZC scan, sizing
+the capture FIFO by the worst burst rather than the average) went the
+opposite way from the projection.
+
+\subsection{Limitations}
+
+The sensitivities are measured on a simulation.  The channel model is
+faithful to the article and extended with Rayleigh fading and a
+physical oscillator model, but the wire stand cannot fade or
+attenuate, and the SDR measurements are of the radio, not of a
+propagation path: the off-air decode used an AM transmitter, and no
+frame of this waveform has yet crossed an ionospheric path.  The
+measured sensitivities should be planned around with $\sim$3\,dB of
+fading margin ($-14\ldots-15$\,dB for EXTREME), and the link budget's
+receiver-noise figure belongs to a wideband unpreselected SDR.
+
+The 16-QAM rungs run without LLR recalibration (the map is
+BPSK-trained; a modulation-specific map is straightforward but
+unmeasured).  The LDPC matrix is a from-scratch IRA construction, not a
+standards matrix.  Streamed bursts, broadcast and the C stack are
+conv-FEC only.  The Python station does not mirror the C stack's
+capability handshake, pooled storage or block statistics --- it is the
+reference for the ladder and ARQ, not for the extensions.
+
+The voice evaluation is bounded the same way as everything else: the
+codec's catastrophic-failure rate was measured on read speech one
+corpus away from training, the Russian results are one sentence and
+one narration, and the enrolment exchange is designed but not yet on
+the air.  The USB product ID is pid.codes' shared test identifier, and
+Windows has no binding.
+
+\subsection{Future Work}
+
+In rough order of expected value: the same frames over a real HF path,
+which the boards, the SDR driver and the recorded WAVs are all ready
+for; a standards-grade LDPC matrix plus QAM-specific LLR
+recalibration; porting the fixed receiver's slew-limited tracker back
+to the float model (it is measurably better); pilot reduction or 2-D
+channel estimation to reclaim the 30\,\% of the grid the pilots
+occupy; the voice mode's enrolment exchange on the air and a
+fine-tuned vocoder, whose language-identification confidence gives the
+fine-tune a ready objective (\S\ref{sec:voice_status}); a second
+board-side channel that can fade --- an attenuator and a fading
+simulator in the wire --- so the block-statistics laws proven on the
+harness are proven on converters too; per-carrier bit-loading on the
+measured channel estimate; a 46.875\,Hz-spacing variant for very
+stable channels; and shrinking EXTREME's frequency-search range once
+AFC netting has converged, which is compute on the part.

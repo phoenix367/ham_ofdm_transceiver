@@ -29,8 +29,9 @@ implementation.
 
 Figure~\ref{fig:arch_layers} shows the system as it stands at the end
 of the work reported here.  What began as a PHY reproduction has grown
-into a four-layer communication system, implemented as the pure
-NumPy/SciPy package \texttt{ofdm\_phy} with no build step:
+into a four-layer communication system, implemented first as the pure
+NumPy/SciPy package \texttt{ofdm\_phy} with no build step and then,
+bit-exactly, in portable C:
 
 \begin{itemize}
     \item \textbf{PHY} --- the OFDM modem (\texttt{ofdm.py}), the
@@ -46,7 +47,18 @@ NumPy/SciPy package \texttt{ofdm\_phy} with no build step:
           per-station reference oscillators (\texttt{rf.py});
     \item \textbf{fixed-point twin} --- an integer-only reimplementation
           of the receiver (\texttt{ofdm\_phy/fixed/}) structured as an
-          RTL datapath, cross-validated against the float model.
+          RTL datapath, cross-validated against the float model;
+    \item \textbf{C implementation} --- the whole stack in C99
+          (\texttt{cport/}), verified against golden vectors the
+          fixed-point twin generates, extended with selective-repeat
+          bursts, streamed windows, a capability handshake and an
+          adaptive broadcast, and running as flash-resident firmware on
+          two STM32H743 boards that enumerate as USB modems;
+    \item \textbf{hosts} --- a USB driver and protocol
+          (\texttt{host/}), two consoles, a KISS TNC, an IP tunnel, an
+          SDR driver that puts the stack on a 7\,MHz carrier, and a
+          push-to-talk voice application over a 250\,bit/s neural
+          codec.
 \end{itemize}
 
 \begin{figure}[H]
@@ -77,9 +89,14 @@ nudges learned per-rung sensitivity offsets.
 This report documents the complete prototype in
 \texttt{ofdm\_transceiver\_proto}: the article reproduction and its
 verification, the synchronization analysis that closed the sensitivity
-gap, and every subsequent extension.  All quantitative claims are
-backed by scripts in \texttt{experiments/} (Section~\ref{sec:results});
-the measured artefacts (curves, JSON sweeps, WAV recordings) live in
+gap, every subsequent extension of the waveform and the link layer,
+the two implementations that followed the Python model, and what the
+system did on real hardware --- two boards on a wire, a
+software-defined radio, and voice.  All quantitative claims are backed
+by scripts in \texttt{experiments/} or by a bench target in
+\texttt{cport/} (Section~\ref{sec:results}), and every one is
+measured on a channel defined in Section~\ref{sec:channels}; the
+measured artefacts (curves, JSON sweeps, WAV recordings) live in
 \texttt{results/}.  Developer-oriented documentation with the same
 structure exists as Markdown with Mermaid diagrams in \texttt{docs/}:
 the layer documents (architecture, PHY, link, RF, fixed-point)
@@ -136,7 +153,42 @@ command/event model (Section~\ref{sec:cport_docs}).
           receiver covering the full frame family (conv+LDPC,
           BPSK/QPSK/16-QAM, all modes, HARQ, calibrated LLRs), within
           0.5\,dB of the float receiver at $-7$\,dB and ahead of it at
-          $-9/-10$\,dB.
+          $-9/-10$\,dB; its two-lag CFO unwrap recovered $\sim$8\,\%
+          of all acquisitions that ARQ had been hiding.
+    \item \textbf{Bit-exact C implementation on a microcontroller} ---
+          the whole stack in C99 with no allocation and no floating
+          point on the signal path, verified byte for byte against
+          golden vectors; a streaming receiver whose memory follows the
+          signal rather than the capture (10\,MB $\to$ 561\,KB, flash
+          242 $\to$ 57\,KB); the EXTREME acquisition brought from
+          not keeping up to 9.5\,\% of a 480\,MHz Cortex-M7 by
+          measurement on the part; selective-repeat bursts, streamed
+          windows, a capability handshake and operator ceilings ---
+          68\,kB across the wire at 87\,\% of the raw rung-12 rate.
+    \item \textbf{Two boards that are radios} --- flash-resident
+          firmware with a 12\,kHz converter path, carrier sense with a
+          DC-blind front end hardened by a stress campaign, a USB
+          vendor-class modem protocol with a specification, and the
+          field findings that shaped the link layer: a sentinel that
+          crossed the air, a reply timer that had to learn the
+          end-of-frame commit, a broadcast rung that decides who can
+          hear it.
+    \item \textbf{Adaptive broadcast} --- non-acknowledged delivery
+          with a sender-signalled statistics exchange that re-rungs
+          between blocks, proven on a fading harness ($+32$--39\,\% of
+          the stream delivered against a held rung) and on the wire;
+          a 73\,kB file byte-identical with 0 of 3089 frames lost.
+    \item \textbf{Hosts on the link} --- a KISS TNC and an IP tunnel,
+          each admitting traffic by air time rather than length; the
+          SDR path with the transmitted spectrum, drive limits and an
+          off-air decode measured; and a receive chain calibrated
+          against a reference source.
+    \item \textbf{Voice at 250\,bit/s} --- a neural codec evaluated
+          for domain sensitivity, speaker identity, enrolment cost and
+          streaming, then put on the air with push-to-talk between the
+          boards: first audio 3.6\,s after the talker starts, decoded
+          as it arrives, 24 of 24 transmissions lossless once a
+          receiver commit defect the mode alone could expose was fixed.
 \end{itemize}
 
 
@@ -180,11 +232,14 @@ sound-card HF modes such as VARA~HF.
                         root (17/19/21) labels the link mode; the
                         EXTREME bootstrap is heard as a
                         $\approx$21\,s steady warble \\
-    Duplex / access   & simplex; carrier sense, stop-and-wait ARQ
-                        (selective-repeat burst extension in the C
-                        implementation, Section~\ref{sec:cport}) \\
-    Status            & research prototype (this work): bench and
-                        virtual-channel operation; not a deployed
+    Duplex / access   & simplex; carrier sense, stop-and-wait ARQ with
+                        selective-repeat streamed bursts, capability
+                        handshake, and a non-acknowledged broadcast
+                        mode (Sections~\ref{sec:link},
+                        \ref{sec:broadcast}) \\
+    Status            & research prototype (this work): simulation,
+                        two-board wire stand, and an off-air decode
+                        through an SDR at 7\,MHz; not a deployed
                         on-air standard \\
     Short description & audio-band adaptive OFDM data modem for SSB
                         transceivers, reproducing and extending the
@@ -195,21 +250,37 @@ sound-card HF modes such as VARA~HF.
 
 \subsection{Report Structure}
 
-Section~\ref{sec:phy} describes the PHY layer as implemented.
-Section~\ref{sec:sync} presents the synchronization analysis that
-closed the sensitivity gap.
-Section~\ref{sec:modes} describes the SNR-adaptive link modes.
-Section~\ref{sec:llr} covers LLR quality measurement and
-recalibration.
-Section~\ref{sec:coding} describes the LDPC, 16-QAM, and HARQ
-extensions.
-Section~\ref{sec:link} presents the link layer, and
-Section~\ref{sec:afc} the AFC netting loop.
-Section~\ref{sec:rf} documents the RF-chain and channel simulators.
-Section~\ref{sec:fixed} describes the fixed-point reference model.
-Section~\ref{sec:results} consolidates the validation and benchmark
-results.
-Section~\ref{sec:cport} documents the portable C implementation, its
-microcontroller feasibility, and the demonstration infrastructure.
-Section~\ref{sec:discussion} discusses limitations and future
-work, and Section~\ref{sec:conclusion} concludes.
+Section~\ref{sec:channels} defines the conventions and the six
+channels --- three simulated, one wired, one radio, one a family of
+harnesses --- on which everything that follows was measured, and maps
+each headline result to its channel.
+
+Part~\ref{part:phy} is the physical layer.
+Section~\ref{sec:phy} describes the PHY as implemented;
+Section~\ref{sec:sync} the synchronization analysis that closed the
+sensitivity gap; Section~\ref{sec:modes} the SNR-adaptive link modes;
+Section~\ref{sec:llr} LLR quality measurement and recalibration; and
+Section~\ref{sec:coding} the LDPC, 16-QAM and HARQ extensions.
+
+Part~\ref{part:link} is the link layer.  Section~\ref{sec:link}
+covers the rate ladder, the link-control word, adaptation, ARQ and
+QoS, burst windows, the reply timer, simplex access, the capability
+handshake and AFC netting; Section~\ref{sec:broadcast} the broadcast
+mode, from its design on the simulated channels to the statistics
+exchange the boards required.
+
+Part~\ref{part:impl} is the implementations and what they did.
+Section~\ref{sec:fixed} is the fixed-point RTL reference model;
+Section~\ref{sec:cport} the C implementation as engineering ---
+bit-exactness, the streaming receiver, memory and processor budgets,
+hardening; Section~\ref{sec:radio} the radio firmware and the
+two-board stand; Section~\ref{sec:host} the USB interface and the host
+tools; Section~\ref{sec:cport_sdr} the SDR path; and
+Section~\ref{sec:cport_voice} voice at 250\,bit/s, evaluated and then
+on the air.
+
+Part~\ref{part:results} consolidates.  Section~\ref{sec:results}
+collects the regression suites, the measured gains and the
+demonstrations; Section~\ref{sec:discussion} discusses what binds
+performance, the limitations and the work ahead; and
+Section~\ref{sec:conclusion} concludes.
