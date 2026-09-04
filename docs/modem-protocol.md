@@ -621,7 +621,9 @@ at a slow rung a healthy host's next chunk is legitimately ~27 s out.
 
 The ptype is a **label, not a demultiplexer**: a receiver that does not
 know a type MUST still store the bytes. Registry in Appendix B. For
-`BC_PT_LSCODEC_25` the payload is a stream of 10-bit tokens packed four
+`BC_PT_LSCODEC_25` -- the only codec type any sender emits today; the two
+Codec2 values are reserved names with no implementation behind them --
+the payload is a stream of 10-bit tokens packed four
 to five bytes; senders MUST emit only multiples of four tokens per chunk
 so that every group boundary is a whole number of tokens -- otherwise
 pad bits shift every later group and the stream is noise after the
@@ -884,19 +886,23 @@ Companion documents: [usb-protocol.md](usb-protocol.md) (narrative),
 
 ### B.3 `CODEC_*` (`codecs` config, `peer_codecs`)
 
-| bit | name | broadcast ptype |
-|---|---|---|
-| 0 | `LSCODEC_25` -- 250 bit/s | 3 |
-| 1 | `CODEC2_700` | 1 |
-| 2 | `CODEC2_450` | 2 |
+| bit | name | broadcast ptype | status |
+|---|---|---|---|
+| 0 | `LSCODEC_25` -- 250 bit/s | 3 | implemented (`host/webvoice`, `voice/`) |
+| 1 | `CODEC2_700` | 1 | **reserved** -- bit and ptype assigned, no encoder or decoder exists |
+| 2 | `CODEC2_450` | 2 | **reserved** -- as above |
+
+A host MUST NOT set a reserved bit in `codecs` (§9): the peer would read
+it as a promise to play a codec nobody has written. `LSCODEC_25` is the
+only voice codec in the system today.
 
 ### B.4 Broadcast payload types (`ptype` low nibble)
 
 | value | name |
 |---|---|
 | 0 | `TELEMETRY` |
-| 1 | `CODEC2_700` |
-| 2 | `CODEC2_450` |
+| 1 | `CODEC2_700` -- reserved, not implemented |
+| 2 | `CODEC2_450` -- reserved, not implemented |
 | 3 | `LSCODEC_25` |
 | 4–14 | unassigned |
 | 15 | `OPAQUE` |

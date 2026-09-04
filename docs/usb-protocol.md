@@ -58,8 +58,9 @@ Device → host:
 
 ## `CMD_BCAST` — chunked broadcast source
 
-`ptype`'s low nibble is the payload type (0 telemetry, 1/2 Codec2
-700/450, 3 LSCodec-25Hz, 15 opaque — a label, not a demux). Three high
+`ptype`'s low nibble is the payload type (0 telemetry, 3 LSCodec-25Hz,
+15 opaque; 1/2 are reserved for Codec2 700/450, which nothing
+implements — a label, not a demux). Three high
 bits shape the source:
 
 | bit | meaning |
@@ -133,7 +134,7 @@ worked.
 | 6 | `anchor` | 0/1, AFC reference |
 | 7 | `diag_stream` | 0/1, default off |
 | 8 | `win_max` | streamed-window ceiling accepted and sent |
-| 9 | `codecs` | `CODEC_*` bitmap the attached host can decode (bit 0 LSCodec-25Hz, 1 Codec2 700, 2 Codec2 450) |
+| 9 | `codecs` | `CODEC_*` bitmap the attached host can decode (bit 0 LSCodec-25Hz — the only one implemented; bits 1/2 are reserved for Codec2 700/450 and must stay clear) |
 
 `rung_ceiling`, `win_max` and `codecs` are also declared to the peer in
 the over-the-air capability record (11 B, accepted from 10 — it grows
