@@ -629,3 +629,271 @@ max-log metrics of the Gray mapping: the outer bit ($b_0$) is the axis
 sign, the inner bit ($b_1$) discriminates inner from outer amplitude
 levels, changing sign at $|\!\operatorname{Re}\hat S| = 2a$.  All LLRs
 are clipped to $\pm 20$ before decoding.
+
+\subsection{Symbol Demodulation, Exactly: Tile Accumulation Across the Modes}
+\label{sec:demod_exact}
+
+The previous subsection gives the mathematics of one OFDM symbol.  This
+one gives the procedure as the code executes it, from the detected
+frame to a block of LLRs, in the same self-contained form as
+\S\ref{sec:zc}: Table~\ref{tab:demod_notation} defines the symbols,
+Algorithm~\ref{alg:frame_demod} is the frame loop, Algorithms
+\ref{alg:acc_poly} and~\ref{alg:acc_search} are the two ways the float
+receiver collapses a tiled symbol into one spectrum (the polynomial
+phase tracker at NORMAL, the gated frequency search at ROBUST and
+EXTREME), Algorithm~\ref{alg:soft_demod} turns a spectrum into LLRs,
+Algorithm~\ref{alg:demod_int} is the integer form the fixed-point twin
+and the C port share for every mode, and Algorithm~\ref{alg:demod_prims}
+holds the two integer primitives it needs beyond those of
+Algorithm~\ref{alg:zc_prims}.
+
+\begin{table}[H]
+    \centering
+    \caption{Notation of Algorithms~\ref{alg:frame_demod}--\ref{alg:demod_prims}
+             (symbols of Table~\ref{tab:zc_notation} carry over).}
+    \label{tab:demod_notation}
+    \small
+    \begin{tabular}{@{}lp{3.4cm}p{8.4cm}@{}}
+    \toprule
+    \textbf{Symbol} & \textbf{Value} & \textbf{Meaning} \\
+    \midrule
+    $T$ & 4 / 16 / 64 & tiles per symbol (\texttt{sym\_tile}) \\
+    $S$ & $\mathrm{CP} + TN$ & symbol length in samples: 544 / 2080 / 8224 \\
+    $D$ & $S/f_s$ & symbol duration: 45.3 / 173 / 685\,ms \\
+    $\mathcal{K}$ & bins 3..25 & the 23 loaded (channel) bins \\
+    $\mathcal{P}$, $\mathcal{D}$ & 7, 16 of $\mathcal{K}$ & pilot carriers; data carriers (local indices into $\mathcal{K}$) \\
+    $p_k$ & Eq.~\eqref{eq:zc}, $u{=}3$, $N{=}7$ & pilot reference values, $|p_k| = 1$ \\
+    $\mu$ & 1 / 2 / 4 & bits per carrier: BPSK / QPSK / 16-QAM \\
+    $R$ & 8 / 8 / 25\,Hz & residual-CFO search range (\texttt{freq\_range}) \\
+    $\Delta_f$ & $0.25/D$ (float); $0.125/D$ (int) & search step: a quarter (eighth) cycle over one symbol \\
+    $\mathcal{G}$ & $\{-R, -R{+}\Delta_f, \ldots, R\}$ & the grid: 4 / 12 / 138 points (float), 7 / 23 / 275 (int) \\
+    $T_c$ & $\max(4, T/4)$ & tiles used by the coarse pass: 4 / 4 / 16 \\
+    $\gamma$ & 2.25 (36 in Q4) & coarse gate: top-1 over median energy contrast \\
+    $\ell_c$ & 8 bins & Wiener frequency-correlation length \\
+    $\alpha$ & 0.1 & noise-variance smoothing (float) \\
+    $\sigma^2$ & scalar & tracked noise variance, in units of $|H|^2$ \\
+    $\rho_k$ & scalar & per-carrier $E_s/N_0$, $|H_k|^2/\sigma^2$ \\
+    $c$ & $\pm 20$ & LLR clip (float) \\
+    $B$ & 13 & BFP target bits in the demodulator's FFT \\
+    $e$ & integer & block exponent of a spectrum: values scale as $2^{e}$, energies as $2^{2e}$ \\
+    $q$ & 6 / 8 bits & LLR quantization: $\mu \le 2$ / $\mu = 4$ \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{algorithm}[H]
+\caption{Float frame demodulation (\texttt{Transceiver.demod\_frame}), from detection to data LLRs.}
+\label{alg:frame_demod}
+\begin{algorithmic}[1]
+\Require real audio $s[n]$; a modem $m$ of the frame's mode
+\Ensure data-block LLRs, per-carrier and mean $E_s/N_0$, header
+\State $x \gets \mathrm{hilbert}(s)$ \Comment{analytic signal}
+\State $(\mathrm{start}, \mathrm{cfo}) \gets m.\textsc{DetectPreamble}(x)$; \textbf{if} \textsc{None}: \textbf{raise} \textsc{DemodError} \Comment{\S\ref{sec:zc}}
+\State $y[n] \gets x[n]\, e^{-2\pi j\, \mathrm{cfo}\, n/f_s}$; append $S$ zeros \Comment{derotate the frame; slack for a slip on the last symbol}
+\State $m.\mathrm{mapper} \gets \mathrm{BPSK}$;\quad $n_h \gets \lceil 93 / 16 \rceil = 6$ \Comment{header: 93 coded bits, 16 per symbol}
+\For{$i = 0..n_h{-}1$} \Comment{header symbols}
+    \State $(\rho, \bar\rho, \Lambda_i) \gets \textsc{SoftDemod}(m, \textsc{Accumulate}(m, y[\mathrm{start} + iS .. \mathrm{start} + (i{+}1)S)))$
+\EndFor
+\State $\mathrm{hdr} \gets \textsc{Viterbi}_{1/3}([\Lambda_0 .. \Lambda_{n_h-1}])$; decode fields, check CRC-8 \Comment{Section~\ref{sec:coding}}
+\State $\alpha_{\mathrm{llr}} \gets \mathrm{clip}\big(2\,\mathbb{E}[\Lambda x]/\mathrm{Var}[\Lambda x],\ 0.05,\ 4\big)$ over the 96 header positions \Comment{temperature, \S\ref{sec:llr}}
+\State $\mathrm{pos} \gets \mathrm{start} + n_h S$;\quad $m.\mathrm{mapper} \gets \mathrm{hdr.mod}$
+\State codec $\gets$ LDPC if $\mathrm{hdr.ver} = 2$ else conv at rate $\mathrm{hdr.spd}$
+\State $n_d \gets \lceil \mathrm{codec.coded\_bits}(\mathrm{hdr.len}) / (16\mu) \rceil$
+\For{$i = 0..n_d{-}1$} \Comment{data symbols, same two steps}
+    \State $(\rho^{(i)}, \bar\rho^{(i)}, \Lambda_i) \gets \textsc{SoftDemod}(m, \textsc{Accumulate}(m, y[\mathrm{pos} + iS .. \mathrm{pos} + (i{+}1)S)))$
+\EndFor
+\State $\Lambda \gets \alpha_{\mathrm{llr}} \cdot [\Lambda_0 .. \Lambda_{n_d-1}]$; \textbf{if} recalibration on \textbf{and} $\mu \le 2$: $\Lambda \gets \textsc{ReliabilityMap}(\Lambda)$ \Comment{\S\ref{sec:llr}}
+\State \Return $\Lambda$, $\mathrm{mean}_i\, \rho^{(i)}$, $\mathrm{mean}_i\, \bar\rho^{(i)}$, hdr
+\end{algorithmic}
+\end{algorithm}
+
+\textsc{Accumulate} is where the modes differ.  Every tiled symbol is
+$T$ back-to-back repeats of one $N$-sample OFDM symbol behind one CP;
+the receiver must add the repeats coherently, and the residual carrier
+offset that the preamble left (a few hertz) rotates each repeat by a
+little more than the last.  At NORMAL the four repeats are long enough
+in SNR to measure their pairwise phases, and a polynomial fitted to
+those phases removes the rotation (Algorithm~\ref{alg:acc_poly}).  At
+ROBUST and EXTREME the pairwise phases are noise at the operating
+point, so the receiver instead \emph{hypothesises} the residual
+frequency, derotates the whole symbol by each candidate, and keeps the
+one that concentrates the most energy in the loaded bins
+(Algorithm~\ref{alg:acc_search}) --- spending the whole symbol's
+energy on the decision instead of a tile's.  The grid step is a quarter
+cycle over the symbol, so the winning hypothesis leaves at most
+$\sim\pi/4$ of phase ramp across the accumulation.
+
+\begin{algorithm}[H]
+\caption{\textsc{Accumulate}, NORMAL ($T = 4$): polynomial phase tracker (\texttt{TiledOFDMModem.\_demodulate\_signal}).}
+\label{alg:acc_poly}
+\begin{algorithmic}[1]
+\Require the $TN$ samples after the CP, as tiles $r_0 .. r_{T-1}$ of $N$
+\Ensure one $N$-point spectrum
+\State $s_{\max} \gets \min(3, T{-}1)$
+\For{$d = 1..s_{\max}$, $i = 0..T{-}1{-}d$} $\ \theta_{i,i+d} \gets \angle \sum_n r_i[n]\, \overline{r_{i+d}[n]}$ \Comment{pairwise tile phases} \EndFor
+\State $X \gets [0]$;\ $Y \gets [0]$ \Comment{(tile index, phase) samples for the fit}
+\For{$t = 1..T{-}1$}
+    \State \textbf{if} $t \le s_{\max}$: append $(t, -\theta_{0,t})$ \Comment{direct estimate}
+    \State append $\big(t,\ -\sum_{i<t} \theta_{i,i+1}\big)$ \Comment{chained step-1 estimate}
+    \State \textbf{if} $t \ge 2$: append $\big(t,\ -(\theta_{t-2,t} + \theta_{t-4,t-2} + \cdots)\big)$, ending with $\theta_{0,1}$ if $t$ is odd \Comment{chained step-2}
+\EndFor
+\State $(a_2, a_1, a_0) \gets \mathrm{polyfit}(X, Y, 2)$;\quad $\varphi_t \gets a_2 t^2 + a_1 t$ \Comment{degree-2 fit, anchored at tile 0}
+\State $\bar r[n] \gets \frac{1}{T} \sum_{t=0}^{T-1} r_t[n]\, e^{-j\varphi_t}$ \Comment{derotate each tile onto the first, average}
+\State \Return $\mathrm{FFT}_N(\bar r)$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{\textsc{Accumulate}, ROBUST and EXTREME: gated two-stage frequency search (\texttt{\_demodulate\_freq\_search}).}
+\label{alg:acc_search}
+\begin{algorithmic}[1]
+\Require the $TN$ samples after the CP as $z[n]$; grid $\mathcal{G}$
+\Ensure one $N$-point spectrum
+\Function{Energy}{$f$, $n_t$} \Comment{derotate the first $n_t$ tiles by $f$, accumulate, measure the loaded bins}
+    \State $d[n] \gets z[n]\, e^{-2\pi j f n / f_s}$, $n < n_t N$;\quad $\bar d[n] \gets \frac{1}{n_t}\sum_{t < n_t} d[tN + n]$
+    \State $Z \gets \mathrm{FFT}_N(\bar d)$;\quad \Return $\sum_{k \in \mathcal{K}} |Z[k]|^2$, $Z$
+\EndFunction
+\State $\mathcal{I} \gets$ all indices of $\mathcal{G}$
+\If{$|\mathcal{G}| > 9$} \Comment{coarse pass only where a grid is worth pruning}
+    \State $E_c[k] \gets \textsc{Energy}(\mathcal{G}[k], T_c).\mathrm{energy}$ for $k = 0, 4, 8, \ldots$ \Comment{every 4th point on $T_c$ tiles}
+    \State rank $E_c$ descending; $\mathrm{med} \gets$ its median (or 1)
+    \If{$E_c^{\mathrm{top}} / \mathrm{med} \ge \gamma$} $\ \mathcal{I} \gets \bigcup_{\text{top-3 } k} \{k{-}5 .. k{+}5\} \cap [0, |\mathcal{G}|)$ \Comment{decisive: shortlist} \EndIf
+    \Statex \hspace{\algorithmicindent} otherwise keep the full grid \Comment{the gate keeps the shortcut lossless at the edge}
+\EndIf
+\State $\mathrm{best} \gets (E{=}-1, Z{=}\varnothing)$
+\For{$k \in \mathcal{I}$} $\ (E, Z) \gets \textsc{Energy}(\mathcal{G}[k], T)$;\ \textbf{if} $E > \mathrm{best}.E$: $\mathrm{best} \gets (E, Z)$ \EndFor
+\State \Return $\mathrm{best}.Z$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{\textsc{SoftDemod}: spectrum to LLRs (\texttt{OFDMModem.demodulate\_symbol\_cp\_soft}), float.}
+\label{alg:soft_demod}
+\begin{algorithmic}[1]
+\Require spectrum $Z[k]$; mapper $\mu$; pilot values $p$; carrier sets $\mathcal{K}, \mathcal{P}, \mathcal{D}$
+\Ensure $\rho_k$ (per data carrier), $\bar\rho$, LLR vector $\Lambda$ of length $16\mu$
+\State $\hat H^{\mathrm{p}}_j \gets Z[\mathcal{P}_j] / p_j$, $j = 0..6$ \Comment{ZF at the pilots}
+\State $\hat H^{0}_k \gets$ linear interpolation of $\mathrm{Re}, \mathrm{Im}\, \hat H^{\mathrm{p}}$ over $k \in \mathcal{K}$ \Comment{initial estimate}
+\State $\hat x^{0}_k \gets Z[k] / (\hat H^{0}_k + 10^{-6})$ for $k \in \mathcal{D}$ \Comment{ZF equalize}
+\State $\hat s^{0}_k \gets$ nearest constellation point to $\hat x^{0}_k$ ($\mathrm{sign}$; $\mathrm{sign}/\sqrt2$; 16-QAM levels $\{\pm1,\pm3\}/\sqrt{10}$)
+\State $\sigma^2 \gets \mathrm{clip}\big(\mathrm{mean}_k |\hat x^0_k - \hat s^0_k|^2 \cdot \mathrm{mean}_k |\hat H^0_k|^2,\ 10^{-6},\ 60\big)$ \Comment{initial noise variance}
+\State $r_{hp}[k,j] \gets e^{-|k - \mathcal{P}_j|/\ell_c}$;\quad $r_{pp}[i,j] \gets e^{-|\mathcal{P}_i - \mathcal{P}_j|/\ell_c}$ \Comment{exponential correlation model}
+\State $\hat H_k \gets \Big(r_{hp}\,\big(r_{pp} + \tfrac{\sigma^2}{\mathrm{mean}_j|\hat H^{\mathrm{p}}_j|^2} I\big)^{-1} \hat H^{\mathrm{p}}\Big)_k$ \Comment{Wiener estimate over $\mathcal{K}$}
+\State $\hat x_k \gets Z[k]\, \overline{\hat H_k} \big/ (|\hat H_k|^2 + \sigma^2)$ for $k \in \mathcal{D}$ \Comment{MMSE equalize}
+\State decision-directed residual: $\hat s_k \gets$ nearest point (with per-axis amplitude for $\mu \le 2$, gain $g = \sqrt{\mathrm{mean}|\hat x_k|^2}$, $a = g/\sqrt{10}$ for $\mu = 4$);\quad $v \gets \mathrm{mean}_k |\hat x_k - \hat s_k|^2$
+\State $\sigma^2 \gets \max\big(\alpha\, v \cdot \mathrm{mean}_k|\hat H_k|^2 + (1 - \alpha)\, \sigma^2,\ 10^{-6}\big)$ \Comment{one-pole update}
+\State $\rho_k \gets |\hat H_k|^2 / \sigma^2$;\quad $\bar\rho \gets \mathrm{mean}_k|\hat H_k|^2 / \sigma^2$
+\State $\mu = 1$: $\Lambda \gets 4\rho_k \mathrm{Re}\,\hat x_k$;\quad $\mu = 2$: $\Lambda \gets [2\rho_k \mathrm{Re}\,\hat x_k,\ 2\rho_k \mathrm{Im}\,\hat x_k]$ interleaved
+\State $\mu = 4$: $\Lambda \gets \big[\,2\rho_k \mathrm{Re}\,\hat x_k/g,\ \ 2\rho_k(2a - |\mathrm{Re}\,\hat x_k|)/g,\ \ 2\rho_k \mathrm{Im}\,\hat x_k/g,\ \ 2\rho_k(2a - |\mathrm{Im}\,\hat x_k|)/g\,\big]$ \Comment{Eq.~\eqref{eq:qam_llr}}
+\State \Return $\rho_k$, $\bar\rho$, $\mathrm{clip}(\Lambda, -c, c)$
+\end{algorithmic}
+\end{algorithm}
+
+The integer receiver (Algorithm~\ref{alg:demod_int}) differs from the
+float chain in three ways that Section~\ref{sec:fixed} motivates and
+Table~\ref{tab:fixed_vs_float} lists; they are visible in the listing.
+It uses the frequency search for \emph{every} mode, NORMAL included,
+with a \emph{slew-limited tracker}: the full grid (through the gated
+coarse pass) on the first symbol of a frame, then $\pm 2$ grid steps
+around the previous symbol's winner, because the residual drift is
+smooth and a per-symbol argmax is noisy.  It \emph{sums} the tiles
+instead of averaging them and carries the growth in a block exponent,
+so the FFT input always fills 13 bits.  And it produces
+\emph{matched-filter} LLRs, $Y_k \overline{\hat H_k}$, with no division
+and no noise estimate: since $Y_k \overline{\hat H_k} = |\hat H_k|^2
+x_k + \text{noise}$, this is the float LLR $4\rho_k \mathrm{Re}\,\hat
+x_k = 4\,\mathrm{Re}(Y_k \overline{\hat H_k})/\sigma^2$ up to the
+per-symbol constant $\sigma^2$, which the scale-invariant Viterbi and
+min-sum decoders do not need --- the per-carrier SNR weighting is
+already inside the product.  What the integer chain gives up is the
+per-symbol \emph{absolute} LLR scale, which is why its calibrated mode
+(Section~\ref{sec:fixed}) exists for HARQ combining and why the SNR
+estimator of \S\ref{sec:cport_snrcal} is a separate statistic.
+
+\begin{algorithm}[H]
+\caption{Integer symbol demodulation, all modes (fixed-point twin and C port).}
+\label{alg:demod_int}
+\begin{algorithmic}[1]
+\Require int16 $I, Q$; symbol start $\mathrm{pos}$; frame CFO word $w_0$; $\mu$; grid words $\mathcal{W}_{\mathcal G}$; tracker state $h_{\mathrm{last}}$ (none at frame start)
+\Ensure block LLRs $\Lambda$ (int), block exponent $e_b$
+\Function{Spectrum}{$k$, $n_t$} \Comment{derotate by $w_0 + \mathcal{W}_{\mathcal G}[k]$, sum $n_t$ tiles, BFP FFT}
+    \State $w \gets \mathcal{W}_{\mathcal G}[k]$;\quad $\phi_0 \gets (w_0 + w)\,\mathrm{pos} \bmod 2^{32}$ \Comment{phase continuous across symbols}
+    \State $(d_I, d_Q) \gets \textsc{NcoDerotate}(I[\mathrm{pos} .. \mathrm{pos}{+}\mathrm{CP}{+}n_t N),\ Q[\ldots],\ w_0 + w,\ \phi_0)$
+    \State $A_I[n] \gets \sum_{t < n_t} d_I[\mathrm{CP} + tN + n]$;\quad $A_Q[n] \gets \sum_{t < n_t} d_Q[\mathrm{CP} + tN + n]$ \Comment{tiles summed}
+    \State $(Z_r, Z_i, e) \gets \textsc{FftBfp}(A_I, A_Q, B)$;\quad $E \gets \sum_{k \in \mathcal{K}} Z_r[k]^2 + Z_i[k]^2$
+    \State \Return $(E, Z_r, Z_i, e)$
+\EndFunction
+\Statex
+\State \textbf{hypothesis window:}
+\If{$h_{\mathrm{last}}$ is none} \Comment{first symbol of the frame}
+    \State $\mathcal{I} \gets$ all of $\mathcal{G}$
+    \If{$|\mathcal{G}| > 9$} \Comment{coarse pass of Algorithm~\ref{alg:acc_search}, integer form}
+        \State $E_c[k] \gets \textsc{Spectrum}(k, T_c)$ for $k = 0, 4, 8, \ldots$; align: $E \gg \min(2(e - e_{\min}), 62)$
+        \State \textbf{if} $(E_c^{\mathrm{top}} \ll 4) / \mathrm{med} \ge 36$: $\mathcal{I} \gets$ the top-3 $\pm5$ windows \Comment{$\gamma$ as 36 in Q4}
+    \EndIf
+\Else\ $\mathcal{I} \gets [h_{\mathrm{last}} - 2,\ h_{\mathrm{last}} + 2] \cap [0, |\mathcal{G}|)$ \Comment{slew-limited tracker}
+\EndIf
+\State $\mathrm{cand}_k \gets \textsc{Spectrum}(k, T)$ for $k \in \mathcal{I}$;\quad $e_{\min} \gets \min_k e_k$
+\State $k^\star \gets \arg\max_k \big(E_k \gg \min(2(e_k - e_{\min}), 62)\big)$ \Comment{energies on a common exponent}
+\State $(Z_r, Z_i, e) \gets \mathrm{cand}_{k^\star}$;\quad $h_{\mathrm{last}} \gets k^\star$
+\Statex
+\State \textbf{channel estimate:} $\hat H^{\mathrm{p}}_j \gets \textsc{RshiftRound}\big(Z[\mathcal{P}_j] \cdot \overline{p_j}^{\,\mathrm{Q15}},\ 15\big)$, $j = 0..6$ \Comment{conjugate ROM}
+\State $\hat H_k \gets \big(\hat H^{\mathrm{p}}_{lo}\,(2^{15} - \omega_k) + \hat H^{\mathrm{p}}_{hi}\,\omega_k\big) \gg 15$, $k \in \mathcal{K}$ \Comment{Q15 weight ROM}
+\Statex
+\State \textbf{LLRs} (matched filter, scale $\propto 2^{2e}$), $k \in \mathcal{D}$: $\Lambda^I_k \gets Z_r \hat H_r + Z_i \hat H_i$;\quad $\Lambda^Q_k \gets Z_i \hat H_r - Z_r \hat H_i$
+\State $\mu = 1$: $\Lambda \gets \Lambda^I$;\quad $\mu = 2$: $\Lambda \gets [\Lambda^I_k, \Lambda^Q_k]$ interleaved
+\State $\mu = 4$: $h2_k \gets \hat H_r^2 + \hat H_i^2$;\quad $\varrho \gets \big((\sum_k |\Lambda^I_k| + |\Lambda^Q_k|) \ll 8\big) \big/ (2 \sum_k h2_k)$
+\Statex \hspace{\algorithmicindent} $\tau_k \gets (h2_k\, \varrho) \gg 8$;\quad $\Lambda \gets [\Lambda^I_k,\ \tau_k - |\Lambda^I_k|,\ \Lambda^Q_k,\ \tau_k - |\Lambda^Q_k|]$ \Comment{$\mathbb{E}|x_I| = 2a$}
+\State \Return $\Lambda$, $e$
+\Statex
+\State \textbf{block:} for symbols $i = 0..n{-}1$ collect $(\Lambda_i, e_i)$ as above;\quad $e_{\min} \gets \min_i e_i$
+\State $\Lambda \gets [\Lambda_i \gg 2(e_i - e_{\min})]_i$;\quad \Return $\Lambda$, $e_b = 2 e_{\min}$ \Comment{block on a common exponent}
+\State \textbf{then} $\textsc{Quantize}(\Lambda, q)$ with $q = 8$ if $\mu = 4$ else $6$ \Comment{before the decoder}
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Integer primitives of Algorithm~\ref{alg:demod_int} (\texttt{fixed/fft.py}, \texttt{fixed/fxp.py}; bit-identical in \texttt{cport/src/fft.c}).}
+\label{alg:demod_prims}
+\begin{algorithmic}[1]
+\Function{FftBfp}{$x_r[0..N)$, $x_i[0..N)$, $B$} \Comment{block floating point around a scaled FFT}
+    \State $m \gets \max(\max_n |x_r[n]|,\ \max_n |x_i[n]|,\ 1)$;\quad $e \gets B - \mathrm{bitlength}(m)$ \Comment{priority encoder on the block max}
+    \State \textbf{if} $e \ge 0$: $x \gets x \ll e$ \textbf{else} $x \gets \textsc{RshiftRound}(x, -e)$ \Comment{fill $B$ bits}
+    \State \Return $\textsc{FftFixed}(x_r, x_i)$, $e$ \Comment{spectrum is $2^{e}\times$ the unscaled transform}
+\EndFunction
+\Statex
+\Function{FftFixed}{$x_r$, $x_i$} \Comment{radix-2 DIT, Q15 twiddles, per-stage $\gg 1$ = built-in $1/N$}
+    \State ROM: $W_r[k] \gets \mathrm{round}(32767 \cos(2\pi k/N))$,\ $W_i[k] \gets \mathrm{round}(-32767 \sin(2\pi k/N))$, $k < N/2$
+    \State bit-reverse the input order;\quad $h \gets 1$
+    \While{$h < N$}
+        \For{each butterfly pair $(i_0, i_1 = i_0 + h)$ with twiddle index $k \cdot N/2h$}
+            \State $t_r \gets \textsc{RshiftRound}(x_r[i_1] W_r - x_i[i_1] W_i,\ 15)$;\quad $t_i \gets \textsc{RshiftRound}(x_r[i_1] W_i + x_i[i_1] W_r,\ 15)$
+            \State $x[i_1] \gets \textsc{RshiftRound}(x[i_0] - t,\ 1)$;\quad $x[i_0] \gets \textsc{RshiftRound}(x[i_0] + t,\ 1)$ \Comment{both components}
+        \EndFor
+        \State $h \gets 2h$
+    \EndWhile
+    \State \Return $x_r, x_i$
+\EndFunction
+\Statex
+\Function{Quantize}{$\Lambda$, $q$} \Comment{peak-normalized to $q$ bits}
+    \State $\mathrm{peak} \gets \max_i |\Lambda_i|$;\quad $s \gets \max(0,\ \mathrm{bitlength}(\mathrm{peak}) - (q - 1))$
+    \State \Return $\mathrm{clip}(\Lambda \gg s,\ -(2^{q-1} - 1),\ 2^{q-1} - 1)$ \Comment{$\pm31$ at 6 bits, $\pm127$ at 8}
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+Three consequences of Algorithm~\ref{alg:demod_int} are measured
+elsewhere in this report and are worth connecting to their lines.  The
+peak-normalized 6-bit quantization (\textsc{Quantize}) is what makes
+the fixed receiver \emph{beat} the recalibrated float receiver at
+$-9/-10$\,dB: it compresses the LLR range the way the monotone map
+does, for free (Section~\ref{sec:fixed}).  The block exponent
+$e_b$ and the $2^{2e}$ energy scaling are the invariant every energy
+comparison in the chain must respect --- the hypothesis argmax
+aligns exponents before comparing, and forgetting to do so is
+one of the three integer-domain bugs of Section~\ref{sec:fixed}'s debug
+lore.  And the tracker's $\pm 2$ window is the reason the EXTREME
+demodulator costs 856\,Mcycles per frame rather than the 275-hypothesis
+grid's worth on every symbol (Table~\ref{tab:cport_stages}): the grid is
+paid once per frame, on the first symbol, and only there through the
+gated coarse pass.
