@@ -219,15 +219,67 @@ explicitly --- the omission that once scored a perfect correlation at
 the tone anchor to the sample on the golden corpus, which is what
 lets everything downstream be compared byte for byte.
 
-\paragraph{The correlator, exactly.}  Algorithm~\ref{lst:zc_float} is
-the float detector (\texttt{OFDMModem.detect\_zc\_preamble}) with
-nothing elided but array bookkeeping; every quantity is named as the
-code names it.  It is handed the analytic signal $x$ already
-derotated by the tone stage's coarse CFO word, a hypothesis list
-$\mathcal{F}$ (the single value $0$ at NORMAL; $-15, -10, \ldots,
-+15$\,Hz at ROBUST and EXTREME), and the mode's constants: $N = 128$,
-$L$ the ZC symbol count, $G$ the coherent group, $n_g = L/G$, the CP
-length 32, and the base threshold $\theta$ ($0.2 / 0.08 / 0.05$).
+\paragraph{The correlator, exactly.}  The rest of this subsection is
+self-contained: Table~\ref{tab:zc_notation} defines every symbol,
+Algorithm~\ref{alg:zc_gen} the preamble block the kernel is cut
+from, Algorithm~\ref{lst:zc_float} the float detector
+(\texttt{OFDMModem.detect\_zc\_preamble}) with nothing elided but
+array bookkeeping, Algorithm~\ref{lst:zc_int} its integer form, and
+Algorithm~\ref{alg:zc_prims} the five integer primitives the latter
+calls.  Every quantity is named as the code names it.  The detector is
+handed the analytic signal already derotated by the tone stage's
+coarse CFO word (Section~\ref{sec:sync}); what it adds is the
+sample-exact timing and the residual CFO within one coarse bin.
+
+\begin{table}[H]
+    \centering
+    \caption{Notation of Algorithms~\ref{alg:zc_gen}--\ref{alg:zc_prims}.}
+    \label{tab:zc_notation}
+    \small
+    \begin{tabular}{@{}lp{2.9cm}p{9.0cm}@{}}
+    \toprule
+    \textbf{Symbol} & \textbf{Value} & \textbf{Meaning} \\
+    \midrule
+    $f_s$ & 12\,000\,Hz & sample rate \\
+    $N$ & 128 & FFT size; one ZC tile is $N$ samples \\
+    $\mathrm{CP}$ & 32 & cyclic-prefix length \\
+    $u$ & 17 / 19 / 21 & ZC root (NORMAL / ROBUST / EXTREME) \\
+    $L$ & 4 / 16 / 64 & ZC tiles in the preamble block \\
+    $G$ & 1 / 2 / 4 & tiles correlated \emph{coherently} (kernel length $GN$) \\
+    $n_g$ & $L/G$ & groups whose correlation magnitudes are summed \\
+    $P$ & $LN$ & preamble length without CP \\
+    $\theta$ & 0.2 / 0.08 / 0.05 & base detection threshold on the normalized metric \\
+    $\mathcal{F}$ & $\{0\}$; $\{-15,\ldots,15\}$ & residual-CFO hypotheses in Hz (NORMAL; ROBUST and EXTREME, 5\,Hz steps) \\
+    $\mathcal{W}$ & $\mathcal{F}$ as words & the same as 32-bit phase words, \textsc{HzToPhaseWord}($f$) \\
+    $x[n]$ & complex & analytic input, coarse-derotated (float) \\
+    $I[n], Q[n]$ & int16 & the same, real and imaginary parts (integer) \\
+    $k_r[t], k_i[t]$ & Q15 int16 & the $GN$-sample kernel ROM, real and imaginary \\
+    $E_{\mathrm{ref}}$ & scalar & kernel energy (integer: $\gg 15$, i.e.\ one Q15 factor removed) \\
+    $E[m], we[m]$ & scalar & energy of the $P$-sample window starting at $m$ \\
+    $c[m], \mathrm{mag}[m]$ & scalar & correlation magnitude at offset $m$ \\
+    $C[m], cc[m]$ & scalar & the $n_g$ group magnitudes summed \\
+    $\mu[m], \mu^2[m]$ & $[0,1]$; Q20 & normalized metric; its square in Q20 (integer) \\
+    $\rho, \rho_4$ & ratio; Q4 & peak-to-floor of the raw sum \\
+    $\theta_{10}, \theta'$ & Q10 & threshold in Q10; threshold after the dynamic rule \\
+    $w, \phi$ & 32-bit words & CFO and angle in phase-word units: $2^{32}$ = one turn = $f_s$ \\
+    $\gg k, \ll k$ & & arithmetic shifts; $/$ on integers is truncating division \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{algorithm}[H]
+\caption{\textsc{GenZcPreamble}: the ZC block the transmitter emits and the detector cuts its kernel from.}
+\label{alg:zc_gen}
+\begin{algorithmic}[1]
+\Require root $u$, $N$, $L$, $\mathrm{CP}$; loaded bins $3..25$
+\Ensure $\mathrm{CP} + LN$ complex samples
+\State $z[n] \gets \exp\!\big(-j\pi\, u\, n (n + 1) / 23\big)$, $n = 0..22$ \Comment{Eq.~\eqref{eq:zc}, $N_{zc}=23$ odd}
+\State $S[k] \gets 0$ for $k = 0..N{-}1$;\quad $S[3 + n] \gets 2\, z[n]$ \Comment{contiguous bins, no mirror, $\times 2$ gain}
+\State $\mathrm{tile} \gets \mathrm{IFFT}_N(S)$ \Comment{\texttt{numpy.fft.ifft}: includes the $1/N$}
+\State $\mathrm{base} \gets [\mathrm{tile}, \mathrm{tile}, \ldots]$ ($L$ copies) \Comment{periodic in $N$}
+\State \Return $[\mathrm{base}[-\mathrm{CP}:],\ \mathrm{base}]$ \Comment{CP = last 32 samples of the tiled block}
+\end{algorithmic}
+\end{algorithm}
 
 \begin{algorithm}[H]
 \caption{Float ZC detector (\texttt{OFDMModem.detect\_zc\_preamble}), as implemented.}
@@ -295,7 +347,7 @@ $(k_r, k_i)$, and CFO is a 32-bit phase word $w$.
 \State $E_{\mathrm{ref}} \gets \big(\sum_t k_r[t]^2 + k_i[t]^2\big) \gg 15$ \Comment{ROM constant \texttt{ZC\_REF\_ENERGY}}
 \State $\theta_{10} \gets \mathrm{round}(\theta \cdot 1024)$ \Comment{ROM constant \texttt{ZC\_THR\_Q10}}
 \State $\mathrm{best} \gets (\mu^2{=}-1,\ j{=}0,\ w{=}0)$
-\For{$w \in \mathcal{W}$} \Comment{$\{0\}$; or $\pm 15$\,Hz in 5\,Hz steps as phase words}
+\For{$w \in \mathcal{W}$} \Comment{$\mathcal{W} = \{\textsc{HzToPhaseWord}(f) : f \in \mathcal{F}\}$}
     \State $(k'_r, k'_i) \gets \textsc{NcoDerotate}(k_r, k_i, -w)$ \Comment{Q15 kernel rotated by the NCO}
     \For{each position $p$} \Comment{C: sliding window; $\mathrm{mag}$ in a ring of $(n_g{-}1)GN{+}1$}
         \State $a \gets \sum_t I[p{+}t]\,k'_r[t] + Q[p{+}t]\,k'_i[t]$;\quad $b \gets \sum_t Q[p{+}t]\,k'_r[t] - I[p{+}t]\,k'_i[t]$
@@ -316,7 +368,51 @@ $(k_r, k_i)$, and CFO is a 32-bit phase word $w$.
 \State $(d_I, d_Q) \gets \textsc{NcoDerotate}(I[j..j{+}P),\ Q[j..j{+}P),\ w)$ \Comment{C: re-fetched from the source}
 \State $rr \gets \sum_t d_I[t]\,d_I[t{+}N] + d_Q[t]\,d_Q[t{+}N]$;\quad $ri \gets \sum_t d_I[t]\,d_Q[t{+}N] - d_Q[t]\,d_I[t{+}N]$
 \State $\phi \gets \textsc{CordicAtan2}(ri, rr)$ \Comment{angle in phase-word units}
-\State \Return $\text{time} = (j - \mathrm{CP}) + \texttt{ZC\_PRE\_BLOCK\_LEN}$,\ \ $\text{word} = w + \mathrm{round}(\phi / N)$
+\State \Return $\text{time} = (j - \mathrm{CP}) + (\mathrm{CP} + P)$,\ \ $\text{word} = w + \textsc{DivRound}(\phi, N)$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Integer primitives called by Algorithm~\ref{lst:zc_int} (\texttt{ofdm\_phy/fixed/fxp.py}, \texttt{dsp.py}; bit-identical in \texttt{cport/src/}).}
+\label{alg:zc_prims}
+\begin{algorithmic}[1]
+\Function{RshiftRound}{$x$, $k$} \Comment{arithmetic shift, round half up}
+    \State \Return $(x + 2^{k-1}) \gg k$
+\EndFunction
+\Statex
+\Function{DivRound}{$a$, $b$} \Comment{signed round-to-nearest division, $b > 0$}
+    \State \Return $(a + \lfloor b/2 \rfloor) / b$ if $a \ge 0$ else $-\big((-a + \lfloor b/2 \rfloor) / b\big)$
+\EndFunction
+\Statex
+\Function{HzToPhaseWord}{$f$} \Comment{$2^{32}$ words per turn per sample}
+    \State \Return $\mathrm{round}(f / f_s \cdot 2^{32})$
+\EndFunction
+\Statex
+\Function{NcoDerotate}{$I[0..n)$, $Q[0..n)$, $w$, $\phi_0{=}0$} \Comment{multiply by $e^{-j\phi[t]}$}
+    \State ROM: $\cos_{15}[k] \gets \mathrm{round}(32767 \cos(2\pi k/4096))$, $k = 0..4095$ \Comment{Q15 table}
+    \State \hphantom{ROM:} $\sin_{15}[k] \gets \mathrm{round}(32767 \sin(2\pi k/4096))$
+    \For{$t = 0..n{-}1$}
+        \State $\phi \gets (\phi_0 + w\, t) \bmod 2^{32}$;\quad $k \gets \phi \gg 20$ \Comment{top 12 bits address the table}
+        \State $c \gets \cos_{15}[k]$;\quad $s \gets \sin_{15}[k]$
+        \State $I'[t] \gets \textsc{RshiftRound}(I[t]\, c + Q[t]\, s,\ 15)$ \Comment{$(I + jQ)(c - js)$}
+        \State $Q'[t] \gets \textsc{RshiftRound}(Q[t]\, c - I[t]\, s,\ 15)$
+    \EndFor
+    \State \Return $I', Q'$
+\EndFunction
+\Statex
+\Function{CordicAtan2}{$y$, $x$} \Comment{vectoring mode, 16 iterations}
+    \State ROM: $\alpha_i \gets \mathrm{round}\big(\arctan(2^{-i}) \cdot 2^{32} / 2\pi\big)$, $i = 0..15$ \Comment{angle words}
+    \State \hphantom{ROM:} $K_{15} \gets \mathrm{round}\big(2^{15} \big/ \prod_{i} \sqrt{1 + 2^{-2i}}\big)$ \Comment{gain correction}
+    \State $\phi \gets 0$
+    \If{$x < 0$} \Comment{rotate into the right half-plane}
+        \State \textbf{if} $y \ge 0$: $(x, y, \phi) \gets (y, -x, +2^{30})$ \textbf{else} $(x, y, \phi) \gets (-y, x, -2^{30})$
+    \EndIf
+    \For{$i = 0..15$}
+        \State \textbf{if} $y > 0$: $(x, y) \gets (x + (y \gg i),\ y - (x \gg i))$;\ $\phi \gets \phi + \alpha_i$
+        \State \textbf{else}: \ $(x, y) \gets (x - (y \gg i),\ y + (x \gg i))$;\ $\phi \gets \phi - \alpha_i$
+    \EndFor
+    \State \Return $\phi$ (angle word), $(x \cdot K_{15}) \gg 15$ (magnitude)
+\EndFunction
 \end{algorithmic}
 \end{algorithm}
 
