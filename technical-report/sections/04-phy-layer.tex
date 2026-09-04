@@ -1334,3 +1334,193 @@ peak-normalized quantization of the parity path already compresses the
 LLRs enough that the fixed receiver matches or beats the recalibrated
 float one at $-9/-10$\,dB, and the calibrated mode buys a stable
 cross-frame scale for HARQ rather than packet error rate.
+
+\subsection{The Decoders, Exactly: Soft Viterbi and IRA LDPC}
+\label{sec:dec_exact}
+
+Section~\ref{sec:coding} gives the codes and their measured
+performance; this subsection gives the encoders and decoders as
+procedures, in the same form as the preceding ones.
+Table~\ref{tab:dec_notation} defines the symbols;
+Algorithms~\ref{alg:conv_enc} and~\ref{alg:depunct} are the
+convolutional encoder and the depuncturer; Algorithm~\ref{alg:viterbi}
+is the Viterbi decoder that all three implementations share, with the
+integer chain's storage marked; Algorithms~\ref{alg:ira_build}
+and~\ref{alg:ldpc_enc} construct and encode the IRA code; and
+Algorithm~\ref{alg:minsum} is the normalized min-sum decoder in its
+float and integer forms.  The header block always goes through
+Algorithm~\ref{alg:viterbi} at rate 1/3; the data block goes through
+whichever the header's \texttt{ver} field names.
+
+\begin{table}[H]
+    \centering
+    \caption{Notation of Algorithms~\ref{alg:conv_enc}--\ref{alg:minsum}.}
+    \label{tab:dec_notation}
+    \small
+    \begin{tabular}{@{}lp{4.4cm}p{7.6cm}@{}}
+    \toprule
+    \textbf{Symbol} & \textbf{Value} & \textbf{Meaning} \\
+    \midrule
+    $K_c$ & 7 & constraint length; $S = 2^{K_c - 1} = 64$ states; tail $K_c - 1 = 6$ zero bits \\
+    $g_0, g_1, g_2$ & $133, 171, 165$ (octal) & generator polynomials; mother rate 1/3, three outputs per input bit \\
+    $\mathbf{M}_r$ & $3 \times P_r$ 0/1 & puncture mask of rate $r$; $P_r$ its period (1, 2, 2, 3 for rates 1/3, 1/2, 2/3, 3/4) \\
+    $\mathbf{M}_{1/2}$, $\mathbf{M}_{2/3}$, $\mathbf{M}_{3/4}$ & $\begin{smallmatrix}1&1\\1&0\\0&1\end{smallmatrix}$,\ $\begin{smallmatrix}1&1\\1&0\\0&0\end{smallmatrix}$,\ $\begin{smallmatrix}1&1&1\\1&0&0\\0&0&0\end{smallmatrix}$ & rows = outputs $g_0, g_1, g_2$; columns = input-bit phase \\
+    $E[s, b, p]$ & $\pm 1$ & expected symbol of output $p$ leaving state $s$ on input $b$; $+1 \Leftrightarrow$ coded bit 1 \\
+    $\Lambda$ & LLR, positive $=$ 1 & the package's sign convention (Section~\ref{sec:phy}) \\
+    $n_{\mathrm{steps}}$ & $n_{\mathrm{bits}} + 6$ & trellis steps, including the tail \\
+    $N, K_{\mathrm{nom}}, M$ & 768, 256, 512 & LDPC length, nominal information bits, parity bits (= checks) \\
+    $d_v$, $d_c$ & 4; 3 or 4 & info-column weight; check degree (2 info edges $+$ 1 or 2 accumulator edges) \\
+    $\alpha$ & 0.8 (float); $x - (x \gg 2) = 0.75$ (int) & min-sum normalization \\
+    $I_{\max}$ & 60 & iterations before giving up \\
+    $\Lambda_{\mathrm{pin}}$ & 1000 (float); $\max(4 \max|\Lambda|, 1024)$ (int) & the ``known zero'' LLR of a shortened position \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{algorithm}[H]
+\caption{\textsc{ConvEncode} (\texttt{ConvCodecPunctured.encode}; \texttt{conv\_encode}).}
+\label{alg:conv_enc}
+\begin{algorithmic}[1]
+\Require information bits $u[0..n_{\mathrm{bits}})$; rate $r$
+\Ensure punctured coded bits
+\State $u \gets [u,\ 0 \times 6]$ \Comment{zero tail flushes the register}
+\State $\mathrm{state} \gets 0$;\quad $k \gets 0$
+\For{each bit $b$ of $u$}
+    \State $\mathrm{state} \gets ((\mathrm{state} \ll 1) \,|\, b) \,\&\, (2^{K_c} - 1)$ \Comment{7-bit shift register}
+    \For{$p = 0, 1, 2$} $\ c[k{+}p] \gets \mathrm{parity}(\mathrm{state} \,\&\, g_p)$ \EndFor;\quad $k \gets k + 3$
+\EndFor
+\State \Return $[\,c[3e + p] : e = 0..n_{\mathrm{steps}}{-}1,\ p = 0..2,\ \mathbf{M}_r[p,\ e \bmod P_r] = 1\,]$ \Comment{puncture: keep where the mask is 1, in element order}
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{\textsc{Depuncture}.}
+\label{alg:depunct}
+\begin{algorithmic}[1]
+\Require received LLRs $\Lambda$, cropped by the caller to the code's element count; rate $r$; $n_{\mathrm{bits}}$
+\Ensure $3 n_{\mathrm{el}}$ soft values, $n_{\mathrm{el}} = n_{\mathrm{steps}}$ rounded up to a multiple of $P_r$
+\State $d \gets 0$ ($3 n_{\mathrm{el}}$ entries);\quad $k \gets 0$
+\For{$e = 0..n_{\mathrm{el}}{-}1$, $p = 0..2$}
+    \State \textbf{if} $\mathbf{M}_r[p, e \bmod P_r] = 1$ \textbf{and} $k < |\Lambda|$: $d[3e + p] \gets \Lambda[k]$;\ $k \gets k + 1$ \Comment{punctured: stays 0}
+\EndFor
+\State \Return $d$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Soft-decision Viterbi (float, fixed-point and C).}
+\label{alg:viterbi}
+\begin{algorithmic}[1]
+\Require depunctured soft values $d$; $n_{\mathrm{bits}}$; $E$
+\Ensure $n_{\mathrm{bits}}$ decoded bits
+\State $n_{\mathrm{steps}} \gets n_{\mathrm{bits}} + 6$;\quad pad $d$ with zeros to $3 n_{\mathrm{steps}}$
+\State \textbf{trellis:} for $s = 0..63$: $b_s \gets s \,\&\, 1$;\ $\mathrm{prev}_0(s) \gets s \gg 1$;\ $\mathrm{prev}_1(s) \gets (s \gg 1) + 32$ \Comment{LSB = the input bit}
+\State $\mathrm{pm}[s] \gets -\infty$ (float) or $-2^{30}$ (int);\quad $\mathrm{pm}[0] \gets 0$ \Comment{the encoder started in state 0}
+\For{$t = 0..n_{\mathrm{steps}}{-}1$} \Comment{add--compare--select}
+    \State $\mathbf{r} \gets d[3t .. 3t{+}3)$
+    \For{$s = 0..63$}
+        \State $\beta_0 \gets \sum_p E[\mathrm{prev}_0(s), b_s, p]\, r_p$;\quad $\beta_1 \gets \sum_p E[\mathrm{prev}_1(s), b_s, p]\, r_p$ \Comment{adds only}
+        \State $m_0 \gets \mathrm{pm}[\mathrm{prev}_0(s)] + \beta_0$;\quad $m_1 \gets \mathrm{pm}[\mathrm{prev}_1(s)] + \beta_1$
+        \State $\mathrm{pm}'[s] \gets \max(m_0, m_1)$;\quad $\mathrm{tb}[t, s] \gets [m_0 < m_1]$ \Comment{ties to $\mathrm{prev}_0$; C: one bit per state}
+    \EndFor
+    \State $\mathrm{pm} \gets \mathrm{pm}'$ \Comment{no renormalization needed: $261 \times 3 \cdot 31 < 2^{15}$}
+\EndFor
+\State $s \gets \arg\max_s \mathrm{pm}[s]$ \Comment{first maximum on ties; state 0 on a clean decode}
+\For{$t = n_{\mathrm{steps}}{-}1 \ldots 0$} \Comment{traceback}
+    \State $\hat u[t] \gets s \,\&\, 1$;\quad $s \gets (s \gg 1) + 32 \cdot \mathrm{tb}[t, s]$
+\EndFor
+\State \Return $\hat u[0..n_{\mathrm{bits}})$
+\end{algorithmic}
+\end{algorithm}
+
+Three properties of Algorithm~\ref{alg:viterbi} are used elsewhere in
+this report.  The branch metric is a correlation with $\pm 1$ symbols,
+so the path metric is \emph{linear} in the LLRs and any common scale
+factor --- the temperature $\alpha$ of \S\ref{sec:est_cal_exact}, the
+block exponent of Algorithm~\ref{alg:demod_int} --- leaves the decision
+unchanged; that is why temperature scaling cannot help Viterbi and the
+monotone map can (Section~\ref{sec:llr}), and why the integer chain
+needs no per-symbol noise estimate.  The float, fixed-point and C
+decoders are the same algorithm on the same trellis and differ only
+in the type of $d$ (\texttt{float64}, int64 from 6- or 8-bit LLRs,
+\texttt{int32}) and in how the traceback is stored --- the C port's
+one bit per state per step is what took the decoder's state from 181
+to 42\,kB (\S\ref{sec:cport_memory}) without changing a decision.
+And the tie rule and the argmax rule are stated because they are what
+bit-exactness across three implementations actually rests on.
+
+\begin{algorithm}[H]
+\caption{\textsc{IraBuild} (\texttt{ldpc.\_build}): the parity-check matrix $H = [H_u \,|\, H_{\mathrm{acc}}]$, seed 20260816.}
+\label{alg:ira_build}
+\begin{algorithmic}[1]
+\Ensure $H$ ($512 \times 768$), per-check info columns, edge lists
+\State $\mathrm{cap}[c] \gets 2$ for $c = 0..511$ \Comment{every check takes exactly two info edges: $d_v K_{\mathrm{nom}} = 1024 = 2M$}
+\For{$v = 0..255$} \Comment{info columns}
+    \Repeat \Comment{up to 4000 draws; constraints relax after 2000 and 3000}
+        \State draw $d_v = 4$ distinct checks from those with $\mathrm{cap} > 0$, sorted
+        \State reject if any two are adjacent \Comment{a 4-cycle with the accumulator's dual diagonal}
+        \State reject if any pair of them was already used by an earlier column \Comment{an info--info 4-cycle}
+    \Until{accepted}
+    \State $H[\text{checks}, v] \gets 1$;\ $\mathrm{cap}[\text{checks}] \gets \mathrm{cap} - 1$;\ record the pairs
+\EndFor
+\State $H[c, 256 + c] \gets 1$;\quad $H[c, 256 + c - 1] \gets 1$ for $c > 0$ \Comment{dual-diagonal accumulator: $H_{\mathrm{acc}}$}
+\State \Return $H$; $\mathrm{chk\_info}[c]$ = the info columns of check $c$; $\mathrm{ev}[c]$ = all columns of check $c$ (3 or 4)
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{\textsc{LdpcEncode} (\texttt{LDPCCodec.encode}) with shortening.}
+\label{alg:ldpc_enc}
+\begin{algorithmic}[1]
+\Require information bits $u[0..k)$, $k \le 256$
+\Ensure $N - (256 - k)$ transmitted bits
+\State $\mathrm{info} \gets [u,\ 0 \times (256 - k)]$ \Comment{shortened positions are known zeros}
+\State $q[c] \gets \bigoplus_{v \in \mathrm{chk\_info}[c]} \mathrm{info}[v]$, $c = 0..511$ \Comment{XOR of each check's info bits}
+\State $p[c] \gets p[c{-}1] \oplus q[c]$, $p[-1] = 0$ \Comment{the accumulator: linear-time encoding}
+\State $\mathrm{cw} \gets [\mathrm{info},\ p]$
+\State \Return $\mathrm{cw}$ without positions $k..255$ \Comment{the transmit positions; the receiver knows them from $k$}
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Normalized min-sum: float ($\alpha = 0.8$) and integer ($x - (x \gg 2)$).}
+\label{alg:minsum}
+\begin{algorithmic}[1]
+\Require received LLRs $\Lambda$ (package convention, positive $= 1$); $k$
+\Ensure $k$ decoded bits
+\State $L \gets 0$;\ $L[\text{transmit positions}] \gets \Lambda$ (zero-padded if short);\ $L[k..256) \gets -\Lambda_{\mathrm{pin}}$ \Comment{shortened: strongly 0}
+\State $L \gets -L$ \Comment{one negation at the boundary: inside, positive means bit 0}
+\State $v2c[c, j] \gets L[\mathrm{ev}[c][j]]$ for every edge $(c, j)$ \Comment{start from the channel LLRs}
+\State $\hat b \gets [L < 0]$
+\For{$i = 1..I_{\max}$}
+    \For{each check $c$} \Comment{check-node update}
+        \State $\sigma_j \gets \mathrm{sign}(v2c[c, j])$;\quad $\Pi \gets \prod_j \sigma_j$ \Comment{$\mathrm{sign}(0) = +1$}
+        \State $m_1 \gets \min_j |v2c[c, j]|$ at $j_1$;\quad $m_2 \gets \min_{j \ne j_1} |v2c[c, j]|$
+        \State $c2v[c, j] \gets \Pi\, \sigma_j \cdot \alpha \cdot (m_2 \text{ if } j = j_1 \text{ else } m_1)$ \Comment{int: $\alpha m = m - (m \gg 2)$}
+    \EndFor
+    \State $\mathrm{tot}[n] \gets L[n] + \sum_{(c, j):\, \mathrm{ev}[c][j] = n} c2v[c, j]$ \Comment{a posteriori LLR}
+    \State $\hat b \gets [\mathrm{tot} < 0]$
+    \If{$\bigoplus_{j} \hat b[\mathrm{ev}[c][j]] = 0$ for every $c$} \Return $\hat b[0..k)$ \Comment{zero syndrome: early exit} \EndIf
+    \State $v2c[c, j] \gets \mathrm{tot}[\mathrm{ev}[c][j]] - c2v[c, j]$ \Comment{extrinsic}
+\EndFor
+\State \Return $\hat b[0..k)$ \Comment{after $I_{\max}$: the CRC will reject a wrong word}
+\end{algorithmic}
+\end{algorithm}
+
+Two details of Algorithm~\ref{alg:minsum} are choices, not
+transcription of min-sum.  The shortened positions are pinned with a
+\emph{finite} strong LLR rather than treated as absent: it keeps the
+check-node arithmetic uniform, and in the integer form the pin is
+scaled to the block ($4 \times$ its largest LLR, at least 1024) so it
+stays the strongest message without overflowing the int64 minimum
+search.  And the normalization constant differs between the float and
+integer kernels --- 0.8 against 0.75 --- because the integer one is
+chosen to be a shift and a subtract; Section~\ref{sec:coding} measured
+the integer kernel against the float one on the same frames and found
+nothing measurable given up.  The
+scale-invariance of the whole procedure --- every operation is a sign,
+a minimum, a fixed scaling or an addition --- is why min-sum was
+shipped in preference to exact sum-product on LLRs whose scale the
+front end only estimates, and why, once the LLRs are calibrated
+(\S\ref{sec:est_cal_exact}), the two kernels come out at parity
+(Section~\ref{sec:coding}).
