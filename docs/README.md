@@ -14,7 +14,7 @@ fixed-point RTL reference.
 | [drivers.md](drivers.md) | Channel drivers: virtual channel, SDR, USB host transports |
 | [console.md](console.md) | `ofdm_console` and `board_console.py`: modes, commands, behaviors |
 | [usb-protocol.md](usb-protocol.md) | USB transport: enumeration, framing, frame types, payload layouts |
-| [modem-protocol.md](modem-protocol.md) | The modem's command/event model a host application implements |
+| [modem-protocol.md](modem-protocol.md) | RFC-style specification of the host protocol: framing, every command/event, structure offsets, registries, compatibility rules |
 | [fixed-point.md](fixed-point.md) | Integer RTL reference model |
 | [c-port-plan.md](c-port-plan.md) | Plan: pure-C port of the fixed model + DSP/MCU feasibility gates |
 | [performance.md](performance.md) | All measured results in one place |

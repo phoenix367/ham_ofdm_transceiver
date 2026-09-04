@@ -53,19 +53,23 @@ Device → host:
 | 0x84 | `EVT_DIAG` | `ev:u8, a..d:i32le, t_ms:u32le` — off by default (`diag_stream`), shed before anything else under backpressure |
 | 0x85 | `RSP_PONG` | echoed token |
 | 0x86 | `EVT_LOG` | UTF-8 text, no terminator |
-| 0x87 | `EVT_AUDIO` | int16le samples, debug tap, off by default |
+| 0x87 | `EVT_AUDIO` | reserved (a sample tap no firmware emits) |
 | 0x88 | `EVT_BCAST` | received broadcast, streamed — see below |
 
 ## `CMD_BCAST` — chunked broadcast source
 
-`ptype`'s low nibble is the payload type (0 telemetry … 15 opaque).
-Two high bits make the source chunk-fed, so a file larger than the
-board's 8 kB source buffer streams from the host:
+`ptype`'s low nibble is the payload type (0 telemetry, 1/2 Codec2
+700/450, 3 LSCodec-25Hz, 15 opaque — a label, not a demux). Three high
+bits shape the source:
 
 | bit | meaning |
 |---|---|
 | 7 | more chunks follow |
 | 6 | continuation of the broadcast in flight |
+| 5 | real time: key what is queued, do not wait for a full group; no block/stats pauses |
+
+Bits 7 and 6 make the source chunk-fed, so a file larger than the
+board's 8 kB source buffer streams from the host.
 
 Both clear = the classic one-shot broadcast. `rung` 0xFF asks the board
 to choose (hold-and-probe applies); 0..12 pins it. The host paces
@@ -88,7 +92,7 @@ SUBMIT (0 from older firmware ⇒ assume 256, and the host's own buffer
 must actually match what it advertises). `caps` bits: LDPC(0),
 EXT_FRAMES(1), BURST(2), AUDIO_TAP(3), BCAST(4).
 
-## `up_status_t` (43 B)
+## `up_status_t` (44 B)
 
 `rung:i32, snr_q8:i32, tx_frames:u32, rx_frames:u32, timeouts:u32,
 retransmissions:u32, q_ctl:u16, q_inter:u16, q_bulk:u16, busy:u8,
@@ -100,7 +104,9 @@ free bytes in the broadcast source buffer, the chunk-pacing signal,
 then `temp_q8:i16` — the die temperature in Q8 °C from the part's own
 sensor, or `UP_TEMP_NONE` (−32768) where there is none — then
 `rung_now:i8`, the rung the **next** frame would go out at (−1 = none
-yet, `UP_RUNG_ABSENT` = older firmware omitted it). `rung` at the head
+yet, `UP_RUNG_ABSENT` = older firmware omitted it), then
+`peer_codecs:u8` — the `CODEC_*` bitmap the peer declared it can decode
+(0 = it never said, NOT "supports none"). `rung` at the head
 of the frame is the last rung actually *transmitted* and can be hours
 stale, which is why both are carried: an overnight-idle station
 reported `rung 12` and then sent at rung 0. Older firmware
@@ -127,7 +133,10 @@ worked.
 | 6 | `anchor` | 0/1, AFC reference |
 | 7 | `diag_stream` | 0/1, default off |
 | 8 | `win_max` | streamed-window ceiling accepted and sent |
+| 9 | `codecs` | `CODEC_*` bitmap the attached host can decode (bit 0 LSCodec-25Hz, 1 Codec2 700, 2 Codec2 450) |
 
-`rung_ceiling` and `win_max` are also declared to the peer in the
-over-the-air capability record; changing either while the peer is known
-pushes a refreshed record immediately.
+`rung_ceiling`, `win_max` and `codecs` are also declared to the peer in
+the over-the-air capability record (11 B, accepted from 10 — it grows
+without a version bump); changing the first two while the peer is known
+pushes a refreshed record immediately. Key 5 is registered but no
+shipped firmware acts on it.
