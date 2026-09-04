@@ -78,7 +78,7 @@ static const uint8_t OFDM_USB_CONFIG_DESC[OFDM_USB_CONFIG_LEN] = {
     1,                           /* bConfigurationValue */
     0,                           /* iConfiguration */
     0x80,                        /* bus powered, no remote wakeup */
-    100,                         /* 200 mA */
+    50,                          /* 100 mA, as TinyUSB emits it */
 
     /* interface */
     9, 0x04,

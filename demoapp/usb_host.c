@@ -11,6 +11,10 @@
 #define PID 0x0001
 #define EP_OUT 0x01
 #define EP_IN 0x81
+/* bInterfaceProtocol is the framing version ON THE WIRE (usb_desc.h):
+ * a future incompatible framing is told apart here, before anything is
+ * opened, rather than by parsing garbage from the first byte. */
+#define IF_PROTOCOL 1
 #define USBH_WRITE_TIMEOUT_MS 5000
 
 struct usbh {
@@ -19,6 +23,22 @@ struct usbh {
     char serial[64];
     int stale;
 };
+
+/* interface 0 alt 0's bInterfaceProtocol, or -1 if the configuration
+ * cannot be read (the test PID is shared with other prototypes, and a
+ * stranger's descriptor may be anything) */
+static int if_protocol(libusb_device *dev)
+{
+    struct libusb_config_descriptor *c;
+    int v = -1;
+    if (libusb_get_active_config_descriptor(dev, &c) != 0
+        && libusb_get_config_descriptor(dev, 0, &c) != 0)
+        return -1;
+    if (c->bNumInterfaces >= 1 && c->interface[0].num_altsetting >= 1)
+        v = c->interface[0].altsetting[0].bInterfaceProtocol;
+    libusb_free_config_descriptor(c);
+    return v;
+}
 
 static int get_serial(libusb_device_handle *h, char *out, int cap)
 {
@@ -70,7 +90,8 @@ int usbh_list(void)
         libusb_device_handle *h;
         char ser[64] = "<unreadable>";
         if (libusb_get_device_descriptor(list[i], &d) != 0
-            || d.idVendor != VID || d.idProduct != PID)
+            || d.idVendor != VID || d.idProduct != PID
+            || if_protocol(list[i]) != IF_PROTOCOL)
             continue;
         if (libusb_open(list[i], &h) == 0) {
             get_serial(h, ser, sizeof(ser));
@@ -114,6 +135,13 @@ usbh_t *usbh_open(const char *serial)
         if (libusb_get_device_descriptor(list[i], &d) != 0
             || d.idVendor != VID || d.idProduct != PID)
             continue;
+        if (if_protocol(list[i]) != IF_PROTOCOL) {
+            fprintf(stderr, "skipping a 1209:0001 device whose interface "
+                            "protocol is %d, not %d (not this modem, or "
+                            "an incompatible framing)\n",
+                    if_protocol(list[i]), IF_PROTOCOL);
+            continue;
+        }
         if (libusb_open(list[i], &h) != 0)
             continue;
         get_serial(h, ser, sizeof(ser));

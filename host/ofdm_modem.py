@@ -39,6 +39,7 @@ from collections import deque
 VID = 0x1209          # pid.codes
 PID = 0x0001          # TEST pid -- see cport/src/usb_desc.h
 EP_OUT, EP_IN = 0x01, 0x81
+IF_PROTOCOL = 1       # bInterfaceProtocol = framing version (usb_desc.h)
 
 SYNC = b"\xA5\x5A"
 HDR = 5
@@ -214,6 +215,21 @@ except ImportError:        # pragma: no cover - exercised without pyusb
         pass
 
 
+def _if_protocol(dev):
+    """interface 0 alt 0's bInterfaceProtocol, or -1 if unreadable"""
+    try:
+        cfg = dev.get_active_configuration()
+    except Exception:
+        try:
+            cfg = dev[0]
+        except Exception:
+            return -1
+    try:
+        return cfg[(0, 0)].bInterfaceProtocol
+    except Exception:
+        return -1
+
+
 def _read_serial(dev, get_string=None, tries=10, delay=0.3):
     """The device's serial string, or None -- retried, and un-poisoned.
 
@@ -267,6 +283,16 @@ class _UsbTransport:
                 "(--emulate).") from None
         matches = list(usb.core.find(find_all=True, idVendor=VID,
                                      idProduct=PID))
+        # bInterfaceProtocol is the framing version on the wire: a
+        # device with another value is a stranger on the shared test
+        # PID, or a modem whose framing this driver cannot parse.
+        # Either is told apart HERE, not by decoding garbage.
+        strangers = [d for d in matches if _if_protocol(d) != IF_PROTOCOL]
+        for d in strangers:
+            print(f"skipping 1209:0001 device with interface protocol "
+                  f"{_if_protocol(d)} (this driver speaks {IF_PROTOCOL})",
+                  file=sys.stderr)
+        matches = [d for d in matches if d not in strangers]
         if not matches:
             raise RuntimeError(
                 f"no OFDM modem on the bus ({VID:04x}:{PID:04x}). "
