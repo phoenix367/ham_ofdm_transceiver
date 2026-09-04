@@ -63,6 +63,16 @@
     tabsize=2,
 }
 
+% Pseudocode (algorithmicx from texmf/, the float defined here so the
+% algorithms bundle is not needed)
+\usepackage{algpseudocode}
+\floatstyle{ruled}
+\newfloat{algorithm}{H}{loa}
+\floatname{algorithm}{Algorithm}
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algrenewcommand\algorithmicensure{\textbf{Output:}}
+\algrenewcommand{\algorithmiccomment}[1]{\hfill{\footnotesize$\triangleright$ \textit{#1}}}
+
 % Tables
 \usepackage{array}
 \usepackage{booktabs}

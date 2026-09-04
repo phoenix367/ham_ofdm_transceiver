@@ -10,7 +10,8 @@ BUILD_DIR = build
 PDF = $(BUILD_DIR)/$(MAIN).pdf
 PDF_OUT = $(BUILD_DIR)/OFDM_Transceiver_Technical_Report.pdf
 
-# LaTeX compiler
+# LaTeX compiler (texmf/ holds vendored packages, see texmf/README.md)
+export TEXINPUTS := ./texmf:$(TEXINPUTS)
 LATEX = pdflatex
 BIBTEX = bibtex
 LATEX_FLAGS = -output-directory=$(BUILD_DIR) -interaction=nonstopmode
