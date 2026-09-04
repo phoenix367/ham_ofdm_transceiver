@@ -72,8 +72,18 @@ NOT described here except where its state is surfaced to the host (§10,
 
 ## 2. Conventions and notation
 
-The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be
-interpreted as in RFC 2119.
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+"OPTIONAL" in this document are to be interpreted as described in BCP 14
+[RFC 2119] [RFC 8174] when, and only when, they appear in all capitals,
+as shown here.
+
+Following RFC 2119 §6, these imperatives are used only where a behaviour
+is required for the two ends to interoperate or where departing from it
+has been measured to cause harm (lost frames, a wedged endpoint, a
+truncated transmission). Everything else -- how the reference host
+happens to do something -- is stated in plain prose and binds nobody.
+§16 lists what goes wrong when a requirement is not met.
 
 - `u8`, `u16le`, `u32le`, `i8`, `i16le`, `i32le`: unsigned/signed
   integers of the given width; all multi-byte fields are
@@ -116,8 +126,9 @@ listening (§7.3), so its IN endpoint is armed with a frame at essentially
 any moment a host opens it.
 
 On open a host MUST **drain** EP_IN -- read and discard until the device
-has been quiet for at least 150 ms (bounded, 2 s in the reference host)
--- and SHOULD report the count of discarded bytes. A host MUST NOT issue
+has been quiet for at least 150 ms (bounded, 2 s in the reference host).
+The reference host reports the number of discarded bytes. A host MUST
+NOT issue
 `clear_halt` on EP_IN as an opening step: it desynchronises the device
 stack's software state from the hardware transfer and wedges the endpoint
 after exactly one packet (measured; `cport/usb/README.md`, "What the
@@ -131,26 +142,29 @@ delivered.
 A control transfer issued while the device is pushing bulk data can
 transiently fail, and pyusb caches a failed language-ID fetch, after
 which every later string read on that handle fails instantly. A host
-reading the serial string MUST retry (reference: 10 × 300 ms) and MUST
-clear the library's cached language IDs between attempts. The retry
-budget is sized by the device's worst blocking receive burst (§15).
+MUST tolerate a transient failure of the serial-string read by
+retrying it for at least the device's worst blocking receive burst
+(§15; the reference host retries 10 × 300 ms). Implementation note: a
+retry through pyusb is a no-op unless the handle's cached language IDs
+(`dev._langids`) are cleared between attempts.
 
 ### 3.5 Host write timeout
 
 The device may block for up to ~2.3 s inside a single receive commit
 (§15) during which it is not reading its OUT endpoint. A host's write
-timeout MUST exceed that; the reference hosts use 5000 ms. A host MAY
-retry only a write that moved **zero** bytes; retrying a partially
-written frame desynchronises the device parser.
+timeout MUST exceed that; the reference hosts use 5000 ms. A host MUST
+NOT retry a timed-out write that moved any bytes -- repeating a partial
+frame desynchronises the device parser -- and MAY retry one that moved
+none.
 
 ### 3.6 Host liveness
 
 The device considers a host **attached** if any command frame has
 arrived within `HOST_ALIVE_MS` = 3000 ms. Attachment drives only
 indication (the LED's "host attached" state); it gates no protocol
-behaviour. A host that wants the indication SHOULD send `CMD_PING`
-once per second. Merely holding the USB handle open does not count:
-closing a program unmounts nothing.
+behaviour. A host that wants the indication MAY send `CMD_PING` at any
+period under 3 s; the reference hosts use 1 s. Merely holding the USB
+handle open does not count: closing a program unmounts nothing.
 
 ## 4. Framing
 
@@ -226,9 +240,9 @@ liveness signal of §3.6.
 
 ### 6.1 `CMD_INFO` (0x01)
 
-Payload: none. The device MUST answer with `RSP_INFO` (§8.1). A host
-SHOULD issue this at attach and size its buffers from `msg_max` rather
-than assuming.
+Payload: none. The device MUST answer with `RSP_INFO` (§8.1). The
+answer is the only source of `msg_max`, from which a host MUST size its
+message buffers (§8.1); the reference hosts send it at attach.
 
 ### 6.2 `CMD_SUBMIT` (0x02)
 
@@ -271,9 +285,9 @@ Two forms.
 config: rung_ceiling N  win_max N  burst_window N  burst_stream N  anchor N  diag_stream N  freq_trim_hz N
 ```
 
-The settings live on the board; a host cache would lie after a reattach,
-so a host SHOULD query rather than remember. (`codecs`, key 9, is not
-included in the query line.)
+The settings live on the board and survive a host reattach, so a host
+cache of them lies after one; the reference consoles query instead of
+remembering. (`codecs`, key 9, is not included in the query line.)
 
 **Set** -- payload `key:u8, value:i32le` (`len` ≥ 5):
 
@@ -360,8 +374,9 @@ The four token bytes of the `CMD_PING` being answered.
 
 UTF-8 text, no terminator, at most 256 bytes. Carries human-readable
 board decisions and refusals. Several are protocol-significant and are
-listed where they arise (§6.2, §6.3, §10). A host SHOULD display them
-verbatim.
+listed where they arise (§6.2, §6.3, §10); a host that acts on one MUST
+match the text exactly as given there. The reference consoles display
+every line verbatim.
 
 ### 7.7 `EVT_AUDIO` (0x87)
 
@@ -378,7 +393,7 @@ A received broadcast, streamed. Layout and semantics §10.4.
 
 All structures are little-endian and fixed-size. Each has a **minimum
 decodable length** below which a decoder MUST reject the payload, and
-fields beyond that minimum are **optional-by-length** (§14).
+fields beyond that minimum are **present-by-length** (§14).
 
 ### 8.1 `up_info_t` -- 26 bytes
 
@@ -435,8 +450,8 @@ Minimum decodable length: **32**. Decoding rules for shorter frames
 
 `rung` and `rung_now` are both carried on purpose: an overnight-idle
 station reported `rung 12` (the last transmission) and then sent at rung
-0 (what the decayed ladder would actually use). A host MUST use
-`rung_now` when it needs the rung a transmission will take.
+0 (what the decayed ladder would actually use). A host MUST NOT read
+`rung` as the rung the next transmission will take; that is `rung_now`.
 
 `peer_codecs` = 0 means the peer **never said** -- a peer predating the
 field, or one whose host never configured `codecs` -- and MUST NOT be
@@ -478,8 +493,10 @@ Keys 0 and 10–255 are unassigned and MUST be ignored by the device.
 
 `codecs` exists because the board has no codec of its own -- it moves
 bytes -- so the only party that can answer "what voice can you play?" is
-the program across USB. A host that decodes a voice codec SHOULD set it
-at attach.
+the program across USB. A host that decodes a voice codec SHOULD set
+the bit before the peer's capability record is exchanged (in practice,
+at attach); a bit set later reaches the peer only with the next
+refreshed record, and until then the peer reads "never said" (§8.2).
 
 ## 10. Broadcast
 
@@ -514,8 +531,8 @@ streams from the host.
 - The first chunk has CONT = 0 and MORE = 1: it **starts** a stream.
 - Later chunks have CONT = 1; the last has MORE = 0, which is what
   completes the stream -- EOS then lands on its real last frame.
-- A CONT chunk with no broadcast in flight MUST be ignored (a stray
-  continuation must not seed a new stream with garbage).
+- A CONT chunk with no broadcast in flight MUST be ignored, so that a
+  stray continuation cannot seed a new stream with garbage.
 - A CONT chunk that does not fit even after the sent prefix is compacted
   is a **host pacing failure**: the board MUST drop the **entire**
   queued broadcast rather than corrupt its byte stream, and emit
@@ -550,8 +567,9 @@ ladder's staleness decay, one rung per 90 s), the broadcast is **held**
 while control probes bring the ladder up, released at NORMAL, dropped
 with a log line after 180 s. The board logs `broadcast: held -- link is
 idle, probing to bring it up (release at NORMAL, give up after 180 s)`.
-A host that must not be held (push-to-talk) SHOULD warm the link with
-an ARQ exchange first (§10.6). A new `CMD_BCAST` clears a pending hold.
+A host for which a hold is unacceptable (push-to-talk) SHOULD NOT start
+a broadcast on a decayed link; §10.6 describes how the reference host
+avoids it. A new `CMD_BCAST` clears a pending hold.
 
 On every start the board emits `EVT_LOG` with what it chose: rung, group
 geometry, and total air-time estimate (`broadcast: N B at rung R (MODE),
@@ -633,13 +651,15 @@ first.
 
 A broadcast refreshes nothing at the peer (the peer says nothing back),
 so a station's rung memory decays through a long broadcast or a pause
-exactly as through silence. A host running a real-time source SHOULD
-perform an ARQ exchange (a `CMD_SUBMIT` the peer answers) before
-starting a broadcast if the peer has been silent longer than ~60 s,
-and SHOULD wait for that exchange to **finish** -- `pending` clear and
-queues empty in `EVT_STATUS` -- before keying: the link is half duplex,
-and a broadcast started while the peer is still keying its
-acknowledgement goes out into a deaf receiver.
+exactly as through silence. Two consequences bind a host running a
+real-time source. It SHOULD NOT start a broadcast while `EVT_STATUS`
+shows `pending` set or a non-empty queue: the link is half duplex, and
+a broadcast keyed while the peer is still answering the previous
+exchange goes out into a deaf receiver. And it SHOULD NOT start one on
+a link the board would hold (§10.1). The reference host satisfies both
+by performing an ARQ exchange (a `CMD_SUBMIT` the peer answers) when
+the peer has been silent longer than ~60 s, then waiting for `pending`
+to clear and the queues to empty before keying.
 
 ## 11. Application envelopes
 
@@ -667,9 +687,10 @@ than misparsing a valid-looking one. Compression is applied to the
 **whole file** before splitting; per-part compression throws the ratio
 away (measured 2.82× on a 14 kB config file).
 
-One part is one station message. Parts SHOULD be **window-aligned**:
-split at `peer_win_max × 200` minus the envelope head, so each part is an
-exact multiple of the 200-byte fragment and costs exactly one
+One part is one station message. Any part size up to the peer's
+`msg_max` interoperates; throughput favours **window-aligned** parts,
+split at `peer_win_max × 200` minus the envelope head, so each part is
+an exact multiple of the 200-byte fragment and costs exactly one
 acknowledgement. Measured: 2048-byte parts 87 B/s (3 acks/part), aligned
 1600-byte parts 102 B/s. The first transfer to a stranger still splits
 conservatively (window 8): the capability handshake is triggered *by*
@@ -687,7 +708,7 @@ not in the ARQ envelope. The host-side pipeline is documented in
 The stations exchange an 11-byte capability record over the air
 (`FLAG_CAPS` frames; `link.md`). It is not a USB structure, but its
 contents are surfaced in `EVT_STATUS` (§8.2) and two of its fields are
-sourced from `CMD_CONFIG` (§9), so a host must know its shape:
+sourced from `CMD_CONFIG` (§9), so a host needs to know its shape:
 
 | byte | field | surfaced as |
 |---|---|---|
@@ -766,11 +787,11 @@ looks like a wedged firmware and is arithmetic.
 
 ### 14.4 Two languages
 
-The protocol's sizes exist in C (`cport/src/usb_proto.h`) and Python
-(`host/ofdm_modem.py`) and MUST move together. A mismatch fails
-**silently in the direction that matters**: a host whose `MAX_PAYLOAD`
-is smaller than the device's treats every larger frame as garbage and
-resynchronises past it.
+Every implementation's payload cap MUST equal `UP_MAX_PAYLOAD` (§4.1).
+The reference sizes exist in C (`cport/src/usb_proto.h`) and Python
+(`host/ofdm_modem.py`); a mismatch fails **silently in the direction
+that matters**: a host whose cap is smaller than the device's treats
+every larger frame as garbage and resynchronises past it.
 
 ### 14.5 Registries
 
@@ -784,7 +805,7 @@ can grow.
 |---|---|---|
 | status push period | 0.5 s | device |
 | host attached window (`HOST_ALIVE_MS`) | 3000 ms | device |
-| recommended keepalive | 1 s | host |
+| reference keepalive period | 1 s | host |
 | open drain quiet / cap | 150 ms / 2 s | host |
 | serial-string retry | 10 × 300 ms | host |
 | host write timeout | 5000 ms | host |
@@ -809,7 +830,34 @@ the board. A host MUST bound what it accepts from `EVT_MESSAGE`,
 by the sender and MUST NOT be trusted to select a decoder without
 validating the content.
 
+### 16.1 Consequences of not meeting a requirement
+
+RFC 2119 §7 asks that the effect of ignoring an imperative be spelled
+out. Each below was observed, not predicted.
+
+| requirement | what happens without it |
+|---|---|
+| drain, never `clear_halt`, on open (§3.3) | the device endpoint wedges after one packet; every later read times out with the board healthy |
+| one handle per board (§3.2) | two readers race for every event and the loser drops it; a warm link reports "did not warm up" by scheduling luck |
+| write timeout > 2283 ms; never retry a partial write (§3.5) | the host dies out of its heartbeat mid-decode; a repeated partial frame desynchronises the device parser until a resync |
+| payload cap = `UP_MAX_PAYLOAD` (§14.4) | a delivered file part is acked by the board and never seen by the host -- no error anywhere |
+| message buffer ≥ `msg_max` (§8.1) | the same silent loss, at the application layer |
+| pace `CMD_SUBMIT` on queue depths (§6.2) | messages are refused; a host that ignores the `EVT_LOG` refusal believes they were sent |
+| pace `CMD_BCAST` on `bc_free`; no non-CONT chunk mid-stream (§10.1) | the whole queued broadcast is dropped, or the stream on the air is closed and superseded -- a truncated transmission |
+| four-token alignment for `LSCODEC_25` (§10.5) | one lost group turns the rest of the stream into noise instead of a one-second gap |
+| absent-value defaults on short structures (§8.2, §14.2) | a board with no sensor reports 0 °C; a peer that never declared codecs reads as "supports none" |
+| reserved codec bits stay clear (Appendix B.3) | the peer is promised a decoder that does not exist and sends audio nobody can play |
+| `EVT_DIAG` shed under backpressure (§13) | command responses queue behind diagnostics and the session stalls (measured: 549 bytes, then silence) |
+| no broadcast into `pending` (§10.6) | speech keyed into a deaf receiver; nothing reports it |
+
 ## 17. References
+
+Normative references:
+
+- [RFC 2119] Bradner, S., "Key words for use in RFCs to Indicate
+  Requirement Levels", BCP 14, RFC 2119, March 1997.
+- [RFC 8174] Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC 2119
+  Key Words", BCP 14, RFC 8174, May 2017.
 
 Normative code:
 
