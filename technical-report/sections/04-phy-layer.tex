@@ -83,6 +83,142 @@ shows why detection sensitivity depends on this.
     \label{fig:frame_structure}
 \end{figure}
 
+\subsection{The Zadoff--Chu Sequences: Definition and Computation}
+\label{sec:zc}
+
+Two of the three things a receiver locks onto are Zadoff--Chu
+sequences~\cite{chu1972}: the seven pilots that carry the channel
+estimate, and the preamble symbol that gives sample-exact timing and
+names the link mode.  This subsection states the sequence exactly as
+the code defines it, where each instance is placed, which of its
+properties the receiver depends on, and how each of the three
+implementations obtains it.
+
+\paragraph{Definition.}  One generator serves both uses
+(\texttt{OFDMModem.\_gen\_zc\_seq(root, length)}):
+\begin{equation}
+    z_u[n] \;=\; \exp\!\left(-\,j\pi\,\frac{u\,n\,(n + N \bmod 2)}{N}\right),
+    \qquad n = 0, \ldots, N-1,
+    \label{eq:zc}
+\end{equation}
+which is the standard Zadoff--Chu sequence of root $u$ and length $N$
+with the cyclic-shift term $q = 0$: the factor $N \bmod 2$ selects
+$n(n+1)$ for odd $N$ and $n^2$ for even $N$.  Both lengths used here
+are odd, so both instances are of the $n(n+1)$ form.  The code computes
+Eq.~\eqref{eq:zc} directly in double precision and casts the result to
+\texttt{complex64}; nothing is tabulated in the float model.
+
+\paragraph{Where the two instances are placed.}
+Table~\ref{tab:zc_instances} lists both.  The pilot sequence is placed
+one value per pilot carrier, in carrier order; the pilot carriers are
+the seven equally spaced positions \texttt{linspace(0, 22, 7)} over
+the 23 loaded bins, i.e.\ bins 3, 6, 10, 14, 17, 21 and 25.  The
+preamble sequence fills the 23 loaded bins contiguously (bin
+$14 - \lfloor 23/2 \rfloor = 3$ upward), with no Hermitian mirror and
+a $\times 2$ gain that equalizes the real-signal power of a 23-bin
+symbol against the 46 bins of a mirrored data symbol
+(Section~\ref{sec:sync}).  A 128-point IFFT of that bin vector is one
+ZC symbol; it is tiled $L$ times back to back and the block is closed
+with a cyclic prefix that is the last 32 samples of the tiled block ---
+so the CP is the tail of the last tile, and the block is periodic in
+128 samples throughout.  The CP-plus-one-tile of 160 samples is also
+what a streamed burst re-emits as its resync marker
+(\S\ref{sec:stream}).
+
+\begin{table}[H]
+    \centering
+    \caption{The two Zadoff--Chu instances, as instantiated.}
+    \label{tab:zc_instances}
+    \small
+    \begin{tabular}{@{}lll@{}}
+    \toprule
+    & \textbf{Pilots} & \textbf{Preamble} \\
+    \midrule
+    length $N$ & 7 & 23 \\
+    root $u$ & 3 & 17 / 19 / 21 (NORMAL / ROBUST / EXTREME) \\
+    domain & one value per pilot carrier & one value per loaded bin, 3..25 \\
+    gain & 1 (unit modulus) & $\times 2$ \\
+    time structure & inside every data and header symbol &
+        IFFT, tiled $L = 4 / 16 / 64$, CP $=$ last 32 samples \\
+    receiver use & channel estimate at 7 carriers &
+        timing, residual-CFO hypothesis, mode identity \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\paragraph{The properties the receiver relies on.}  Three, each
+checked by the article-reproduction suite
+(\texttt{verify\_article.py}, Appendix~\ref{app:verify}) or by
+construction:
+\begin{itemize}
+    \item \textbf{Constant amplitude.}  $|z_u[n]| = 1$ for every $n$,
+          so the zero-forcing estimate at a pilot carrier is
+          $\hat H_k = Y_k\,\overline{p_k}$ --- a multiplication by the
+          conjugate, no division.  The fixed-point and C receivers are
+          division-free in channel estimation for exactly this reason
+          (Section~\ref{sec:fixed}): the conjugate pilots are a Q15
+          ROM, and the pilot-to-carrier interpolation is a second ROM
+          of Wiener weights.
+    \item \textbf{Zero periodic autocorrelation.}  For $N$ prime and
+          $\gcd(u, N) = 1$ the periodic autocorrelation of $z_u$ is a
+          delta: $\sum_n z_u[n]\,\overline{z_u[n-k]} = N$ at $k = 0$ and
+          $0$ for every other shift (measured: $23, 0, \ldots, 0$ for
+          the root-17 sequence).  This is what makes the matched-filter
+          peak sharp to one sample, and the suite asserts it.
+    \item \textbf{Distinct roots are near-orthogonal.}  With $N = 23$
+          prime, every root in $1..22$ is admissible, and the
+          cross-correlation of two different roots is $1/\sqrt{23}$ in
+          magnitude at every lag.  The three modes use three roots, and
+          the receiver identifies the mode by which root correlates
+          (\texttt{demod\_frame\_auto} tries the modes in turn on the
+          same samples, Section~\ref{sec:modes}); a mode switch can
+          therefore never leave the two ends unable to find each other.
+\end{itemize}
+
+\paragraph{How the detector computes with it.}  The float detector
+(\texttt{detect\_zc\_preamble}) builds its kernel from the
+time-domain preamble block, not from Eq.~\eqref{eq:zc}: the kernel is
+the last $G$ tiles of the generated block ($G$ the mode's coherent
+group, $1 / 2 / 4$), so it carries the $\times 2$ gain and the IFFT
+scaling exactly as transmitted.  For each residual-CFO hypothesis the
+kernel is derotated, the signal is correlated with its reversed
+conjugate by FFT convolution, the magnitudes of the $L/G$ group
+positions are summed, and the sum is normalized by
+$\sqrt{E_{\mathrm{win}}\,E_{\mathrm{ref}}}$ --- the energy of the
+signal window against the kernel's own --- so the metric is a
+correlation coefficient in $[0, 1]$ and a loud data symbol cannot
+outscore the preamble.  The NORMAL detector evaluates one hypothesis
+(zero: Section~\ref{sec:sync} explains why widening it costs a
+decibel); ROBUST and EXTREME evaluate seven, $\pm 15$\,Hz in 5\,Hz
+steps, because their longer coherent kernels tolerate less residual
+offset.
+
+\paragraph{How each twin obtains the sequence.}  The float model
+computes it.  The fixed-point twin never does: it takes the float
+model's pilot values and preamble block and rounds them to Q15
+(\texttt{round}$(x \cdot 32767)$) into three ROMs --- the conjugate
+pilots for estimation, the real part of the whole preamble for the
+transmitter, and the complex $G \cdot 128$-sample kernel for the
+detector --- and computes the kernel's reference energy from the
+rounded values, so that the correlation and its normalization see the
+same quantization.  The C implementation ships those ROMs verbatim
+(\texttt{rom\_modes.h}, emitted by \texttt{gen\_vectors.py}) under the
+porting rule that a ROM is dumped, never recomputed
+(\S\ref{sec:cport_method}); the transmitter's copy exploits the block
+periodicity and stores one 128-sample tile per mode, re-expanding
+the CP and the $L$ tiles by modulo indexing, and the detector's kernel
+is stored as separate real and imaginary int16 arrays.  Its correlator
+is four real multiply--accumulates per sample in int64, rounded back by
+$2^{15}$; the magnitude is the RTL-standard
+$\max(|a|,|b|) + \min(|a|,|b|)/2$ approximation rather than a square
+root; and the normalized metric is carried as its square in Q20, with
+the two $2^{-15}$ factors that the Q15 kernel contributes (one in the
+correlator output, one in the reference energy) accounted for
+explicitly --- the omission that once scored a perfect correlation at
+0.006 (Section~\ref{sec:fixed}, debug lore).  The three twins agree on
+the tone anchor to the sample on the golden corpus, which is what
+lets everything downstream be compared byte for byte.
+
 \subsection{Streamed Bursts}
 \label{sec:stream}
 
