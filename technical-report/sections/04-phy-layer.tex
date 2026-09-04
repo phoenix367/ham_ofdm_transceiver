@@ -897,3 +897,256 @@ demodulator costs 856\,Mcycles per frame rather than the 275-hypothesis
 grid's worth on every symbol (Table~\ref{tab:cport_stages}): the grid is
 paid once per frame, on the first symbol, and only there through the
 gated coarse pass.
+
+\subsection{Tone Detection, Exactly: the Newman Preamble Across the Modes and Receivers}
+\label{sec:tone_exact}
+
+Before either Zadoff--Chu stage runs, the receiver has to find the
+frame at all and remove most of its carrier offset, and it does that
+on the two tone combs that open every frame.  This subsection is the
+third of the self-contained ones: Table~\ref{tab:tone_notation} defines
+the symbols, Algorithm~\ref{alg:tone_gen} generates the tone fields,
+Algorithm~\ref{alg:tone_float} is the float detector with its residual
+estimator (Algorithm~\ref{alg:tone_resid}), Algorithm~\ref{alg:tone_composite}
+is the composite detector that hands its result to \S\ref{sec:zc},
+Algorithm~\ref{alg:tone_int} is the integer frame-at-once form, and
+Algorithm~\ref{alg:tone_stream} is the C \emph{streaming} form --- the
+one the boards run --- whose per-block summaries, causal floor and
+commit rule are the three places it deliberately departs from the
+model.
+
+\begin{table}[H]
+    \centering
+    \caption{Notation of Algorithms~\ref{alg:tone_gen}--\ref{alg:tone_stream}
+             (symbols of Tables~\ref{tab:zc_notation} and~\ref{tab:demod_notation}
+             carry over).}
+    \label{tab:tone_notation}
+    \small
+    \begin{tabular}{@{}lp{3.6cm}p{8.2cm}@{}}
+    \toprule
+    \textbf{Symbol} & \textbf{Value} & \textbf{Meaning} \\
+    \midrule
+    $\mathcal{B}_0$ & bins 8, 12, 16, 20 & comb 0: four tones, every 4th bin about the band centre (bin 14) \\
+    $\mathcal{B}_1$ & bins 10, 14, 18, 22 & comb 1: comb 0 shifted by 2 bins \\
+    $M$ & 4 & tones per comb \\
+    $\vartheta_m$ & $\pi m^2 / M$ & Newman phases: $0, \pi/4, \pi, 9\pi/4$ \\
+    $g_t$ & $\sqrt{2 \cdot 23 / (2 \cdot 4)} = \sqrt{5.75}$ & tone gain: 8 loaded bins carry the power of a 46-bin data symbol \\
+    $T_t$ & 10 / 40 / 160 & tone tiling (\texttt{newman\_tile}); field A is $2T_t$ tiles of comb 0, field B is $T_t$ tiles of comb 1 \\
+    $B$ & 128 / 512 / 512 (float); 256 / 512 / 512 (int) & detection FFT length (\texttt{detect\_fft\_len}); must divide $T_t N$ \\
+    $s$ & $B/N$ & fine bins per subcarrier spacing; fine bin $= f_s/B$ Hz \\
+    $h$ & 0 if $s = 1$ else 1 & mask skirt: $\pm h$ fine bins around each tone \\
+    $\mathbf{m}_0, \mathbf{m}_1$ & 0/1 vectors of length $B$ & tone masks of the two combs over the positive-frequency bins $1..B/2{-}1$ \\
+    $n_m$, $n_b$ & $\sum \mathbf{m}_0$; $B/2 - 1$ & mask bins (4 or 12); band bins \\
+    $\mathcal{S}$ & $\{-4s, \ldots, +4s\}$ & coarse CFO hypotheses as mask shifts (\texttt{max\_cfo} = 4 bins) \\
+    $n_A, n_B$ & $2T_tN/B$; $T_tN/B$ & blocks in field A and field B; $n_W = n_A + n_B$ \\
+    $\theta_t$ & 1.6 / 1.5 / 1.30 & tone threshold on the contrast product (Q10: 1638 / 1536 / 1331) \\
+    $\Delta$ & 3 blocks & \texttt{DECLINE\_BLOCKS}: region-end after this many below-threshold blocks \\
+    $X$ & 64 & \texttt{WEAK\_COMMIT\_X}: region-end commit needs metric $\ge X\theta_t^2$ \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{algorithm}[H]
+\caption{\textsc{GenNewmanPreamble}: the two tone fields (\texttt{FullOFDMModem.gen\_newman\_preamble}).}
+\label{alg:tone_gen}
+\begin{algorithmic}[1]
+\Ensure field A ($2T_tN$ samples) then field B ($T_tN$ samples), complex; the ZC block of Algorithm~\ref{alg:zc_gen} follows
+\State $v_m \gets g_t\, e^{j \vartheta_m}$, $m = 0..3$ \Comment{four unit tones with Newman phases, scaled}
+\For{$i \in \{0, 1\}$} \Comment{comb 0, comb 1}
+    \State $S_i[k] \gets 0$;\quad $S_i[\mathcal{B}_i[m]] \gets v_m$;\quad $S_i[N - \mathcal{B}_i[m]] \gets \overline{v_m}$ \Comment{Hermitian mirror: a real tone tile}
+    \State $\mathrm{tile}_i \gets \mathrm{IFFT}_N(S_i)$
+\EndFor
+\State \Return $[\mathrm{tile}_0 \times 2T_t],\ [\mathrm{tile}_1 \times T_t]$ \Comment{no CP: the fields are periodic in $N$ throughout}
+\end{algorithmic}
+\end{algorithm}
+
+The two combs are what make the search two-dimensional.  A comb alone
+locates a frame in time only to within the block length and cannot
+tell a carrier offset of one bin from a frame that started one block
+later; the second comb, shifted by two bins and following the first,
+breaks that symmetry, because only the true (offset, shift) pair puts
+comb~0's energy in comb~0's mask \emph{and} comb~1's in comb~1's.  The
+metric is the product of the two contrasts for exactly this reason.
+
+\begin{algorithm}[H]
+\caption{Float tone detector (\texttt{detect\_newman\_preamble}).}
+\label{alg:tone_float}
+\begin{algorithmic}[1]
+\Require analytic signal $x$; $B, s, h, T_t, \theta_t$
+\Ensure (sample index of field A, coarse $+$ residual CFO in Hz) or \textsc{None}
+\State $\mathbf{m}_i[b] \gets 1$ for $b \in [\,s\mathcal{B}_i[m] - h,\ s\mathcal{B}_i[m] + h\,] \cap [1, B/2{-}1]$, $m = 0..3$, $i = 0, 1$
+\State $\mathbf{m}_i^{(\sigma)} \gets \mathbf{m}_i$ shifted by $\sigma$ bins for $\sigma \in \mathcal{S}$ \Comment{zero-filled at the ends}
+\State $n_{\mathrm{blk}} \gets \lfloor |x| / B \rfloor$; \textbf{if} $n_{\mathrm{blk}} < n_W$: \Return \textsc{None}
+\State $P[b, k] \gets |\mathrm{FFT}_B(x[bB .. (b{+}1)B))[k]|^2$ \Comment{block spectrogram}
+\State $\mathrm{cum}[b] \gets \sum_{b' < b} P[b']$ \Comment{prefix sum over blocks, so any window is one subtraction}
+\State $A[o] \gets \mathrm{cum}[o + n_A] - \mathrm{cum}[o]$;\quad $Bf[o] \gets \mathrm{cum}[o + n_W] - \mathrm{cum}[o + n_A]$, $o = 0..n_{\mathrm{blk}} - n_W$
+\State $\mathrm{floor} \gets 0.01 \cdot \mathrm{median}_b \sum_{k=1}^{B/2-1} P[b,k]$ \Comment{1\,\% of the capture's median block power}
+\For{each offset $o$, shift $\sigma$}
+    \State $\mathrm{sig}_0 \gets A[o] \cdot \mathbf{m}_0^{(\sigma)}$;\quad $\mathrm{sig}_1 \gets Bf[o] \cdot \mathbf{m}_1^{(\sigma)}$ \Comment{power in the tone bins}
+    \State $\mathrm{rest}_i \gets \max(\mathrm{band}_i - \mathrm{sig}_i,\ 10^{-10}) + \mathrm{floor} \cdot n_{A|B}$ \Comment{$\mathrm{band}_i$ = power in bins $1..B/2{-}1$}
+    \State $c_i \gets (\mathrm{sig}_i / n_m) \big/ (\mathrm{rest}_i / (n_b - n_m))$ \Comment{mean tone-bin power over mean rest-bin power}
+    \State $\mu[o, \sigma] \gets c_0 \cdot c_1$
+\EndFor
+\State $(o^\star, \sigma^\star) \gets \arg\max \mu$; \textbf{if} $\mu[o^\star, \sigma^\star] < \theta_t$: \Return \textsc{None}
+\State $t_0 \gets o^\star B$;\quad $f_c \gets \sigma^\star f_s / B$ \Comment{coarse CFO, one fine bin per shift}
+\State $y[n] \gets x[t_0 + n]\, e^{-2\pi j f_c n / f_s}$, $n < 2T_tN$ \Comment{field A, coarse-corrected}
+\If{$s > 1$} $f_r \gets \angle\big(\sum_n \overline{y[n]}\, y[n{+}N]\big) \cdot f_s / (2\pi N)$ \Comment{lag-$N$ alone suffices}
+\Else\ $f_r \gets \textsc{ResidualCfo}(y)$ \Comment{Algorithm~\ref{alg:tone_resid}}
+\EndIf
+\State \Return $t_0$, $f_c + f_r$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{\textsc{ResidualCfo} for one-symbol blocks ($s = 1$, NORMAL float): FFT peak plus unwrapped lag-$N$ phase.}
+\label{alg:tone_resid}
+\begin{algorithmic}[1]
+\Require coarse-corrected field A, $y[0..F)$ with $F = 2T_tN$
+\State $Y[k] \gets |\mathrm{FFT}_F(y)[k]|^2$;\quad $r \gets F/N$ \Comment{resolution $f_s/F \approx 4.7$\,Hz}
+\State $\mathrm{score}[d] \gets \sum_{b \in \mathcal{B}_0} Y[(br + d) \bmod F]$ for $|d| \le \lfloor 3r/2 \rfloor$ \Comment{within $\pm1.5$ bins}
+\State $d^\star \gets \arg\max_d \mathrm{score}$;\quad $\delta \gets \tfrac{1}{2}(y_{-} - y_{+}) / (y_{-} - 2y_0 + y_{+})$ \Comment{parabolic; 0 at the ends or if flat}
+\State $f_{\mathrm{fft}} \gets (d^\star + \delta)\, f_s / F$ \Comment{unambiguous but coarse}
+\State $f_{\mathrm{lag}} \gets \angle\big(\sum_n \overline{y[n]}\, y[n{+}N]\big) \cdot f_s / (2\pi N)$ \Comment{precise but modulo $f_s/N$}
+\State $k \gets \mathrm{round}\big((f_{\mathrm{fft}} - f_{\mathrm{lag}}) / (f_s/N)\big)$
+\State \Return $f_{\mathrm{lag}} + k\, f_s/N$ \Comment{lag-$N$ estimate unwrapped onto the FFT estimate}
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Composite detector (\texttt{FullOFDMModem.detect\_preamble}): tone stage, then the ZC stage of \S\ref{sec:zc}.}
+\label{alg:tone_composite}
+\begin{algorithmic}[1]
+\Require analytic signal $x$
+\Ensure (first header sample, CFO in Hz) or \textsc{None}
+\State $(t_0, f_0) \gets \textsc{DetectNewman}(x)$; \textbf{if} \textsc{None}: \Return \textsc{None} \Comment{Algorithm~\ref{alg:tone_float}}
+\State $z[n] \gets x[t_0 + n]\, e^{-2\pi j f_0 n / f_s}$ \Comment{the rest of the capture, derotated}
+\State $W \gets 3T_tN + S + 4N + B$ \Comment{tone fields $+$ one symbol $+$ slack: where the ZC block can be}
+\State $\mathcal{F} \gets \{0\}$ if $G = 1$ else $\{-15, -10, \ldots, +15\}$\,Hz \Comment{Section~\ref{sec:sync}: widening the NORMAL scan costs $\sim$1\,dB}
+\State $(t_1, f_1) \gets \textsc{DetectZc}(z[0..W), \mathcal{F})$; \textbf{if} \textsc{None}: \Return \textsc{None} \Comment{Algorithm~\ref{lst:zc_float}}
+\State \Return $t_0 + t_1$,\ $f_0 + f_1$
+\end{algorithmic}
+\end{algorithm}
+
+The integer frame-at-once detector (Algorithm~\ref{alg:tone_int}) is
+the same search with three changes.  Its spectra come from the BFP FFT
+and are aligned to the smallest exponent in the capture before the
+prefix sums, since powers scale as $2^{2e}$; its contrast is a Q10
+integer and the product a Q20 one, compared against $\theta_t^2$ in
+Q10$^2$; and its residual uses \emph{two} lags.  NORMAL detects on
+256-point blocks here (the float model uses 128), so $s = 2$ for every
+mode and the FFT-peak estimator of Algorithm~\ref{alg:tone_resid} has
+no integer counterpart --- the lag-$N/2$ phase, unambiguous over
+$\pm f_s/N = \pm 93.75$\,Hz, selects the lag-$N$ cycle instead.
+Section~\ref{sec:cfo_unwrap} is the account of why the second lag is
+not optional: the coarse search is a 4\,\% near-tie between adjacent
+bins, a one-bin miss makes the lag-$N$ residual wrap, and the frame is
+lost to a 34-sample shift of the ZC correlation.
+
+\begin{algorithm}[H]
+\caption{Integer tone detector, frame at once (\texttt{FixedReceiver.\_detect\_newman}; \texttt{rx\_detect.c}).}
+\label{alg:tone_int}
+\begin{algorithmic}[1]
+\Require int16 $I, Q$; $B, s, T_t$; $\theta_{t,10}$; $\mathbf{m}_0, \mathbf{m}_1$; $\omega_B \gets 2^{32}/B$ (word per fine bin)
+\Ensure (sample index, CFO word) or \textsc{None}
+\For{each block $b$} $\ (Z_r, Z_i, e_b) \gets \textsc{FftBfp}(I[bB..], Q[bB..], 13)$;\quad $P[b,k] \gets Z_r^2 + Z_i^2$ \EndFor
+\State $e_{\min} \gets \min_b e_b$;\quad $P[b] \gets P[b] \gg \min(2(e_b - e_{\min}), 62)$ \Comment{common exponent}
+\State prefix sums, $A[o]$, $Bf[o]$, $\mathrm{band}_i$ as in Algorithm~\ref{alg:tone_float} lines 5--6, in int64
+\State $\mathrm{floor} \gets \mathrm{median}_b \sum_{k=1}^{B/2-1} P[b,k]$ \Comment{over the blocks handed in}
+\State $\mathrm{best} \gets (\mu{=}-1, o{=}0, \sigma{=}0)$
+\For{$\sigma \in \mathcal{S}$} \Comment{masks rolled by $\sigma$}
+    \State $\mathrm{sig}_0 \gets A \cdot \mathrm{roll}(\mathbf{m}_0, \sigma)$;\quad $\mathrm{sig}_1 \gets Bf \cdot \mathrm{roll}(\mathbf{m}_1, \sigma)$ \Comment{vectors over $o$}
+    \State $\mathrm{rest}_i \gets \max(\mathrm{band}_i - \mathrm{sig}_i, 1) + (\mathrm{floor} \cdot n_{A|B}) / 100$
+    \State $c_i \gets (\mathrm{sig}_i \cdot n_b \cdot 1024) / (\mathrm{rest}_i \cdot n_m)$ \Comment{Q10}
+    \State $\mu \gets c_0 \cdot c_1$;\quad $o^\star \gets \arg\max_o \mu$; \textbf{if} $\mu[o^\star] > \mathrm{best}.\mu$: $\mathrm{best} \gets (\mu[o^\star], o^\star, \sigma)$ \Comment{Q20}
+\EndFor
+\If{$\mathrm{best}.\mu < \theta_{t,10}^2$} \Return \textsc{None} \EndIf
+\State $t_0 \gets \mathrm{best}.o \cdot B$;\quad $w_c \gets \mathrm{best}.\sigma \cdot \omega_B$ \Comment{coarse word}
+\State $(d_I, d_Q) \gets \textsc{NcoDerotate}(I[t_0 .. t_0{+}2T_tN),\ Q[\ldots],\ w_c)$ \Comment{field A, coarse-corrected}
+\Function{LagWord}{$\ell$} \Comment{phase advance per sample from the lag-$\ell$ product}
+    \State $rr \gets \sum_n d_I[n] d_I[n{+}\ell] + d_Q[n] d_Q[n{+}\ell]$;\quad $ri \gets \sum_n d_I[n] d_Q[n{+}\ell] - d_Q[n] d_I[n{+}\ell]$
+    \State \Return $\textsc{DivRound}(\textsc{CordicAtan2}(ri, rr).\phi,\ \ell)$
+\EndFunction
+\State $w_N \gets \textsc{LagWord}(N)$;\quad $w_{N/2} \gets \textsc{LagWord}(N/2)$ \Comment{precise but wraps at $\pm f_s/2N$; unambiguous to $\pm f_s/N$}
+\State $k \gets \textsc{DivRound}(w_{N/2} - w_N,\ 2^{32}/N)$;\quad $w_N \gets w_N + k \cdot 2^{32}/N$ \Comment{pick the lag-$N$ cycle}
+\State \Return $t_0$,\ $w_c + w_N$
+\end{algorithmic}
+\end{algorithm}
+
+The streaming detector (Algorithm~\ref{alg:tone_stream}) cannot see a
+capture; it sees one 256- or 512-sample block at a time and must
+decide with what it has kept.  It keeps a \emph{summary} per block ---
+the block's band power, its mask dot products at every shift, its
+exponent, and its raw lag-$N$ and lag-$N/2$ correlation sums --- and
+evaluates the window ending at the newest block from summaries alone,
+so the tone fields are never re-read.  Three departures from the
+model are deliberate and each was measured: the exponent alignment
+and the regularising floor are computed over the \emph{window}, and
+the floor is the window's \emph{maximum} block power rather than the
+capture's median (the median is acausal, and a 1\,\% median floor let
+partial-overlap windows on a quiet channel saturate the contrast and
+outscore the true alignment); the peak is committed from a running
+region rather than a global argmax; and the region-end commit is gated
+on the metric being strong.  That gate is the fix of
+\S\ref{sec:voice_onair}: a tone field entering the window produces an
+isolated above-threshold spike ($\sim$10$\times\theta_t^2$ against
+$10^4$--$10^6\times$ for a real peak) whose region dies at once, and
+committing it anchored two blocks before the real preamble.
+
+\begin{algorithm}[H]
+\caption{C streaming tone detector (\texttt{rx\_stream.c}).}
+\label{alg:tone_stream}
+\begin{algorithmic}[1]
+\Require raw ring of $I, Q$; summary ring (one window deep); lag ring (two fields deep); all shifts capped at 62, angles mod $2^{32}$
+\Ensure a committed (sample index $c_s$, CFO word $w$) and the transition to the ZC stage
+\Function{BlockSummary}{$b$} \Comment{once per new block $b$, from the ring}
+    \State fetch $I, Q$ for $[bB - N,\ (b{+}1)B)$ ($N$ samples of history; none for $b = 0$)
+    \State $\Sigma_N \gets \sum_{t} \overline{x[t{-}N]}\, x[t]$;\quad $\Sigma_{N/2} \gets \sum_{t} \overline{x[t{-}N/2]}\, x[t]$ over the block, raw
+    \State $(Z_r, Z_i, e) \gets \textsc{FftBfp}(I[bB..], Q[bB..], 13)$;\quad $P[k] \gets Z_r^2 + Z_i^2$
+    \State $\mathrm{band} \gets \sum_{k=1}^{B/2-1} P[k]$;\quad $\mathrm{dot}_i[\sigma] \gets \sum_k \mathbf{m}_i[(k - \sigma) \bmod B]\, P[k]$, $\sigma \in \mathcal{S}$
+\EndFunction
+\Statex
+\Function{EvalWindow}{$b$} \Comment{the $n_W$ blocks ending at $b$: offset $o = b - n_W + 1$}
+    \State $e_{\min} \gets \min_j e_j$ over the window;\quad $\mathrm{band}_{\mathrm{al}}[j] \gets \mathrm{band}_j \gg 2(e_j - e_{\min})$
+    \State $\mathrm{floor} \gets \max_j \mathrm{band}_{\mathrm{al}}[j]$ \Comment{causal: the window's maximum}
+    \For{$\sigma \in \mathcal{S}$}
+        \State $\mathrm{sig}_0 \gets \sum_{j < n_A} \mathrm{dot}_{0,j}[\sigma] \gg 2(e_j - e_{\min})$;\quad $\mathrm{sig}_1 \gets \sum_{j \ge n_A} \mathrm{dot}_{1,j}[\sigma] \gg 2(e_j - e_{\min})$
+        \State $\mathrm{rest}_i \gets \max(\mathrm{band}_i - \mathrm{sig}_i, 1) + (\mathrm{floor} \cdot n_{A|B}) / 100$;\quad $c_i \gets (\mathrm{sig}_i\, n_b\, 1024) / (\mathrm{rest}_i\, n_m)$
+        \State keep $(\mu = c_0 c_1, \sigma)$ if $\mu$ is the largest so far
+    \EndFor
+    \State \Return $\mu^\star, \sigma^\star$
+\EndFunction
+\Statex
+\State \textbf{search} (state S\_SEARCH, on every newest complete block $b$):
+\State $(\mu, \sigma) \gets \textsc{EvalWindow}(b)$;\quad $o \gets b - n_W + 1$
+\If{$\mu > \theta_{t,10}^2$ \textbf{and} $o \ge o_{\min}$} \Comment{past the rearm guard}
+    \State $\mathrm{crossed} \gets 1$;\ $\mathrm{decline} \gets 0$;\ \textbf{if} $\mu > \mu_{\mathrm{best}}$: $(\mu_{\mathrm{best}}, o_{\mathrm{best}}, \sigma_{\mathrm{best}}, b_{\mathrm{best}}) \gets (\mu, o, \sigma, b)$
+\ElsIf{crossed} $\ \mathrm{decline} \gets \mathrm{decline} + 1$
+\EndIf
+\If{crossed \textbf{and} \big((decline $\ge \Delta$ \textbf{and} $\mu_{\mathrm{best}} \ge X \theta_{t,10}^2$) \textbf{or} $b - b_{\mathrm{best}} \ge n_W + \Delta$\big)}
+    \State \textsc{ToneCommit}()
+\EndIf
+\Statex
+\Function{ToneCommit}{} \Comment{the tone field is not re-read}
+    \State $c_s \gets o_{\mathrm{best}} B$;\quad $w \gets \sigma_{\mathrm{best}} \cdot 2^{32}/B$
+    \State $(\Sigma_N, \Sigma_{N/2}) \gets$ sums over the lag-ring entries of field A's $n_A$ blocks from $o_{\mathrm{best}}$
+    \State $\phi_N \gets \textsc{CordicAtan2}(\Sigma_N) - wN$;\quad $\phi_{N/2} \gets \textsc{CordicAtan2}(\Sigma_{N/2}) - wN/2$
+    \State $w_N \gets \textsc{DivRound}(\phi_N, N)$;\quad $w_{N/2} \gets \textsc{DivRound}(\phi_{N/2}, N/2)$
+    \State $k \gets \textsc{DivRound}(w_{N/2} - w_N,\ 2^{32}/N)$;\quad $w \gets w + w_N + k \cdot 2^{32}/N$ \Comment{unwrap}
+    \State state $\gets$ S\_ZC\_WAIT \Comment{Algorithm~\ref{lst:zc_int} runs once its window is in the ring, \S\ref{sec:zcscan}}
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+Two lines of Algorithm~\ref{alg:tone_stream} carry results measured
+elsewhere.  The lag sums in \textsc{BlockSummary} are accumulated on
+the \emph{raw} samples and the coarse word is subtracted at commit as
+an angle, which is what let the raw ring shrink from 288 to 160\,kB
+(\S\ref{sec:zcscan}: nothing anchored at $c_s$ reads the tone field any
+more); the worst disagreement with re-reading and derotating is
+0.0018\,Hz across $\pm120$\,Hz of coarse word.  And the second lag in
+\textsc{ToneCommit} was absent until the analog stand found a frame
+whose tone field started exactly on a block boundary failing at
+$-94.07$\,Hz in every modulation on a loop with zero CFO
+(Section~\ref{sec:radio}); \texttt{test\_stream} holds the two
+block-aligned leads as cases, and the EXTREME sweep gained 6.9\,\% of
+decodes from it.
