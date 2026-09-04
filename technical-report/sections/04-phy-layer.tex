@@ -219,6 +219,125 @@ explicitly --- the omission that once scored a perfect correlation at
 the tone anchor to the sample on the golden corpus, which is what
 lets everything downstream be compared byte for byte.
 
+\paragraph{The correlator, exactly.}  Listing~\ref{lst:zc_float} is
+the float detector (\texttt{OFDMModem.detect\_zc\_preamble}) with
+nothing elided but array bookkeeping; every quantity is named as the
+code names it.  It is handed the analytic signal $x$ already
+derotated by the tone stage's coarse CFO word, a hypothesis list
+$\mathcal{F}$ (the single value $0$ at NORMAL; $-15, -10, \ldots,
++15$\,Hz at ROBUST and EXTREME), and the mode's constants: $N = 128$,
+$L$ the ZC symbol count, $G$ the coherent group, $n_g = L/G$, the CP
+length 32, and the base threshold $\theta$ ($0.2 / 0.08 / 0.05$).
+
+\begin{lstlisting}[mathescape=true,caption={Float ZC detector, as implemented.},label={lst:zc_float}]
+# kernel: the last $G \cdot N$ time-domain samples of the preamble ($\times 2$ gain, IFFT scale)
+kernel $\leftarrow$ gen_zc_preamble()[$-GN$:]
+$E_{\mathrm{ref}} \leftarrow \sum_t |\text{kernel}[t]|^2$
+$P \leftarrow L \cdot N$                                   # preamble length without CP
+$E[m] \leftarrow \sum_{n=m}^{m+P-1} |x[n]|^2$                 # window energy, from a prefix sum
+best $\leftarrow$ (metric $-1$, index $0$, $f$ $0$)
+for $f$ in $\mathcal{F}$:
+    # derotate the KERNEL by the hypothesis, not the signal
+    $k_f[t] \leftarrow \text{kernel}[t] \cdot e^{\,+2\pi j f t / f_s}$,   $t = 0..GN-1$
+    # correlation magnitude at every offset (FFT convolution)
+    $c[m] \leftarrow \big|\sum_{t} x[m+t] \cdot \overline{k_f[t]}\big|$
+    # the $n_g = L/G$ groups combined by MAGNITUDE
+    $C[m] \leftarrow \sum_{g=0}^{n_g-1} c[m + g \cdot GN]$
+    $n_{\mathrm{pos}} \leftarrow \min(\text{len}(C),\ \text{len}(x) - P + 1)$
+    # normalized metric in [0, 1]
+    $\mu[m] \leftarrow C[m]\,\big/\,\big(n_g \sqrt{E[m]/n_g \cdot E_{\mathrm{ref}}} + 10^{-12}\big)$,  $m < n_{\mathrm{pos}}$
+    $j \leftarrow \arg\max_m \mu[m]$
+    # dynamic threshold from the RAW sum's peak-to-floor ratio
+    $\rho \leftarrow C[j] \,/\, (\mathrm{mean}(C) + 10^{-12})$
+    $\theta' \leftarrow \theta$
+    if $\rho < 3.5$:  $\theta' \leftarrow \min\big(\theta\,(1 + 0.5\,(3.5 - \rho)),\ 2.25\,\theta\big)$
+    if $\mu[j] \ge \theta'$ and $\mu[j] >$ best.metric:  best $\leftarrow$ ($\mu[j]$, $j$, $f$)
+if best.metric $\le 0$:  return None
+$j, f \leftarrow$ best.index, best.$f$
+# the winning preamble, derotated; lag-$N$ product over $L-1$ tiles
+$y[t] \leftarrow x[j + t] \cdot e^{-2\pi j f t / f_s}$,   $t = 0..P-1$
+$r \leftarrow \sum_{t=0}^{(L-1)N-1} \overline{y[t]} \cdot y[t + N]$
+$f_{\mathrm{frac}} \leftarrow \angle r \,/\, (2\pi N / f_s)$           # unambiguous over $\pm f_s/2N$
+# time = the END of the ZC block = first header sample
+return  time $= (j - \mathrm{CP}) + (\mathrm{CP} + P)$,   cfo $= f + f_{\mathrm{frac}}$
+\end{lstlisting}
+
+Four things in the listing are decisions rather than transcription of
+the mathematics.  The \emph{kernel} is derotated, not the signal ---
+one rotation of $GN$ samples per hypothesis instead of one of the
+whole window.  The $n_g$ group correlations are combined by
+\emph{magnitude}, so the search is coherent only over $G$ tiles and
+tolerates the residual CFO that would decohere a full-length
+coherent sum; the hypothesis grid exists to keep $G$ tiles coherent.
+The \emph{normalization} divides by the energy of the window the
+preamble would occupy, so the metric is a correlation coefficient
+and a loud data symbol cannot outscore the preamble.  And the
+\emph{threshold is dynamic}: when the raw peak is less than $3.5\times$
+the mean of the raw sum the base threshold is raised, up to
+$2.25\times$, which rejects the broad, low-contrast maxima that pure
+noise produces (0 false alarms in 20 noise-only runs per mode,
+Section~\ref{sec:modes}).  The returned time is the \emph{end} of the
+ZC block --- the first sample of the header --- and the returned CFO is
+the hypothesis plus the lag-$N$ fractional estimate, which is what the
+per-symbol frequency search of the tiled demodulator starts from.
+
+Listing~\ref{lst:zc_int} is the same algorithm in the integer form the
+fixed-point twin and the C port share (\texttt{FixedReceiver.\_detect\_zc},
+\texttt{rx\_detect.c:detect\_zc}); the two are bit-identical, and the
+listing marks where the C streaming form differs in \emph{storage}
+only.  The signal is int16 I/Q, the kernel is the Q15 ROM pair
+$(k_r, k_i)$, and CFO is a 32-bit phase word $w$.
+
+\begin{lstlisting}[mathescape=true,caption={Integer ZC detector (fixed-point twin and C port).},label={lst:zc_int}]
+$E_{\mathrm{ref}} \leftarrow \big(\sum_t k_r[t]^2 + k_i[t]^2\big) \gg 15$        # ROM: ZC_REF_ENERGY
+$\theta_{10} \leftarrow \mathrm{round}(\theta \cdot 1024)$                         # ROM: ZC_THR_Q10
+best $\leftarrow$ (metric$^2$ $-1$, index $0$, word $0$)
+for $w$ in hypothesis words:                    # $\{0\}$; or $\pm 15$ Hz in 5 Hz steps
+    $(k'_r, k'_i) \leftarrow \mathrm{NCO.derotate}(k_r, k_i, -w)$           # Q15 kernel, NCO-rotated
+    for each position $p$:
+        # four real multiply-accumulates in int64, rounded back by $2^{15}$
+        $a \leftarrow \sum_t I[p+t]\,k'_r[t] + Q[p+t]\,k'_i[t]$
+        $b \leftarrow \sum_t Q[p+t]\,k'_r[t] - I[p+t]\,k'_i[t]$
+        $a, b \leftarrow \mathrm{rshift\_round}(a, 15),\ \mathrm{rshift\_round}(b, 15)$
+        $\mathrm{mag}[p] \leftarrow \max(|a|,|b|) + (\min(|a|,|b|) \gg 1)$        # $\alpha$-max + $\beta$-min/2
+    $cc[m] \leftarrow \sum_{g=0}^{n_g-1} \mathrm{mag}[m + g \cdot GN]$
+    $we[m] \leftarrow \sum_{n=m}^{m+P-1} I[n]^2 + Q[n]^2$
+    # metric SQUARED in Q20, shifts staged so every product fits int64
+    $\mathrm{num} \leftarrow (cc[m] \gg 5)^2$
+    $\mathrm{den} \leftarrow \max\big(((we[m] \gg 8) \cdot ((n_g E_{\mathrm{ref}}) \gg 12)) \gg 15,\ 1\big)$
+    $\mu^2[m] \leftarrow (\mathrm{num} \ll 10)\,/\,\mathrm{den}$
+    $j \leftarrow \arg\max_m \mu^2[m]$
+    # dynamic threshold: 3.5 is 56 in Q4, 2.25 is 9/4
+    floor $\leftarrow \lfloor \mathrm{mean}(cc) \rfloor + 1$
+    $\rho_4 \leftarrow (cc[j] \ll 4)\,/\,\text{floor}$
+    $\theta' \leftarrow \theta_{10}$
+    if $\rho_4 < 56$:  $\theta' \leftarrow \min\big(\theta_{10} + \theta_{10}(56 - \rho_4)/32,\ 9\theta_{10}/4\big)$
+    if $\mu^2[j] \ge \theta'^2$ and $\mu^2[j] >$ best.metric$^2$:  best $\leftarrow$ ($\mu^2[j]$, $j$, $w$)
+if best.metric$^2 < 0$:  return None
+# fine CFO: derotate the winning preamble by $w$, lag-$N$ phase by CORDIC
+$(d_I, d_Q) \leftarrow \mathrm{NCO.derotate}(I[j..j+P),\ Q[j..j+P),\ w)$
+$rr \leftarrow \sum_t d_I[t]\,d_I[t+N] + d_Q[t]\,d_Q[t+N]$
+$ri \leftarrow \sum_t d_I[t]\,d_Q[t+N] - d_Q[t]\,d_I[t+N]$
+$\phi \leftarrow \mathrm{CORDIC.atan2}(ri, rr)$                              # phase-word units
+return  time $= (j - \mathrm{CP}) + \mathrm{ZC\_PRE\_BLOCK\_LEN}$,   word $= w + \mathrm{round}(\phi / N)$
+\end{lstlisting}
+
+The staged shifts in the metric are the whole of its subtlety.  The
+correlator output carries one factor of $2^{-15}$ from the Q15 kernel
+and $E_{\mathrm{ref}}$ carries another, so $\mu^2 = C^2 / (n_g \cdot
+we \cdot E_{\mathrm{ref}})$ needs a net $2^{15}$ restored; the code
+takes $2^{-10}$ off the numerator and $2^{-35}$ off the denominator in
+three stages ($\gg 8$, $\gg 12$, $\gg 15$) so that every intermediate
+product fits in int64 at the measured peak magnitude (780\,982, 20
+bits), and the quotient lands in Q20.  The C port keeps none of the
+scan: \texttt{mag} lives in a ring of $(n_g - 1)GN + 1$ entries
+(7\,681 at EXTREME), the window energy is a running scalar slid by one
+sample per position, and only the winning index, its $cc$ and the
+running total for the floor survive the loop --- which is what lets the
+EXTREME scan, 62\,497 candidate offsets before the re-anchoring of
+\S\ref{sec:zcscan}, run in a region of the scratch arena sized by the preamble rather
+than by the search window.
+
 \subsection{Streamed Bursts}
 \label{sec:stream}
 
