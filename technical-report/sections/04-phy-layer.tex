@@ -1150,3 +1150,187 @@ $-94.07$\,Hz in every modulation on a loop with zero CFO
 (Section~\ref{sec:radio}); \texttt{test\_stream} holds the two
 block-aligned leads as cases, and the EXTREME sweep gained 6.9\,\% of
 decodes from it.
+
+\subsection{Channel Estimation and LLR Calibration, Exactly}
+\label{sec:est_cal_exact}
+
+The last of the self-contained subsections covers the two stages that
+sit between a spectrum and a decoder input and that
+Sections~\ref{sec:llr} and~\ref{sec:fixed} measure: how the channel is
+estimated from seven pilots, and how the resulting LLRs are brought to
+a calibrated scale and shape.  Table~\ref{tab:cal_notation} defines the
+symbols; Algorithms~\ref{alg:est_float} and~\ref{alg:est_int} are the
+float and integer estimators; Algorithm~\ref{alg:cal_measure} is the
+offline measurement that produced the reliability map;
+Algorithm~\ref{alg:cal_float} applies it in the float chain and
+Algorithm~\ref{alg:cal_int} in the integer one.
+
+\begin{table}[H]
+    \centering
+    \caption{Notation of Algorithms~\ref{alg:est_float}--\ref{alg:cal_int}.}
+    \label{tab:cal_notation}
+    \small
+    \begin{tabular}{@{}lp{4.2cm}p{7.8cm}@{}}
+    \toprule
+    \textbf{Symbol} & \textbf{Value} & \textbf{Meaning} \\
+    \midrule
+    $\mathcal{P}_j$ & bins 3, 6, 10, 14, 17, 21, 25 & pilot carriers, $j = 0..6$ \\
+    $p_j$ & Eq.~\eqref{eq:zc}, $u{=}3$, $N{=}7$ & pilot values, $|p_j| = 1$ \\
+    $k$ & bins 3..25 & a loaded carrier; local index $k' = k - 3 \in 0..22$ \\
+    $\ell_c$ & 8 bins & Wiener correlation length \\
+    $(lo_{k'}, hi_{k'}, \omega_{k'})$ & ROM & interpolation: pilot slots below/above $k$, weight of the upper in Q15 \\
+    $\Lambda$, $x$ & LLR; $\pm1$ & a data-block LLR and its known transmitted bit \\
+    $\alpha$ & $[0.05, 4]$ & LLR temperature from the header's Gaussian-consistency fit \\
+    $(m_i, o_i)$ & Table~\ref{tab:cal_map} & the reliability map: $|\Lambda|$ bin centre $\to$ empirical log-odds \\
+    $\alpha_{12}$ & Q12 & integer temperature; $L_{\mathrm{cal}}$ in Q2 ($\times 4$) \\
+    $\mathrm{ROM}_{32}$ & 32 entries, $\times 4$ & integer reliability ROM indexed by $|L_{\mathrm{cal}}|$ \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{algorithm}[H]
+\caption{Float channel estimate (\texttt{\_channel\_estimate\_zf}, \texttt{\_channel\_estimate\_wiener}), per symbol.}
+\label{alg:est_float}
+\begin{algorithmic}[1]
+\Require spectrum $Z$; noise variance $\sigma^2$ (from the ZF pass, Algorithm~\ref{alg:soft_demod})
+\Ensure $\hat H_k$ over the 23 loaded carriers
+\State $\hat H^{\mathrm{p}}_j \gets Z[\mathcal{P}_j] / p_j$ \Comment{zero-forcing at the pilots}
+\State \textbf{ZF pass:} $\hat H^{0}_k \gets \mathrm{interp}(k;\ \mathcal{P}, \mathrm{Re}\,\hat H^{\mathrm{p}}) + j\,\mathrm{interp}(k;\ \mathcal{P}, \mathrm{Im}\,\hat H^{\mathrm{p}})$ \Comment{piecewise linear, real and imaginary separately}
+\State \textbf{Wiener pass:} $R_{hp}[k, j] \gets e^{-|k - \mathcal{P}_j| / \ell_c}$ ($23 \times 7$);\quad $R_{pp}[i, j] \gets e^{-|\mathcal{P}_i - \mathcal{P}_j| / \ell_c}$ ($7 \times 7$)
+\State $\beta \gets \sigma^2 \big/ \max\big(\mathrm{mean}_j |\hat H^{\mathrm{p}}_j|^2,\ 10^{-9}\big)$ \Comment{regulariser: noise over pilot power}
+\State $W \gets R_{hp}\,(R_{pp} + \beta I)^{-1}$ \Comment{$23 \times 7$; recomputed every symbol since $\beta$ moves}
+\State \Return $\hat H \gets W\, \hat H^{\mathrm{p}}$
+\end{algorithmic}
+\end{algorithm}
+
+The model is an exponentially decaying frequency correlation with an
+8-bin length --- a stand-in for a delay-spread profile the receiver
+does not know --- and its one free parameter is the regulariser, which
+is the noise variance the demodulator is already tracking, so a noisy
+symbol smooths harder and a clean one interpolates.  The
+$7 \times 7$ inverse per symbol is the reason the integer chain does
+not port this stage: Table~\ref{tab:fixed_prims} lists the estimation
+as division-free, and Algorithm~\ref{alg:est_int} is what it does
+instead --- the ZF pass alone, with the division removed by the
+pilots' unit modulus and the interpolation reduced to a weight ROM.
+The measured cost of giving up the Wiener smoothing is inside the
+0.5\,dB fixed-versus-float figure of Section~\ref{sec:fixed}.
+
+\begin{algorithm}[H]
+\caption{Integer channel estimate (\texttt{FixedReceiver}, \texttt{rx\_demod.c}), per symbol.}
+\label{alg:est_int}
+\begin{algorithmic}[1]
+\Require spectrum $(Z_r, Z_i)$; ROMs $\overline{p}^{\,\mathrm{Q15}}$ (7 conjugate pilots), $(lo, hi, \omega)$ (23 entries)
+\Ensure $(\hat H_r, \hat H_i)_{k'}$, $k' = 0..22$
+\State ROM: $\overline{p}_j \gets \big(\mathrm{round}(32767\, \mathrm{Re}\, p_j),\ \mathrm{round}(-32767\, \mathrm{Im}\, p_j)\big)$ \Comment{\texttt{PILOT\_CONJ\_RE/IM}}
+\State ROM: for each $k'$: $hi \gets$ first pilot slot with $\mathcal{P}_{hi} \ge k$;\ $lo \gets hi - 1$ \Comment{\texttt{INTERP\_LO/HI/W}}
+\Statex \hspace{\algorithmicindent} $\omega \gets \big((k - \mathcal{P}_{lo}) \ll 15\big) / (\mathcal{P}_{hi} - \mathcal{P}_{lo})$;\ $(0,0,0)$ below the first pilot, $(6,6,0)$ above the last
+\Statex \hspace{\algorithmicindent} on a pilot carrier $\omega = 32768$, so $\hat H_k = \hat H^{\mathrm{p}}_{hi}$ exactly
+\For{$j = 0..6$} \Comment{ZF at the pilots by conjugate multiply: $|p_j| = 1$}
+    \State $\hat H^{\mathrm{p}}_{r,j} \gets \textsc{RshiftRound}(Z_r[\mathcal{P}_j]\, \overline{p}_{r,j} - Z_i[\mathcal{P}_j]\, \overline{p}_{i,j},\ 15)$
+    \State $\hat H^{\mathrm{p}}_{i,j} \gets \textsc{RshiftRound}(Z_r[\mathcal{P}_j]\, \overline{p}_{i,j} + Z_i[\mathcal{P}_j]\, \overline{p}_{r,j},\ 15)$
+\EndFor
+\For{$k' = 0..22$} \Comment{linear interpolation, one multiply-add per component}
+    \State $\hat H_{r,k'} \gets \big(\hat H^{\mathrm{p}}_{r,lo}\,(2^{15} - \omega) + \hat H^{\mathrm{p}}_{r,hi}\,\omega\big) \gg 15$;\quad likewise $\hat H_{i,k'}$
+\EndFor
+\State \Return $\hat H_r, \hat H_i$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{table}[H]
+    \centering
+    \caption{The deployed reliability map (\texttt{transceiver.py}
+             \texttt{\_RECAL\_MIDS}/\texttt{\_RECAL\_OUTS}; trained on
+             NORMAL BPSK 1/3 at $-7\ldots-9$\,dB over the article
+             channel, 44\,k samples), and the integer ROM
+             (\texttt{RECAL\_ROM}, trained on the fixed chain itself,
+             49\,k samples; entries are $\times 4$).}
+    \label{tab:cal_map}
+    \footnotesize
+    \begin{tabular}{@{}l*{10}{r}@{}}
+    \toprule
+    $m_i$ ($|\Lambda|$) & 0.1 & 0.7 & 1.2 & 1.7 & 2.5 & 3.7 & 5.3 & 7.5 & 10.6 & 15.8 \\
+    $o_i$ (out)          & 1.8 & 3.0 & 3.6 & 4.1 & 4.6 & 5.9 & 6.7 & 7.4 & 7.4 & 7.4 \\
+    \midrule
+    \multicolumn{11}{@{}p{13.6cm}@{}}{$\mathrm{ROM}_{32}[0..31]$ = 2, 2, 2, 3, 5, 5, 6, 6, 7, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 13, 14, 14, 14, 15, 15, 15, 15, 15 \quad (index $= \lfloor |L_{\mathrm{cal}}| \rfloor$, output $\times 4$: entry 15 is log-odds 3.75)} \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{algorithm}[H]
+\caption{\textsc{MeasureReliabilityMap}: how Table~\ref{tab:cal_map} was produced (\texttt{experiments/llr\_shape.py}).}
+\label{alg:cal_measure}
+\begin{algorithmic}[1]
+\Require a transceiver at the training operating point; $n$ frames; bin edges $E = (0, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 11, 14, 17, 20)$
+\Ensure pairs $(m_i, o_i)$
+\For{each frame} \Comment{self-labelling: the transmitter's own bit stream is the truth}
+    \State build a random 27-byte BPSK 1/3 frame; channel: offset $\mathcal{U}[300,1200)$, CFO $\mathcal{U}(-60,60)$\,Hz, AWGN
+    \State detect and derotate as the receiver would; skip the frame if detection fails
+    \State $\Lambda \gets$ raw data-block LLRs from Algorithm~\ref{alg:frame_demod}, \emph{before} any temperature or map
+    \State $x \gets 2\cdot\mathrm{encode\_block}(\text{payload}) - 1$ \Comment{FEC, pad, interleave, scramble}
+    \State append $\Lambda \cdot x$ to the pool \Comment{sign = right/wrong, $|\cdot|$ = claimed reliability}
+\EndFor
+\For{each bin $[E_i, E_{i+1})$ with at least 80 samples}
+    \State $S \gets \{\Lambda x : E_i \le |\Lambda x| < E_{i+1}\}$;\quad $n_i \gets |S|$
+    \State $p_i \gets \mathrm{clip}\big(\#\{S < 0\}/n_i,\ 0.5/n_i,\ 1 - 0.5/n_i\big)$ \Comment{empirical error rate, half-count clamp}
+    \State $m_i \gets \mathrm{mean}(|S|)$;\quad $o_i \gets \ln\big((1 - p_i)/p_i\big)$ \Comment{what this bin is worth}
+\EndFor
+\State cap $o_i$ at the largest data-justified value (7.4) \Comment{the clipped top cannot claim more than the data showed}
+\State \Return $(m_i, o_i)$ in increasing $m_i$ \Comment{$\hat\alpha = 2\,\mathbb{E}[\Lambda x]/\mathrm{Var}[\Lambda x]$ is recorded alongside}
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Float LLR calibration as deployed (\texttt{Transceiver.demod\_frame}).}
+\label{alg:cal_float}
+\begin{algorithmic}[1]
+\Require header LLRs $\Lambda_h$ (96 positions), decoded header bits; data LLRs $\Lambda$; $\mu$; \texttt{llr\_recal}
+\Ensure calibrated data LLRs
+\State $x_h \gets 2\cdot\mathrm{encode\_block}(\text{header bits}) - 1$ \Comment{93 coded bits $+$ 3 pads, as transmitted}
+\State $\ell \gets \Lambda_h \cdot x_h$;\quad $\alpha \gets \mathrm{clip}\big(2\,\mathrm{mean}(\ell) / \mathrm{Var}(\ell),\ 0.05,\ 4\big)$ \Comment{$\mathrm{Var} = 2\,\mathrm{Mean}$ for a true LLR; 1 if Var $\approx 0$}
+\State $\Lambda \gets \alpha\, \Lambda$ \Comment{temperature: invisible to Viterbi, honest for HARQ and SPA}
+\If{\texttt{llr\_recal} = ``auto'' \textbf{and} $\mu \le 2$} \Comment{BPSK/QPSK-trained map}
+    \State $\Lambda \gets \mathrm{sign}(\Lambda) \cdot \mathrm{interp}\big(|\Lambda|;\ (m_i),\ (o_i)\big)$ \Comment{piecewise linear, flat beyond the ends}
+\ElsIf{\texttt{llr\_recal} is a callable} $\ \Lambda \gets \texttt{llr\_recal}(\Lambda)$
+\EndIf
+\State \Return $\Lambda$ \Comment{off in the plain \texttt{Transceiver}; the station sets auto}
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Integer LLR calibration (fixed-point twin and C port).}
+\label{alg:cal_int}
+\begin{algorithmic}[1]
+\Require header block $(h_{64}, e_h)$ and data block $(d_{64}, e_d)$ from Algorithm~\ref{alg:demod_int} (full precision, block exponents); header bits; $\mu$; \texttt{calibrate} flag
+\Ensure decoder-ready data LLRs
+\If{\textbf{not} \texttt{calibrate} \textbf{or} $\mu > 2$} \Return $\textsc{Quantize}(d_{64},\ 8 \text{ if } \mu = 4 \text{ else } 6)$ \EndIf
+\State $x_h \gets 2\cdot\mathrm{encode\_block}(\text{header bits}) - 1$ as int8 \Comment{same order as the received stream}
+\State $s_f \gets \max(0,\ \mathrm{bitlength}(\max |h_{64}|) - 20)$;\quad $\ell \gets (h_{64} \gg s_f) \cdot x_h$ \Comment{20 bits: sums fit int64}
+\State $n \gets |\ell|$;\quad $m \gets \sum \ell$;\quad $q \gets \sum \ell^2$;\quad $\mathrm{den} \gets n q - m^2$
+\If{$\mathrm{den} \le 0$ \textbf{or} $m \le 0$} \Return $\textsc{Quantize}(d_{64}, 6)$ \Comment{degenerate fit: fall back} \EndIf
+\State $\alpha_{12} \gets \max\big((2 m n \ll 12) / \mathrm{den},\ 1\big)$ \Comment{$= 2\,\mathrm{Mean}/\mathrm{Var}$ in Q12: the one divider}
+\State $\delta \gets e_d - (e_h + s_f)$;\quad $d \gets d_{64} \gg \delta$ (or $\ll -\delta$) \Comment{into the header's fitted domain}
+\State $L_{\mathrm{cal}} \gets (\alpha_{12} \cdot d) \gg 10$ \Comment{calibrated LLR in Q2, i.e.\ $\times 4$}
+\State $i \gets \min(|L_{\mathrm{cal}}| \gg 2,\ 31)$ \Comment{integer part of $|L_{\mathrm{cal}}|$, capped}
+\State \Return $\mathrm{sign}(L_{\mathrm{cal}}) \cdot \mathrm{ROM}_{32}[i]$ \Comment{the 32-entry map; output is also $\times 4$}
+\end{algorithmic}
+\end{algorithm}
+
+Two things distinguish the integer calibration from a transcription of
+the float one.  The block exponents of Algorithm~\ref{alg:demod_int}
+mean the header and data LLRs arrive on different scales, and the fit
+is only meaningful if the data block is first shifted into the exact
+domain the header was fitted in (the shift $\delta$) --- the C port and the
+fixed-point twin carry \texttt{hdr\_scale\_fit} for this and nothing
+else.  And the ROM is indexed by the \emph{integer part} of the
+calibrated LLR, so it is a 32-step staircase rather than the float
+map's piecewise-linear interpolation; it was trained on the fixed
+chain's own calibrated LLRs, which are more overconfident at the top
+than the float ones ($|L|$ claiming log-odds $\sim$25 where the data
+say 3.4), which is why its shape is more compressive and why it cannot
+be derived from Table~\ref{tab:cal_map}'s float row.  Section~\ref{sec:fixed}
+records the consequence: with \texttt{calibrate} off, the 6-bit
+peak-normalized quantization of the parity path already compresses the
+LLRs enough that the fixed receiver matches or beats the recalibrated
+float one at $-9/-10$\,dB, and the calibrated mode buys a stable
+cross-frame scale for HARQ rather than packet error rate.
