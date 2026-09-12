@@ -244,7 +244,7 @@ up to ISR $+10$\,dB.
     other-mode preamble & $-4.0$ / $-2.6$ & $-9.5$ / $-2.9$ & $-1.0$ / $-2.1$ \\
     same-mode frames    & $-5.4$ / $-2.6$ & $-9.8$ / $-2.4$ & $-2.7$ / $-2.7$ \\
     SSB voice           & $-8.9$ / $-5.8$ & $-10.0$ / $-8.2$ & $-2.2$ / $-2.1$ \\
-    CW carrier          & never / never & never / never & $-2.7$ / $-2.5$ \\
+    CW carrier          & never / never & never / never & never / never \\
     \bottomrule
     \end{tabular}
 \end{table}
@@ -268,16 +268,20 @@ outright.  With preemption and the net key the same-mode-frames column
 is the lock-stealing limit and nothing else; with the excision a
 carrier no longer breaks the link at NORMAL at any ratio measured, and
 under a carrier alone the streaming receiver commits once a minute
-instead of being blind.  At EXTREME the carrier column is partial: the
-float receiver is back under 15\,\% PER from ISR $+3$\,dB, the
-streaming receiver at 38--63\,\%, because a $-15$\,dB frame leaves the
-carrier's frequency estimate noisier and the streaming finder
-estimates over one tone window where the float model has the whole
-recording.  Voice is unchanged ($-6$ to $-10$\,dB): its harmonics fall
-on most carriers and its syllables on half the symbols, so the
-weighting has no clean reference, and the detector's lock goes at ISR
-0\,dB.  A frequency-tracking loop on the notch's rejected component is
-the open thread.  The firmware with all four mechanisms runs on the
+instead of being blind.  At EXTREME the carrier column first read
+$-2.5$\,dB because of a hole at ISR 0\,dB (35\,\% streaming, 53\,\%
+float): the first finder counted only the four strongest bins above
+$4\times$ per block and found an on-bin carrier but not one split
+between two bins; the per-bin finder of \S\ref{sec:excision} closed it
+(6.7\,\% at $-3$\,dB, 3.3\,\% at 0\,dB, under 4\,\% everywhere for
+both receivers), after the streaming receiver's own two lessons on the
+way -- the reset of the search's region when a notch engages, gated on
+that region being weak, and a release ratio the finder's sensitivity
+can live with.  Voice is unchanged
+($-6$ to $-10$\,dB): its harmonics fall on most carriers and its
+syllables on half the symbols, so the weighting has no clean reference,
+and the detector's lock goes at ISR 0\,dB.  Nothing on the carrier
+remains open; the lock-stealing limit and voice do.  The firmware with all four mechanisms runs on the
 two-board stand: a 6000-byte file crosses byte-identical in seven frames
 each way with no timeouts, the beacons are clean, a mismatched net key
 refuses frames on the air (four timeouts in 72\,s) and a matched one

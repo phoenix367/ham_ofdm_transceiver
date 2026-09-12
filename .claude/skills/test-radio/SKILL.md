@@ -56,7 +56,9 @@ streaming abandoned; `RX ... d=<snr*10>` on the receiver shows every
 decode. A transfer that works per-frame but dies streamed is a
 firmware-interaction bug, not a channel one -- see the ladder's step 1.
 
-**3. Read both beacons.** Needs the bridge (`make bridge`):
+**3. Read both beacons.** Needs the bridge (`make bridge`); the
+`read-beacons` skill has the field-by-field reading, the capture-ring
+dump and the host replay A/B:
 
 ```bash
 cd cport && ../venv/bin/python bench/radio_beacon.py      # or python3

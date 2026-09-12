@@ -91,18 +91,11 @@ typedef struct {
     int64_t band;
     int64_t dot[2][MAX_SHIFTS];
     int exp;
-    /* excess bins of this block (rx_internal.h det_block_excess),
-     * strongest first, for the rolling carrier finder. Bytes, not
-     * values: D2 holds 176 of these beside the raw ring with ~2 kB to
-     * spare, so the carrier's frequency is measured from the raw ring
-     * at request time rather than from stored spectra. */
-    uint8_t exc_bin[DET_N_EXC];
-    int8_t n_exc;
 } blk_sum_t;
 
 /* STATIONARY-CARRIER EXCISION, streaming twin of rx_find_tones (reasoning
- * in ofdm.py, FullOFDMModem.EXC_X). Each instance keeps a rolling history
- * of its blocks' excess bins, EXC_HIST_SAMPLES deep = one EXTREME tone
+ * in ofdm.py, FullOFDMModem.IND_X). Each instance keeps a rolling history
+ * of its blocks' ON bins, EXC_HIST_SAMPLES deep = one EXTREME tone
  * field (3 x 160 x 128 samples, 5.1 s) WHATEVER ITS OWN MODE, so that a
  * bin lit by a tone comb -- ours, a stranger's preamble train, or a
  * peer's EXTREME preamble seen by the NORMAL instance -- is on for at
@@ -119,16 +112,21 @@ typedef struct {
  * (dsp.c). 5.1 s of latency at onset is the price of never notching a
  * preamble; the sweep gives the streaming receiver that lead.
  *
- * The frequency is measured at request time from the raw ring: the
- * last EXC_FREQ_BLOCKS blocks are re-read as REAL samples (the
- * positive bins of a real block's FFT are the analytic signal's, and
- * no Hilbert is needed), and the bin's phase advance between
- * consecutive blocks gives the frequency inside the bin. Once a notch
- * is up the ring holds notched samples, so a bin that already has a
- * notch within a bin's width only refreshes it. */
+ * A stationary group is judged from per-bin running averages of the
+ * bin/mean ratio (one division per bin per block, tau 64 blocks): the
+ * averaged-ratio and comb tests of rx_internal.h need nothing else.
+ * Only a candidate that passes them has its FREQUENCY measured, once,
+ * by re-reading the last DET_FIND_BLOCKS blocks of the raw ring as REAL
+ * samples (the positive bins of a real block's FFT are the analytic
+ * signal's, no Hilbert needed) for the bin's phase advance between
+ * consecutive blocks. A first version re-read the ring to judge every
+ * group: during an EXTREME frame all 23 subcarriers are stationary,
+ * each its own group, and that was 1472 FFTs per 43 ms block -- hours
+ * under QEMU, impossible on the part. Once a notch is up the ring
+ * holds notched samples, so a bin that already has a notch within a
+ * bin's width only refreshes it. */
 #define HIST_MAX 256
 #define EXC_HIST_SAMPLES (3 * 160 * FFT_BINS)   /* EXTREME tone field */
-#define EXC_FREQ_BLOCKS 64
 
 /* Raw (NOT derotated) lag-FFT_BINS correlation per block, including the
  * products that straddle the previous block. Summing these over the tone
@@ -193,10 +191,12 @@ struct rxs_state {
     peak_t ch;                /* the challenger, live during a decode */
     int64_t locked_metric;    /* what the frame in progress committed on */
     int64_t locked_energy;    /* its tone-bin energy, log2 Q4 */
-    /* rolling carrier finder */
-    uint8_t hist_bin[HIST_MAX][DET_N_EXC];
-    int8_t hist_n[HIST_MAX];
-    int16_t hits[512 / 2];          /* DET_B max: EXTREME 512 */
+    /* rolling carrier finder (see HIST_MAX): per block one bit per bin
+     * ("on" = above 1.5x the in-band mean), a ring hist_len blocks deep,
+     * and the per-bin count of set bits in the ring */
+    uint8_t ind[EXC_HIST_SAMPLES / 16];   /* hist_len blocks x B/16 bytes = 3840 */
+    uint8_t hits[512 / 2];
+    uint16_t ravg[512 / 2];   /* per-bin EWMA of pow/mean, Q8, tau 64 blocks */
     int hist_len, hist_fill, hist_pos;
     int64_t preempts;         /* decodes abandoned for a stronger peak */
     int64_t cs_abs, start_abs, cfo_word;
@@ -469,74 +469,122 @@ void rxs_dump_bank(void)
 #define SDBG(...)
 #endif
 
-/* rolling stationary-carrier finder (see HIST_MAX): fold this block's
- * excess bins into the history and request a notch for any bin that has
- * been in excess for 90 % of the last hist_len blocks */
-static void carrier_track(rxs_t *r, int64_t blk_idx, const blk_sum_t *bs)
+/* rolling stationary-carrier finder (see HIST_MAX): fold this block's ON
+ * bits into the history and, for any bin ON in 85 % of the last
+ * hist_len blocks, judge the group from the raw ring and request a
+ * notch */
+static void carrier_track(rxs_t *r, int64_t blk_idx, const uint8_t *bits)
 {
-    int e, k, H = r->hist_len;
+    int H = r->hist_len, half = r->B / 2, S = r->B / FFT_BINS, k, byte;
+    int nbytes = half / 8;
+    uint8_t *slot = r->ind + r->hist_pos * nbytes;
     if (r->hist_fill == H) {   /* drop the oldest block */
-        for (e = 0; e < r->hist_n[r->hist_pos]; e++)
-            r->hits[r->hist_bin[r->hist_pos][e]]--;
+        const uint8_t *old = slot;
+        for (k = 1; k < half; k++)
+            if (old[k >> 3] & (1u << (k & 7)))
+                r->hits[k]--;
     } else {
         r->hist_fill++;
     }
-    r->hist_n[r->hist_pos] = (int8_t)bs->n_exc;
-    for (e = 0; e < bs->n_exc; e++) {
-        r->hist_bin[r->hist_pos][e] = bs->exc_bin[e];
-        r->hits[bs->exc_bin[e]]++;
-    }
+    for (byte = 0; byte < nbytes; byte++)
+        slot[byte] = bits[byte];
+    for (k = 1; k < half; k++)
+        if (bits[k >> 3] & (1u << (k & 7)))
+            r->hits[k]++;
     r->hist_pos = (r->hist_pos + 1) % H;
     if (r->hist_fill < H)
         return;
-    for (k = 1; k < r->B / 2; k++) {
-        int j, best = -1;
-        if (r->hits[k] * 20 < 17 * H)
+    for (k = 1; k < half; k++) {
+        int j, q, best, comb = 0;
+        int64_t sr = 0, si = 0, pr = 0, pi = 0, ang, mag, b, first;
+        int K = r->hist_len < DET_FIND_BLOCKS ? r->hist_len : DET_FIND_BLOCKS;
+        if (r->hits[k] * DET_STAT_DEN < DET_STAT_NUM * H)
             continue;
         j = k;
-        while (j + 1 < r->B / 2 && r->hits[j + 1] * 20 >= 17 * H)
+        while (j + 1 < half && r->hits[j + 1] * DET_STAT_DEN >= DET_STAT_NUM * H)
             j++;
-        /* the closest bin to the carrier is the strongest of the group:
-         * the block's excess list is strongest first */
-        for (e = 0; e < bs->n_exc && best < 0; e++)
-            if (bs->exc_bin[e] >= k && bs->exc_bin[e] <= j)
-                best = bs->exc_bin[e];
-        if (best < 0)
-            best = k;
+        /* the strongest bin of the group, by running average */
+        best = k;
+        for (q = k; q <= j; q++)
+            if (r->ravg[q] > r->ravg[best])
+                best = q;
+        if (r->ravg[best] < DET_AVG_Q8) {
+            k = j;
+            continue;
+        }
+        /* a modulated comb is not a carrier (rx_internal.h) */
+        for (q = best - S; q <= best + S; q += 2 * S)
+            if (q >= 1 && q < half && r->hits[q] * 2 >= H
+                && (int64_t)r->ravg[q] * DET_COMB_RATIO >= r->ravg[best])
+                comb = 1;
+        if (comb) {
+            k = j;
+            continue;
+        }
         /* a notch already within a bin's width of it: refresh, no
          * re-estimate (the ring is notched there by now) */
-        if (!notch_bank_near(&g_bank, (uint32_t)(((int64_t)best << 32) / r->B),
-                             (uint32_t)(((int64_t)1 << 32) / r->B))) {
-            /* phase advance of the bin over the last EXC_FREQ_BLOCKS
-             * blocks, straight from the raw ring (real input) */
-            int64_t sr = 0, si = 0, ang, mag, b, pr = 0, pi = 0;
-            int K = r->hist_len < EXC_FREQ_BLOCKS ? r->hist_len : EXC_FREQ_BLOCKS;
-            int64_t first = blk_idx - K + 1, have = 0;
-            if (first < 0)
-                first = 0;
-            for (b = first; b <= blk_idx; b++) {
-                int64_t re[512], im[512];
-                int t, exp;
-                for (t = 0; t < r->B; t++) {
-                    re[t] = g_raw[(int)((b * r->B + t) % RXS_RAW_RING_LEN)];
-                    im[t] = 0;
-                }
-                fft_bfp(re, im, r->B, 13, &exp);
-                if (have) {
-                    sr += pr * re[best] + pi * im[best];
-                    si += pr * im[best] - pi * re[best];
-                }
-                pr = re[best];
-                pi = im[best];
-                have = 1;
+        if (notch_bank_near(&g_bank, (uint32_t)(((int64_t)best << 32) / r->B),
+                            (uint32_t)(((int64_t)1 << 32) / r->B))) {
+            k = j;
+            continue;
+        }
+        /* its frequency: the bin's phase advance over the last K blocks
+         * of the raw ring, real input */
+        first = blk_idx - K + 1;
+        if (first < 0)
+            first = 0;
+        for (b = first; b <= blk_idx; b++) {
+            int64_t re[512], im[512];
+            int t, exp;
+            for (t = 0; t < r->B; t++) {
+                re[t] = g_raw[(int)((b * r->B + t) % RXS_RAW_RING_LEN)];
+                im[t] = 0;
             }
-            if (sr != 0 || si != 0) {
-                uint32_t word;
-                cordic_atan2(si, sr, &ang, &mag);
-                word = (uint32_t)((((int64_t)best << 32) + ang + r->B / 2)
-                                  / r->B);
-                SDBG("carrier: bin %d word %u -> notch\n", best, word);
-                notch_bank_request(&g_bank, word);
+            fft_bfp(re, im, r->B, 13, &exp);
+            if (b > first) {
+                sr += pr * re[best] + pi * im[best];
+                si += pr * im[best] - pi * re[best];
+            }
+            pr = re[best];
+            pi = im[best];
+        }
+        if (sr != 0 || si != 0) {
+            uint32_t word;
+            cordic_atan2(si, sr, &ang, &mag);
+            word = (uint32_t)((((int64_t)best << 32) + ang + r->B / 2)
+                              / r->B);
+            SDBG("carrier: bin %d word %u -> notch\n", best, word);
+            if (notch_bank_request(&g_bank, word) == 2) {
+                /* A carrier just got its notch: whatever tone region
+                 * the search has been tracking was built on the raw
+                 * carrier, not on a preamble. Measured at EXTREME:
+                 * the carrier sat in a mask bin of one CFO shift for
+                 * the 5.1 s before the notch engaged, its region's
+                 * stability commit fired 123 blocks later -- as the
+                 * frame arrived -- and the ZC and header attempts on
+                 * that anchor held the receiver through the frame's
+                 * tone field, which at 10 dB below the carrier could
+                 * not preempt them. Only windows starting after this
+                 * block count from here (NORMAL never noticed: its
+                 * window is 15 blocks, the false attempt is over long
+                 * before a frame can arrive). */
+                if (r->pk.best_metric < (int64_t)r->thr_q10 * r->thr_q10
+                                            * WEAK_COMMIT_X) {
+                    /* ...but only a WEAK region: a carrier's is (7x the
+                     * threshold on the traced failure), a genuine peak's
+                     * is above the 64x strong-commit bar even at the
+                     * knee. A borderline carrier engages its notch at a
+                     * random moment, mid-frame included, and dropping a
+                     * strong region then cost 68 % of the frames at ISR
+                     * -3 dB at EXTREME. */
+                    r->pk.crossed = 0;
+                    r->pk.decline = 0;
+                    r->pk.best_metric = -1;
+                    r->pk.min_blk = blk_idx + 1;
+                }
+                r->ch.crossed = 0;
+                r->ch.decline = 0;
+                r->ch.best_metric = -1;
             }
         }
         k = j;
@@ -611,14 +659,21 @@ static void block_summary(rxs_t *r, int64_t blk_idx)
         pow_[k] = re[k] * re[k] + im[k] * im[k];
     for (k = 1; k < B / 2; k++)
         bs->band += pow_[k];
-    {
-        int bins[DET_N_EXC], e;
-        int64_t exc[DET_N_EXC];
-        bs->n_exc = (int8_t)det_block_excess(pow_, B, bins, exc);
-        for (e = 0; e < bs->n_exc; e++)
-            bs->exc_bin[e] = (uint8_t)bins[e];
+    {   /* carrier finder: which bins are above 1.5x the in-band mean,
+         * and each bin's running average of its ratio to the mean */
+        uint8_t bits[512 / 16];
+        int64_t mean = bs->band / (B / 2 - 1);
+        memset(bits, 0, sizeof bits);
+        for (k = 1; k < B / 2; k++) {
+            int64_t rq = mean > 0 ? (pow_[k] << 8) / mean : 0;
+            if (rq > 65535)
+                rq = 65535;
+            if (pow_[k] * DET_IND_DEN > DET_IND_NUM * mean)
+                bits[k >> 3] |= (uint8_t)(1u << (k & 7));
+            r->ravg[k] = (uint16_t)(r->ravg[k] + ((rq - r->ravg[k]) >> 6));
+        }
+        carrier_track(r, blk_idx, bits);
     }
-    carrier_track(r, blk_idx, bs);
     for (sh = -r->max_shift; sh <= r->max_shift; sh++) {
         int64_t s0 = 0, s1 = 0;
         for (k = 0; k < B; k++) {

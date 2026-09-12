@@ -665,30 +665,52 @@ class FullOFDMModem(TiledOFDMModem):
     # while a 30-Hz notch at the carrier's frequency decodes 15/15 at
     # every ratio up to +10 dB. So the receiver finds such carriers and
     # notches them out of the samples before anything else runs:
-    #   * per detection block, the in-band bins above EXC_X times the
-    #     block's MEAN in-band power are its EXCESS bins (at most N_EXC;
-    #     the mean rather than the median because a carrier alone on a
-    #     quiet channel has a median of zero, and then every crumb of
-    #     leakage counts);
-    #   * a bin in excess in >= STATIONARY_FRAC of the blocks is a
-    #     carrier -- our own tone comb is on for one tone field only, a
-    #     stranger's preamble train lights each bin ~2/3 of the time,
-    #     and white noise's strongest bins (~5-6x the mean over 63-255
-    #     bins) pass a 4x clamp in a fair share of blocks but never the
-    #     same bin in 85 % of them. The clamp is as LOW as it is because
-    #     a carrier halfway between two bins keeps only 40 % of its power
-    #     in each, and the N_EXC slots are what keep such a carrier in
-    #     the count when noise peaks compete for them;
+    #   * per FIND_FFT-point block, every in-band bin above IND_X times
+    #     the block's mean power is ON (the mean rather than the median
+    #     because a carrier alone on a quiet channel has a median of
+    #     zero); a bin ON in >= STATIONARY_FRAC of the blocks whose
+    #     averaged bin/mean ratio reaches AVG_X is a carrier candidate.
+    #     A carrier at the frame's power at EXTREME is only 4x the
+    #     per-bin mean, 3.7x when split between two bins, and passes
+    #     1.5x in ~98 % of blocks; white noise passes it in 22 % of
+    #     blocks and never the same bin in 85 % of them; our own tone
+    #     comb is on for one tone field, a stranger's preamble train
+    #     lights each bin exactly 2/3 of the time. (A first version
+    #     counted only the top four bins above 4x per block: it found an
+    #     on-bin carrier and missed a split one -- 35-53 % PER at ISR
+    #     0 dB at EXTREME -- and its slot limit was what kept our own
+    #     data subcarriers, at ~11x the mean for the whole frame, out of
+    #     the count.)
+    #   * DATA IS NOT A CARRIER: a candidate whose neighbour one
+    #     subcarrier away (FIND_FFT/128 bins) is also on half the time
+    #     at >= 1/8 of its power is a modulated comb --
+    #     our own subcarriers at high SNR, an EXTREME frame longer than
+    #     the streaming history -- and is left alone. A split carrier's
+    #     other half sits ONE bin away, not one subcarrier, which is why
+    #     the finder uses 512-point blocks whatever the detector uses;
+    #     and a carrier worth notching (ISR >= -4.6 dB; the demodulator
+    #     copes below -6) is more than 8x any data subcarrier, while a
+    #     subcarrier that is also a comb bin averages at most ~3x its
+    #     neighbours even in the shortest frame (the comb carries 5.75x a
+    #     subcarrier's power for 2/3 of the preamble, which is what put
+    #     the 9-byte ROBUST golden's comb bins at 2.8x). The neighbour
+    #     only has to be on half the time: in a recording that is one
+    #     frame and little else, that comb-and-subcarrier bin is on 87 %
+    #     while its data neighbours are on 74 %.
     #   * its frequency inside the bin comes from the phase advance of
     #     that bin between consecutive blocks (unambiguous over +-half a
-    #     bin, and the strongest bin of an adjacent group is the closest);
+    #     bin; the strongest bin of an adjacent group is the closest);
     #   * a second-order IIR notch NOTCH_BW_HZ wide removes it.
     # The fixed model and the C port carry the same definitions (integer
-    # twins, bit-exact with each other); the streaming receiver keeps a
-    # rolling history instead of the whole recording.
-    EXC_X = 4.0
-    N_EXC = 4
+    # twins, bit-exact with each other) on their own detection block
+    # (256/512/512); the streaming receiver keeps a rolling history in
+    # bit-packed form instead of the whole recording.
+    IND_X = 1.5
     STATIONARY_FRAC = 0.85
+    NEIGHBOUR_FRAC = 0.5    # a data neighbour need not be as steady as a carrier
+    COMB_RATIO = 8.0        # ...but must hold >= 1/8 of the candidate's power
+    AVG_X = 2.5
+    FIND_FFT = 512
     MIN_TONE_BLOCKS = 8
     MAX_NOTCHES = 3
     NOTCH_BW_HZ = 30.0
@@ -891,40 +913,42 @@ class FullOFDMModem(TiledOFDMModem):
         k = np.round((cfo_est - cfo_fine) / bin_width_hz)
         return float(cfo_fine + k * bin_width_hz)
 
-    # --- stationary-carrier excision (see EXC_X) ----------------------------
+    # --- stationary-carrier excision (see IND_X) ----------------------------
 
     def find_stationary_tones(self, real_signal) -> typing.List[float]:
         """Frequencies (Hz) of up to MAX_NOTCHES carriers present through
         the whole recording, from the real samples' block spectra."""
-        B = self._detect_fft_len or self._fft_bins
+        B = self.FIND_FFT
+        S = B // self._fft_bins                     # bins per subcarrier
         x = np.asarray(real_signal, dtype=np.float64)
         nb = len(x) // B
         if nb < self.MIN_TONE_BLOCKS:
             return []
         spec = np.fft.rfft(x[:nb * B].reshape(nb, B), axis=1)[:, :B // 2]  # bins 0..B/2-1
         pw = np.abs(spec) ** 2
-        mean = pw[:, 1:].mean(axis=1)
-        top = np.argsort(-pw[:, 1:], axis=1)[:, : self.N_EXC] + 1          # (nb, N_EXC) bins
-        vals = np.take_along_axis(pw, top, axis=1)
-        exc = vals > (self.EXC_X * mean)[:, None]
-        hits = np.zeros(B // 2, dtype=int)
-        energy = np.zeros(B // 2)
-        np.add.at(hits, top[exc], 1)
-        np.add.at(energy, top[exc], vals[exc])
-        stationary = np.flatnonzero(hits >= self.STATIONARY_FRAC * nb - 1e-9)
+        mean = np.maximum(pw[:, 1:].mean(axis=1), 1e-300)
+        ratio = pw / mean[:, None]
+        frac = (ratio > self.IND_X).mean(axis=0)
+        avg = ratio.mean(axis=0)
+        frac[0] = avg[0] = 0.0
+        stat = frac >= self.STATIONARY_FRAC - 1e-9
+        cand = stat & (avg >= self.AVG_X)
+        keep = cand.copy()
+        for k in np.flatnonzero(cand):
+            for nbk in (k - S, k + S):              # a modulated comb, not a carrier
+                if 1 <= nbk < B // 2 and frac[nbk] >= self.NEIGHBOUR_FRAC and avg[nbk] * self.COMB_RATIO >= avg[k]:
+                    keep[k] = False
+        bins = np.flatnonzero(keep)
         freqs = []
         i = 0
-        while i < len(stationary) and len(freqs) < self.MAX_NOTCHES:
+        while i < len(bins) and len(freqs) < self.MAX_NOTCHES:
             j = i
-            while j + 1 < len(stationary) and stationary[j + 1] == stationary[j] + 1:
+            while j + 1 < len(bins) and bins[j + 1] == bins[j] + 1:
                 j += 1
-            group = stationary[i:j + 1]
-            k = int(group[np.argmax(energy[group])])              # closest bin to the carrier
-            rows = np.flatnonzero(((top == k) & exc).any(axis=1))
-            both = rows[np.isin(rows + 1, rows)]                 # consecutive blocks, both in excess
-            if len(both):
-                s = np.sum(np.conj(spec[both, k]) * spec[both + 1, k])
-                freqs.append((k + np.angle(s) / (2 * np.pi)) * self._sample_rate / B)
+            group = bins[i:j + 1]
+            k = int(group[np.argmax(avg[group])])   # closest bin to the carrier
+            s = np.sum(np.conj(spec[:-1, k]) * spec[1:, k])
+            freqs.append((k + np.angle(s) / (2 * np.pi)) * self._sample_rate / B)
             i = j + 1
         return freqs
 

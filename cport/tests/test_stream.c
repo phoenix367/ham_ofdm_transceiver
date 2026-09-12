@@ -492,6 +492,54 @@ int main(void)
               decoded == 1 && max_notch == 0);
     }
 
+    /* EXTREME under a CW carrier 10 dB above the frame, frame at -14 dB
+     * SNR, the carrier on from the start: the notch engages 5.1 s in,
+     * the frame's tone field begins 5.5 s in. Pins the reset of the
+     * search's pending region when a notch engages (rx_stream.c
+     * carrier_track): without it the raw carrier's above-threshold
+     * region commits by stability as the frame arrives and the frame,
+     * 10 dB weaker, cannot preempt the false anchor -- measured 35-63 %
+     * PER from ISR 0 dB up at EXTREME with the notch itself on
+     * frequency to 0.05 Hz. */
+    {
+        uint8_t pkt[512];
+        int pkt_n = data_encode(55, (const uint8_t *)"CW+EXTREME 27-BYTE PAYLOAD.",
+                                27, pkt);
+        int lead = 66000, n_fr, n, k, pos, decoded = 0;   /* 523984-sample frame: 598 k fits g_samples */
+        uint32_t ph = 0, word = 186030711u, lcg = 31337u;   /* ~519.7 Hz */
+        rxs_event_t ev;
+        rxs_t *r;
+        n_fr = tx_build_frame(MODE_EXTREME, pkt, pkt_n, PKT_TYP_DATA, MOD_BPSK,
+                              CC_R13, g_samples + lead);
+        n = lead + n_fr + 8000;
+        memset(g_samples, 0, (size_t)lead * sizeof(int16_t));
+        memset(g_samples + lead + n_fr, 0, 8000 * sizeof(int16_t));
+        for (k = 0; k < n; k++) {
+            /* frame /8 (rms ~1750), uniform noise +-15000 (rms 8660,
+             * -14 dB), carrier amplitude 7800 (rms 5500, ISR +10 dB) */
+            int32_t v = g_samples[k] / 8;
+            lcg = lcg * 1103515245u + 12345u;
+            v += (int32_t)((lcg >> 16) % 30000u) - 15000;
+            v += (int32_t)(((int64_t)7800 * NCO_COS[ph >> 20]) >> 15);
+            ph += word;
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            g_samples[k] = (int16_t)v;
+        }
+        r = rxs_open(MODE_EXTREME, 0);
+        for (pos = 0; pos < n; pos += 512) {
+            int c = n - pos < 512 ? n - pos : 512;
+            if (rxs_push(r, g_samples + pos, c, &ev) && ev.type == 1
+                && ev.pkt_bits_n == pkt_n && memcmp(ev.bits, pkt, (size_t)pkt_n) == 0)
+                decoded++;
+        }
+        if (rxs_flush(r, &ev) && ev.type == 1 && ev.pkt_bits_n == pkt_n
+            && memcmp(ev.bits, pkt, (size_t)pkt_n) == 0)
+            decoded++;
+        printf("  EXTREME under CW +10 dB: decoded %d, notches %d\n", decoded, rxs_notches());
+        check("EXTREME frame under a CW carrier 10 dB above it decodes", decoded == 1);
+    }
+
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

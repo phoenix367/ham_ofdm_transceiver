@@ -98,18 +98,30 @@ int rxd_snr_block_moments(const llr_t *arr, const int8_t *ref, int n,
                           int cap, int64_t *num_out, int64_t *den_out);
 int rxd_log2_q4(int64_t v);
 
-/* EXCESS BINS of one detection block (the float model's
- * FullOFDMModem.EXC_X, the fixed model's block_excess): the top DET_N_EXC
- * in-band bins above DET_EXC_X x mean(in-band bins) (floor division by
- * B/2-1), and their excess over that clamp; the top bins are kept by an
- * ascending scan with strict replacement (ties -> lower bin). The stationary-carrier finders
- * (rx_find_tones here, the rolling one in rx_stream.c) count how often a
- * bin is in excess. Shared so the twins stay bit-exact. `pow` is one
- * block's power spectrum (any common scale); returns the count found. */
-#define DET_EXC_X 4
-#define DET_N_EXC 4
+/* STATIONARY-CARRIER FINDER constants (the float model's
+ * FullOFDMModem.IND_X / STATIONARY_FRAC / AVG_X, the fixed model's
+ * rx.py -- bit-exact twins): a bin is ON when 2*pow > 3*mean (1.5x the
+ * in-band mean, mean = band sum / (B/2-1)); stationary when
+ * hits*20 >= 17*n; a candidate when its summed Q8 bin/mean ratio reaches
+ * 640*n (2.5x); rejected as a MODULATED COMB -- our own subcarriers at
+ * high SNR, an EXTREME frame outlasting the streaming history -- when a
+ * neighbour one subcarrier away (B/128 bins) is on half the time
+ * (hits*2 >= n) at >= 1/8 of its ratio (a data neighbour need not be
+ * as steady as a carrier: one frame plus padding puts a subcarrier that
+ * is also a comb bin at 87 % and its data neighbours at 74 %). A split carrier's other half is ONE bin away, a data comb's
+ * neighbour B/128 (>= 2 for every integer detector). */
+#define DET_IND_NUM 3
+#define DET_IND_DEN 2
+#define DET_STAT_NUM 17
+#define DET_STAT_DEN 20
+#define DET_AVG_Q8 640
+#define DET_COMB_RATIO 8   /* a data neighbour at >= 1/8 of the candidate's ratio
+                            * makes it a comb: a comb bin that is also a
+                            * subcarrier averages <= ~3x its neighbours even in
+                            * the shortest frame, a carrier worth notching
+                            * (ISR >= -4.6 dB) is > 8x any subcarrier */
 #define DET_MIN_TONE_BLOCKS 8
-int det_block_excess(const int64_t *pow, int B, int *bins, int64_t *exc);
+#define DET_FIND_BLOCKS 64   /* streaming: blocks re-read from the ring per candidate */
 
 /* stationary carriers of a whole recording (frame at once): up to
  * NOTCH_MAX phase words, from the real samples' block spectra */

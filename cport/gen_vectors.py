@@ -627,14 +627,16 @@ def gen_vectors():
 
     # --- stationary carrier: excision, bit-exact words + decode -------------
     # A NORMAL BPSK 1/3 frame plus a CW carrier synthesised from the NCO ROM
-    # (both sides can regenerate it exactly), amplitude 12000 at ~1503 Hz:
-    # the receiver must find the carrier's phase word and decode the frame.
+    # (both sides can regenerate it exactly), amplitude 20000 at ~1503 Hz
+    # (ISR ~0 dB: on the notching side of the finder's comb test, which
+    # leaves carriers under ~8x a data subcarrier alone): the receiver
+    # must find the carrier's phase word and decode the frame.
     from ofdm_phy.fixed.dsp import NCO as _NCO
     tpkt = Data(reserved=77, payload=bytes(range(100, 127)))
     tsig = txs[LinkMode.NORMAL].build_frame(tpkt)
     ts = np.concatenate([pad, tsig]).astype(np.int64)
     tone_word = int(round(1503.0 / 12000.0 * 2 ** 32))
-    tone_amp = 12000
+    tone_amp = 20000
     ph = (np.arange(len(ts), dtype=np.int64) * tone_word) & 0xFFFFFFFF
     rom = np.asarray(_NCO._rom()[0], dtype=np.int64)
     tone = (tone_amp * rom[ph >> 20]) >> 15

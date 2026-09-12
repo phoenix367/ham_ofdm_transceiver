@@ -8508,8 +8508,8 @@ static const uint8_t TONE_PKT[252] = {
 };
 
 #define TONE_WORD 537944654u
-#define TONE_AMP 12000
-#define TONE_FOUND_WORD 537794306u
+#define TONE_AMP 20000
+#define TONE_FOUND_WORD 537921536u
 #define TONE_START 5115
 
 static const uint8_t HARQ_PKT[252] = {

@@ -607,16 +607,17 @@ mechanisms below in place:
 | other-mode preamble train | −4.0 / −2.6 | −9.5 / −2.9 | −1.0 / −2.1 |
 | same-mode data frames | −5.4 / −2.6 | −9.8 / −2.4 | −2.7 / −2.7 |
 | SSB voice | −8.9 / −5.8 | −10.0 / −8.2 | −2.2 / −2.1 |
-| CW carrier | never / never | never / never | −2.7 / −2.5 |
+| CW carrier | never / never | never / never | never / never |
 
 "never" = PER stays under 10 % up to ISR +10 dB. Before the mechanisms
 the C receiver read −8.8 dB and "never" (an 18–28 % floor from −20 dB
 up) on same-mode frames, −4.8 / −4.2 dB on the carrier, and both
-receivers −7 to −9 dB on the carrier. At EXTREME the carrier column is
-partial: the float receiver is back under 15 % PER from ISR +3 dB up
-and the C receiver at 38–63 %, because a −15 dB frame leaves the
-carrier's frequency estimate noisier (the float estimates over the
-whole recording, the streaming receiver over one tone window).
+receivers −7 to −9 dB on the carrier. At EXTREME the carrier column
+used to read −2.5 dB because of a hole at ISR 0 dB (35 % C, 53 % float:
+the first finder counted only the four strongest bins above 4x per
+block and missed a carrier split between two bins); the per-bin finder
+closed it (6.7 % at −3 dB, 3.3 % at 0 dB, under 4 % everywhere for both
+receivers).
 
 What the numbers say:
 
@@ -628,15 +629,22 @@ What the numbers say:
   figures at +10 dB are worse than the C receiver's on these rows only
   because it takes the global argmax over a recording that now holds
   three times as many stranger preambles.
-- **A CW carrier no longer breaks the link at NORMAL, at any ratio
-  measured.** *Stationary-carrier excision* finds a bin above 4× the
-  block's mean power in ≥85 % of blocks, takes its frequency from the
-  phase advance between blocks (sub-Hz), and notches it 30 Hz wide out of
-  the samples before the Hilbert; all three implementations, one
-  definition, the streaming one with a global bank in front of the shared
-  ring sized so that it never notches a peer's EXTREME tone comb. Under a
-  carrier alone the streaming receiver now commits once a minute instead
-  of being blind.
+- **A CW carrier no longer breaks the link at NORMAL at any ratio
+  measured, nor at EXTREME from ISR +3 dB up.** *Stationary-carrier
+  excision* finds a bin above 1.5× the block's mean power in ≥85 % of
+  blocks (and not part of a modulated comb: its subcarrier neighbours
+  must not carry an eighth of its power), takes its frequency from the
+  phase advance between blocks (sub-Hz), and notches it 30 Hz wide out
+  of the samples before the Hilbert; all three implementations, one definition, the streaming one
+  with a global bank in front of the shared ring sized so that it never
+  notches a peer's EXTREME tone comb. The streaming notch also tracks the
+  carrier from its own rejected component (a 3 Hz mis-estimate converges
+  to 0.01 Hz in 3 s), and when a notch engages the search drops the tone
+  region the raw carrier had built: at EXTREME that region's late
+  stability commit used to hold the receiver through the frame that
+  followed (38–63 % PER from ISR +3 dB up, now under 2 %). Under a
+  carrier alone the streaming receiver commits once a minute instead of
+  being blind.
 - **A stranger's frames no longer capture the receiver or poison the
   link.** The *net key* seeds the header CRC-8, so a foreign link frame
   fails 0.27 s in and its link-control word never reaches the station
@@ -656,9 +664,11 @@ What the numbers say:
 On the two-board stand with this firmware (same net key on both, capability
 primer, 6000-byte file): byte-identical in 7 frames each way, 0 timeouts,
 0 retransmissions, rung 12, beacons clean (no capture overruns, no short
-transmissions). With the receiver on key 0 and the sender on key 90 a chat
-frame was refused for 72 s (4 timeouts, 4 retransmissions) and delivered
-the moment the receiver switched to key 90. The quiet wire's occasional
+transmissions); the run was repeated after the per-bin finder and the
+tracking notch went in, with the same result. With the receiver on key 0
+and the sender on key 90 a chat frame was refused for 72 s (5 timeouts,
+5 retransmissions) and both messages were delivered within 25 s of the
+receiver switching to key 90, the link still at rung 12. The quiet wire's occasional
 header attempts (about one per 8 s at EXTREME) predate the campaign: the
 same 33 s of captured idle audio replayed through the pre-change and the
 current host receivers commits identically (12 at NORMAL, 4 at EXTREME,
@@ -667,9 +677,9 @@ no notches). The firmware's RAM budget is now D2 with 0.6 kB and AXI with
 (`MAX_SYMS`, its largest EXT frame is 276) and places the weighting
 accumulators in DTCM.
 
-Open thread: a frequency-tracking loop on the notch's rejected component
-would give the streaming receiver the float model's carrier precision at
-EXTREME. Results: `results/interference.json` / `.png`. The sweep runs
+Open thread: none on the carrier; the stranger-preamble lock-stealing
+limit and voice remain as measured.
+Results: `results/interference.json` / `.png`. The sweep runs
 its workers one BLAS thread each (`--workers`, default cores minus two):
 the first version let every worker open its own thread pool and put a
 load of 10 on an 8-core host.

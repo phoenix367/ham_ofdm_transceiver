@@ -210,13 +210,6 @@ int64_t rx_lag_n_word(const samp_t *di, const samp_t *dq, int n)
  * Keep this in step with ofdm_phy/fixed/rx.py::_detect_newman. */
 
 static int64_t g_pows[MAX_BLOCKS * DET_B_MAX];
-/* frame-at-once carrier finder (rx_find_tones): per block, its excess
- * bins and their complex spectrum values, for the stationarity count and
- * the inter-block phase advance */
-static int16_t g_fb_bin[MAX_BLOCKS][DET_N_EXC];
-static int8_t g_fb_n[MAX_BLOCKS];
-static int32_t g_fb_re[MAX_BLOCKS][DET_N_EXC], g_fb_im[MAX_BLOCKS][DET_N_EXC];
-static int64_t g_fb_pow[MAX_BLOCKS][DET_N_EXC];
 /* No detection scratch here any more: the ZC scan pulls through
  * zc_src_t and both lag correlations run off a 128-sample delay line, so
  * neither the search window nor the coarse segment is ever resident. */
@@ -229,36 +222,6 @@ static int cmp_i64(const void *a, const void *b)
 }
 
 #include <stdlib.h> /* qsort for the median (host reference) */
-
-/* see rx_internal.h */
-int det_block_excess(const int64_t *pow, int B, int *bins, int64_t *exc)
-{
-    int64_t sum = 0, thr;
-    int n = B / 2 - 1, k, cnt = 0, i;
-    for (k = 1; k < B / 2; k++)
-        sum += pow[k];
-    thr = (int64_t)DET_EXC_X * (sum / n);
-    for (k = 1; k < B / 2; k++) {
-        int64_t v = pow[k];
-        int pos;
-        if (v <= thr)
-            continue;
-        pos = cnt;
-        while (pos > 0 && v > exc[pos - 1] + thr)
-            pos--;
-        if (pos >= DET_N_EXC)
-            continue;
-        for (i = (cnt < DET_N_EXC ? cnt : DET_N_EXC - 1); i > pos; i--) {
-            exc[i] = exc[i - 1];
-            bins[i] = bins[i - 1];
-        }
-        exc[pos] = v - thr;
-        bins[pos] = k;
-        if (cnt < DET_N_EXC)
-            cnt++;
-    }
-    return cnt;
-}
 
 /* tone stage: returns 0 + (sample_index, cfo_word), -1 on no lock */
 static int detect_newman(const det_mode_t *d, const samp_t *i_arr,
@@ -679,78 +642,85 @@ int rx_detect_zc_src(link_mode_t mode, const zc_src_t *src, int n,
 /* --- stationary-carrier excision, frame at once ------------------------
  * Twin of the fixed model's FixedReceiver._find_tones (bit-exact) and of
  * the float model's FullOFDMModem.find_stationary_tones. Reasoning in
- * ofdm.py (EXC_X); definitions in rx_internal.h. Runs on the REAL
+ * ofdm.py (IND_X); definitions in rx_internal.h. Runs on the REAL
  * samples: the positive-frequency bins of a real block's FFT are what the
- * analytic signal's would be. */
+ * analytic signal's would be. Two passes -- statistics, then the phase
+ * advance of each chosen bin -- so nothing per block is stored. */
 int rx_find_tones(link_mode_t mode, const int16_t *x, int n, uint32_t *words)
 {
     const det_mode_t *d = &DET[mode];
-    int B = d->B, nb = n / B, b, k, e, found = 0;
+    int B = d->B, half = B / 2, S = B / FFT_BINS, nb = n / B, b, k, found = 0;
     static int hits[DET_B_MAX / 2];
-    static int64_t energy[DET_B_MAX / 2];
+    static int64_t sum_q8[DET_B_MAX / 2];
+    static uint8_t stat[DET_B_MAX / 2], keep[DET_B_MAX / 2];
     if (nb < DET_MIN_TONE_BLOCKS)
         return 0;
     if (nb > MAX_BLOCKS)
         nb = MAX_BLOCKS;
-    for (k = 0; k < B / 2; k++) {
+    for (k = 0; k < half; k++) {
         hits[k] = 0;
-        energy[k] = 0;
+        sum_q8[k] = 0;
     }
     for (b = 0; b < nb; b++) {
-        int64_t re[DET_B_MAX], im[DET_B_MAX], pw[DET_B_MAX / 2 + 1];
-        int bins[DET_N_EXC], t, exp;
-        int64_t exc[DET_N_EXC];
+        int64_t re[DET_B_MAX], im[DET_B_MAX], pw[DET_B_MAX / 2], mean = 0;
+        int t, exp;
         for (t = 0; t < B; t++) {
             re[t] = x[b * B + t];
             im[t] = 0;
         }
         fft_bfp(re, im, B, 13, &exp);
-        for (k = 0; k < B / 2; k++)
+        for (k = 0; k < half; k++)
             pw[k] = re[k] * re[k] + im[k] * im[k];
-        g_fb_n[b] = (int8_t)det_block_excess(pw, B, bins, exc);
-        for (e = 0; e < g_fb_n[b]; e++) {
-            k = bins[e];
-            g_fb_bin[b][e] = (int16_t)k;
-            g_fb_re[b][e] = (int32_t)re[k];
-            g_fb_im[b][e] = (int32_t)im[k];
-            g_fb_pow[b][e] = pw[k];
-            hits[k]++;
-            energy[k] += pw[k];
+        for (k = 1; k < half; k++)
+            mean += pw[k];
+        mean /= half - 1;
+        for (k = 1; k < half; k++) {
+            if (pw[k] * DET_IND_DEN > DET_IND_NUM * mean)
+                hits[k]++;
+            if (mean > 0)
+                sum_q8[k] += (pw[k] << 8) / mean;
         }
     }
-    /* stationary bins, adjacent ones grouped, the strongest of a group
-     * is the closest to the carrier and gives its frequency */
-    for (k = 1; k < B / 2 && found < NOTCH_MAX; k++) {
-        int j, best;
-        if (hits[k] * 20 < 17 * nb)
+    for (k = 0; k < half; k++) {
+        stat[k] = k > 0 && hits[k] * DET_STAT_DEN >= DET_STAT_NUM * nb;
+        keep[k] = stat[k] && sum_q8[k] >= (int64_t)DET_AVG_Q8 * nb;
+    }
+    for (k = 1; k < half; k++) {   /* a modulated comb is not a carrier */
+        int nbk;
+        if (!keep[k])
+            continue;
+        for (nbk = k - S; nbk <= k + S; nbk += 2 * S)
+            if (nbk >= 1 && nbk < half && hits[nbk] * 2 >= nb
+                && sum_q8[nbk] * DET_COMB_RATIO >= sum_q8[k])
+                keep[k] = 0;
+    }
+    for (k = 1; k < half && found < NOTCH_MAX; k++) {
+        int j, q, best;
+        if (!keep[k])
             continue;
         j = k;
-        while (j + 1 < B / 2 && hits[j + 1] * 20 >= 17 * nb)
+        while (j + 1 < half && keep[j + 1])
             j++;
         best = k;
-        {
-            int q;
-            for (q = k; q <= j; q++)
-                if (energy[q] > energy[best])
-                    best = q;
-        }
-        {
-            int64_t sr = 0, si = 0, ang, mag;
-            for (b = 0; b + 1 < nb; b++) {
-                int ea = -1, eb = -1;
-                for (e = 0; e < g_fb_n[b]; e++)
-                    if (g_fb_bin[b][e] == best)
-                        ea = e;
-                for (e = 0; e < g_fb_n[b + 1]; e++)
-                    if (g_fb_bin[b + 1][e] == best)
-                        eb = e;
-                if (ea < 0 || eb < 0)
-                    continue;
-                /* conj(X_b) * X_{b+1} */
-                sr += (int64_t)g_fb_re[b][ea] * g_fb_re[b + 1][eb]
-                      + (int64_t)g_fb_im[b][ea] * g_fb_im[b + 1][eb];
-                si += (int64_t)g_fb_re[b][ea] * g_fb_im[b + 1][eb]
-                      - (int64_t)g_fb_im[b][ea] * g_fb_re[b + 1][eb];
+        for (q = k; q <= j; q++)
+            if (sum_q8[q] > sum_q8[best])
+                best = q;
+        {   /* pass 2: phase advance of the chosen bin over all blocks */
+            int64_t sr = 0, si = 0, pr = 0, pi = 0, ang, mag;
+            for (b = 0; b < nb; b++) {
+                int64_t re[DET_B_MAX], im[DET_B_MAX];
+                int t, exp;
+                for (t = 0; t < B; t++) {
+                    re[t] = x[b * B + t];
+                    im[t] = 0;
+                }
+                fft_bfp(re, im, B, 13, &exp);
+                if (b) {
+                    sr += pr * re[best] + pi * im[best];
+                    si += pr * im[best] - pi * re[best];
+                }
+                pr = re[best];
+                pi = im[best];
             }
             if (sr != 0 || si != 0) {
                 cordic_atan2(si, sr, &ang, &mag);

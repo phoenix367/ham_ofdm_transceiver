@@ -1142,41 +1142,12 @@ block decodes the strong frame with exactly one preempt, and the same
 pair the other way round decodes the strong frame with none.
 pair the other way round decodes the strong frame with none.
 
-\paragraph{Stationary-carrier excision.}
-\label{sec:excision}
-A CW carrier at the frame's own power defeats every stage at once: it
-leaks through the rectangular detection window into a dozen bins and
-lands in some mask shift's tone bins, it adds a correlation floor of
-$\sim$0.2 times its amplitude ratio to the ZC stage and dominates that
-stage's energy normalisation, and on its subcarrier it sits $\sim$17\,dB
-above the per-carrier signal.  Measured (\S\ref{sec:interference}) the
-detector is blind at ISR $+10$\,dB and the demodulator fails from ISR
-$-7$\,dB, while an ideal 30-Hz notch at the carrier's frequency decodes
-15 of 15 at every ratio up to $+10$\,dB.  So the receiver finds such
-carriers and notches them out of the \emph{samples} before the Hilbert
-transform, in all three implementations with one definition.  Per
-detection block the in-band bins above $4\times$ the block's mean power
-are its excess bins (at most four; the mean rather than the median,
-because a carrier alone on a quiet channel has a median of zero and
-then every crumb of leakage counts; $4\times$ because a carrier halfway
-between two bins keeps only 40\,\% of its power in each).  A bin in
-excess in at least 85\,\% of the blocks -- the whole recording frame at
-once, the last two tone windows streaming -- is a carrier: the
-receiver's own comb is on for one tone field, a stranger's preamble
-train lights each bin exactly two thirds of the time, and white noise
-never repeats a bin.  The carrier's frequency inside the bin is the
-phase advance of that bin between consecutive blocks, unambiguous over
-half a bin, taken at the strongest bin of an adjacent group (the
-closest one; the far one wraps).  A second-order IIR notch 30\,Hz wide
-($r = 0.9921$, Q14 coefficients, int16-saturated output) removes it.
-The streaming receiver keeps one notch bank in front of the shared
-sample ring, run once per sample index whichever instance pushes first,
-and releases a notch by its own monitor once the rejected power stays
-under 1/32 of the input, or under 4 LSB rms, for four 4096-sample
-ticks (shorter ticks let white noise trip the ratio; without the
-absolute floor the notch's ringing on a silent input held it forever).
-A rest-band trim inside the tone metric was tried first and removed: it
-moved a noisy golden vector's coarse shift and bought nothing.
+\paragraph{Stationary carriers.}
+A CW carrier at the frame's own power defeats every stage of this
+section at once; the receiver finds such carriers and notches them
+out of the samples before anything here runs.  That mechanism, its
+motivation and its interaction with the tone search have their own
+subsection, \S\ref{sec:excision}.
 
 \begin{algorithm}[H]
 \caption{C streaming tone detector (\texttt{rx\_stream.c}).}
@@ -1236,6 +1207,321 @@ $-94.07$\,Hz in every modulation on a loop with zero CFO
 (Section~\ref{sec:radio}); \texttt{test\_stream} holds the two
 block-aligned leads as cases, and the EXTREME sweep gained 6.9\,\% of
 decodes from it.
+
+\subsection{Stationary-Carrier Excision, Exactly}
+\label{sec:excision}
+
+\subsubsection*{Motivation}
+
+An amateur HF channel is shared.  Besides noise and fading, a link
+meets other stations' signals inside its own 2.1\,kHz: a CW carrier,
+a tuning tone, a digital mode's pilot, a spur -- narrowband,
+stationary, and often stronger than the wanted frame.  The
+interference sweep of \S\ref{sec:interference} measured what such a
+carrier does to this modem, and it defeats every stage of the
+receiver at once.  On its subcarrier the carrier sits $\sim$17\,dB
+above the per-carrier signal (the frame's power is spread over 16
+data carriers), and because the LLR scale of \S\ref{sec:llr_math} is a
+per-symbol noise variance averaged over the carriers, that carrier's
+LLRs are large, confident and wrong while every other carrier's are
+slightly too small: the demodulator fails from ISR $-7$\,dB, header
+included.  In the tone detector (\S\ref{sec:tone_exact}) the carrier
+leaks through the rectangular detection window into a dozen bins,
+lands in the tone mask of some CFO shift, and 10\,dB above the frame
+inflates the rest-band power until the contrast never crosses
+threshold -- the detector is blind.  In the ZC stage
+(\S\ref{sec:zc}) a carrier at equal power correlates with the
+Zadoff--Chu kernel at 0.2 of the true peak and dominates the energy
+normalisation.  None of this is a coding or SNR problem: the
+interferer occupies a few bins, and everything else about the frame
+is intact.
+
+Two remedies were tried inside the detector before the one that
+worked.  A per-carrier weighting of the LLRs (\S\ref{sec:iweight})
+helps below the excision threshold but cannot rescue the detector.
+A robust rest-band estimate that trimmed the strongest few bins out
+of the tone contrast bought nothing measurable and moved the coarse
+CFO shift of a noisy golden vector, and was removed.  The decisive
+measurement was a genie: with a 30-Hz notch placed at the carrier's
+true frequency ahead of the float receiver, every frame decoded at
+every ratio up to ISR $+10$\,dB, at $-3$ and at $+10$\,dB SNR, where
+the raw receiver decoded none.  A narrowband interferer is best
+handled where it is narrowband -- in the samples, before the Hilbert
+transform, so that detection, synchronisation and demodulation all
+see a clean band.  The problem then reduces to finding the carrier
+reliably, without ever mistaking the modem's own signals for one, at
+a cost the microcontroller can carry.
+
+Three things must never be notched.  The Newman tone comb of a
+preamble -- the receiver's own peer's, or a stranger's stuck in its
+sync loop -- lights each of its bins for exactly two thirds of a
+preamble period, and at EXTREME a tone field lasts 3.4\,s.  The
+modem's own subcarriers are on for the whole frame at $\sim$11 times
+the band mean, and at EXTREME a frame outlasts any practical
+history.  And the streaming receiver of the boards runs three mode
+instances on one shared sample ring, so a notch placed by one
+instance is seen by all: a NORMAL instance sized for its own 0.3\,s
+window would notch the EXTREME peer's comb out from under the
+EXTREME instance (this was measured, three notches per frame on the
+other-mode-preamble arm of the sweep).  These constraints, not the
+detection of the carrier, are what shaped the algorithm.
+
+\subsubsection*{Definitions}
+
+The finder works on block power spectra of the \emph{real} samples:
+the positive-frequency bins of a real block's FFT are those of the
+analytic signal, and no Hilbert transform is needed.
+Table~\ref{tab:excision_sym} collects the constants; the fixed model
+and the C port carry the integer definitions bit-exact with each
+other, the float model the same rules in floating point.
+
+\begin{table}[H]
+    \centering
+    \caption{Stationary-carrier excision: symbols and values.}
+    \label{tab:excision_sym}
+    \small
+    \begin{tabular}{@{}lp{3.4cm}p{8.4cm}@{}}
+    \toprule
+    \textbf{Symbol} & \textbf{Value} & \textbf{Meaning} \\
+    \midrule
+    $B_f$ & 512 (float); 256 / 512 / 512 (int) & finder block length; the float model finds on 512 whatever its detector uses \\
+    $S$ & $B_f / 128$ & bins per subcarrier (2 or 4): the spacing at which a modulated comb has its neighbours \\
+    $m_b$ & $\sum_{k=1}^{B_f/2-1} P[b,k] / (B_f/2 - 1)$ & in-band mean power of block $b$ (the median is zero for a carrier alone on a quiet channel) \\
+    $I_X$ & 1.5 ($2P > 3m$) & a bin is \emph{on} in a block above this multiple of the mean \\
+    $D$ & 0.85 ($20h \ge 17n$) & stationarity: fraction of blocks a bin must be on in \\
+    $D_n$ & 0.5 ($2h \ge n$) & duty a neighbour needs to count in the comb test \\
+    $A$ & 2.5 (Q8: 640) & averaged bin-to-mean ratio a candidate must reach \\
+    $C$ & 8 & comb test: a neighbour at $\ge 1/C$ of the candidate's ratio makes it data \\
+    $H$ & $3 \cdot 160 \cdot 128 / B_f$ blocks & streaming history: one EXTREME tone field (5.1\,s) whatever the instance's mode \\
+    $K$ & 64 blocks & blocks re-read from the ring for a passing candidate's frequency \\
+    $\tau$ & 64 blocks & time constant of the per-bin running ratio average (shift by 6) \\
+    $r$ & $1 - \pi \cdot 30 / 12000 = 0.9921$ (Q14: 16255) & notch pole radius, 30\,Hz wide \\
+    $T$ & 4096 samples & bank tick: release and tracking decisions \\
+    $R$ & 64 & released when rejected power $< $ input$/R$ for 4 ticks (or under 4\,LSB rms) \\
+    $L$ & 256 samples & tracking sub-block: the phase unwrap step, $\pm 23$\,Hz pull-in \\
+    $\Pi$ & 16 (Q4 $\log_2$) $= 3$\,dB & preemption bar for a challenger during a decode (\S\ref{sec:tone_stream_preempt}) \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Three rules make a carrier out of the block spectra.  A bin is
+\emph{on} in a block when its power exceeds $I_X$ times the block's
+in-band mean; a bin on in at least $D$ of the blocks is
+\emph{stationary}; a stationary bin whose averaged bin-to-mean ratio
+reaches $A$ is a \emph{candidate}.  White noise passes $I_X$ in 22\,\%
+of blocks and never the same bin in 85\,\% of them; a comb bin is on
+two thirds of the time; a carrier at the frame's power at EXTREME is
+only 4 times the per-bin mean, 3.7 times when it falls halfway
+between two bins, and passes $1.5\times$ in $\sim$98\,\% of blocks.  The
+fourth rule separates carriers from data: a candidate whose neighbour
+one subcarrier away ($\pm S$ bins) is on at least $D_n$ of the time at
+$1/C$ or more of the candidate's ratio is a \emph{modulated comb} and
+is left alone.  A carrier worth notching (ISR $\ge -4.6$\,dB; the
+demodulator copes below $-6$) is more than $C$ times any data
+subcarrier, while a subcarrier that is also a comb bin averages at
+most about three times its data neighbours even in the shortest
+frame, where the comb, at 5.75 times a subcarrier's power for two
+thirds of the preamble, dominates.  $D_n$ is half rather than $D$
+because in a recording that is one frame and little else that
+comb-and-subcarrier bin is on 87\,\% of the time and its data
+neighbours 74\,\%.  A split carrier's other half lies \emph{one} bin
+away, never $S$, which is why the float model finds on 512-point
+blocks whatever its detector uses.  Adjacent candidates form a group,
+its strongest bin is the closest to the carrier (the far one wraps),
+and the carrier's frequency inside that bin is the phase advance of
+the bin between consecutive blocks, unambiguous over half a bin.
+
+\subsubsection*{The finder, frame at once}
+
+Algorithm~\ref{alg:find_tones} is the whole-recording form
+(\texttt{FullOFDMModem.find\_stationary\_tones},
+\texttt{FixedReceiver.\_find\_tones}, \texttt{rx\_find\_tones}).  It
+runs in two passes so that nothing per block is stored: the
+statistics, then the phase advance of each chosen bin.
+
+\begin{algorithm}[H]
+\caption{Stationary-carrier finder, frame at once (float, fixed and C; integer arithmetic shown).}
+\label{alg:find_tones}
+\begin{algorithmic}[1]
+\Require real int16 samples $x$; $B_f$, $S$; $n \gets \lfloor |x| / B_f \rfloor \ge 8$
+\Ensure up to 3 phase words $w = f \cdot 2^{32} / f_s$
+\State $h[k] \gets 0$;\quad $\rho[k] \gets 0$ for $k = 1 .. B_f/2 - 1$
+\For{each block $b$} \Comment{pass 1: statistics}
+    \State $(Z_r, Z_i, e) \gets \textsc{FftBfp}(x[bB_f..],\ 0,\ 13)$;\quad $P[k] \gets Z_r^2 + Z_i^2$
+    \State $m \gets \sum_{k=1}^{B_f/2-1} P[k] \,/\, (B_f/2 - 1)$ \Comment{floor division}
+    \For{$k = 1 .. B_f/2 - 1$}
+        \State \textbf{if} $2 P[k] > 3 m$: $h[k] \gets h[k] + 1$ \Comment{on}
+        \State \textbf{if} $m > 0$: $\rho[k] \gets \rho[k] + (P[k] \ll 8) / m$ \Comment{Q8 ratio, summed}
+    \EndFor
+\EndFor
+\State $\mathrm{stat}[k] \gets 20 h[k] \ge 17 n$;\quad $\mathrm{keep}[k] \gets \mathrm{stat}[k] \wedge \rho[k] \ge 640 n$ \Comment{$D$, $A$}
+\For{each $k$ with $\mathrm{keep}[k]$} \Comment{a modulated comb is not a carrier}
+    \For{$k' \in \{k - S,\ k + S\}$ in band}
+        \State \textbf{if} $2 h[k'] \ge n \wedge 8 \rho[k'] \ge \rho[k]$: $\mathrm{keep}[k] \gets 0$ \Comment{$D_n$, $C$}
+    \EndFor
+\EndFor
+\For{each maximal run $k .. j$ of kept bins, at most 3}
+    \State $k^\star \gets \arg\max_{q \in k..j} \rho[q]$ \Comment{the closest bin to the carrier}
+    \State $\Sigma \gets \sum_{b} \overline{Z_b[k^\star]}\, Z_{b+1}[k^\star]$ \Comment{pass 2: FFTs recomputed, all consecutive pairs}
+    \State $w \gets (k^\star \cdot 2^{32} + \textsc{CordicAtan2}(\Sigma).\phi + B_f/2) / B_f$ \Comment{$\phi$ in phase-word units}
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection*{The notch and the bank}
+
+A carrier is removed by a second-order real IIR notch centred on its
+phase word $w$, $c = \cos(2\pi w / 2^{32})$ from the NCO ROM:
+\[
+y[n] = x[n] - 2c\,x[n{-}1] + x[n{-}2] + 2rc\,y[n{-}1] - r^2 y[n{-}2],
+\]
+coefficients in Q14 ($b_1 = -c_{15}$ is exactly $-2c$), states as
+sample values, an int64 accumulator, the output rounded and saturated
+to int16 because the sample ring stores int16.  The multiply by
+$2^{14}$ is a multiplication, not a shift: the sanitizer caught the
+undefined left shift of the first negative sample.  Up to three
+notches form a \emph{bank} (Algorithm~\ref{alg:notch_bank}); frame at
+once, the bank is filled from Algorithm~\ref{alg:find_tones} and run
+over the recording into the Hilbert FIR through a 64-sample delay
+line, bit-exact with notching the array first.  Streaming, one global
+bank sits in front of the shared sample ring: every instance pushes
+the same samples, the first to push an index filters and writes it,
+the rest skip, and \texttt{rxs\_open} clears the bank -- so every live
+instance is opened before the first push.
+
+The bank owns two decisions per tick of $T$ samples.  \emph{Release}:
+a notch whose rejected component $x - y$ has held under $1/R$ of the
+input power for four ticks, or under 4\,LSB rms, is dropped.  White
+noise in the notch's $\sim$50\,Hz slice is $\sim$0.8\,\% of a 6\,kHz
+input, with $\pm 17$\,\% per tick from its 34 degrees of freedom, so
+the tick cannot be shorter (at 256 samples the ratio tripped every few
+ticks) and the divisor cannot be smaller; the absolute floor is there
+because on a silent input the notch's own ringing would otherwise
+hold it forever; and $R = 64$ rather than 32 because a carrier at ISR
+$-3$\,dB at EXTREME is 1.6\,\% of the input -- at $1/32$ it was
+released 1.4\,s after every engage, found again, re-added, and every
+re-add reset the tone search (below): 68\,\% PER and no commits.
+\emph{Tracking}: while the carrier is present, the rejected component
+\emph{is} the carrier, attenuated only by the mismatch; the notch
+mixes it down with an NCO at its own word, takes the phase of
+$L$-sample sums, unwraps it sub-block to sub-block (half a turn per
+256 samples is $\pm 23$\,Hz, a full bin; the phase over a whole tick
+would alias above 1.5\,Hz), and applies half the resulting per-sample
+error, clamped to one bin, by retuning the coefficients with the
+filter states kept.  A 3\,Hz mis-estimate converges to 0.01\,Hz in
+3\,s and the residual falls by 20\,dB (\texttt{test\_primitives}).
+
+\begin{algorithm}[htbp]
+\caption{Notch bank: one sample, and the tick (\texttt{dsp.c}).}
+\label{alg:notch_bank}
+\begin{algorithmic}[1]
+\Function{Push}{$x$} \Comment{per sample; returns the notched sample}
+    \State $\mathrm{tot} \gets \mathrm{tot} + x^2$;\quad $y \gets x$
+    \For{each active notch $i$}
+        \State $u \gets y$;\quad $y \gets \textsc{NotchStep}(i, u)$;\quad $d \gets u - y$ \Comment{the rejected carrier}
+        \State $\mathrm{rej}_i \gets \mathrm{rej}_i + d^2$
+        \State $\mathrm{sub}_i \gets \mathrm{sub}_i + d\,(\cos\phi_i - j \sin\phi_i)$;\quad $\phi_i \gets \phi_i + w_i$ \Comment{mixer at the notch's own word}
+        \If{$L$ samples summed}
+            \State $\alpha \gets \textsc{CordicAtan2}(\mathrm{sub}_i).\phi$;\quad \textbf{if} a previous $\alpha$ exists: $\Delta_i \gets \Delta_i + \mathrm{wrap}_{32}(\alpha - \alpha_{\mathrm{prev}})$
+            \State $\alpha_{\mathrm{prev}} \gets \alpha$;\quad $\mathrm{sub}_i \gets 0$
+        \EndIf
+    \EndFor
+    \If{$T$ samples pushed} \Comment{the tick}
+        \For{each active notch $i$}
+            \If{$R \cdot \mathrm{rej}_i \le \mathrm{tot}$ \textbf{or} $\mathrm{rej}_i \le 16\,T$}
+                \State \textbf{if} $\text{++idle}_i \ge 4$: deactivate $i$ \Comment{release}
+            \Else
+                \State $\mathrm{idle}_i \gets 0$;\quad $\delta \gets \Delta_i / (\text{sub-blocks} \cdot L) / 2$, clamped to $\pm 2^{32}/512$
+                \State $w_i \gets w_i + \delta$;\quad \textsc{Retune}$(i, w_i)$ \Comment{tracking: states kept}
+            \EndIf
+            \State $\mathrm{rej}_i, \Delta_i \gets 0$
+        \EndFor
+        \State $\mathrm{tot} \gets 0$
+    \EndIf
+    \State \Return $y$
+\EndFunction
+\Function{Request}{$w$} \Comment{from a finder}
+    \State \textbf{if} an active notch lies within 20\,Hz of $w$: refresh its idle count; \Return \textsc{refreshed}
+    \State \textbf{if} no free slot: \Return \textsc{full}
+    \State initialise the slot at $w$; \Return \textsc{added}
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection*{The finder, streaming}
+
+The streaming receiver cannot see the whole recording, and it cannot
+afford to keep spectra.  Algorithm~\ref{alg:carrier_track} keeps, per
+instance, one bit per bin per block in a ring $H$ blocks deep with the
+per-bin count of set bits (3840 bytes), and a per-bin running average
+of the bin-to-mean ratio with time constant $\tau$ (512 bytes) -- one
+division per bin per block.  Every judgement is made from those two
+arrays; the raw ring is re-read, as real samples, only to measure the
+frequency of a candidate that has passed every test, once.  The first
+version re-read the ring to judge every stationary group, and during
+an EXTREME frame the 23 stationary subcarriers, each its own group,
+cost 1472 FFTs per 43\,ms block: it stalled the QEMU run of the test
+suite for twenty minutes and could never have run on the part.
+
+\begin{algorithm}[htbp]
+\caption{Streaming carrier finder (\texttt{rx\_stream.c} \texttt{carrier\_track}), once per detection block.}
+\label{alg:carrier_track}
+\begin{algorithmic}[1]
+\Require the block's power spectrum $P[k]$ and in-band mean $m$; bit ring $\mathrm{ind}[H][\cdot]$, counts $h[k]$, averages $\bar\rho[k]$; the global bank
+\State $\mathrm{on}[k] \gets 2P[k] > 3m$;\quad $\bar\rho[k] \gets \bar\rho[k] + ((P[k] \ll 8)/m - \bar\rho[k]) \gg 6$ for $k = 1 .. B/2 - 1$
+\State \textbf{if} the ring is full: $h[k] \gets h[k] - 1$ for every bit set in the oldest block
+\State store $\mathrm{on}$ in the ring;\quad $h[k] \gets h[k] + 1$ for every bit set \Comment{the count is exact over the last $H$ blocks}
+\State \textbf{if} the ring is not yet full: \Return
+\For{each maximal run $k .. j$ with $20 h \ge 17 H$}
+    \State $k^\star \gets \arg\max_{q \in k..j} \bar\rho[q]$;\quad \textbf{if} $\bar\rho[k^\star] < 640$: \textbf{continue} \Comment{$A$}
+    \State \textbf{if} some $k' \in \{k^\star \pm S\}$ has $2h[k'] \ge H \wedge 8 \bar\rho[k'] \ge \bar\rho[k^\star]$: \textbf{continue} \Comment{a modulated comb}
+    \State \textbf{if} the bank holds a notch within one bin of $k^\star$: refresh it; \textbf{continue} \Comment{the ring is notched there}
+    \State $\Sigma \gets \sum_{b} \overline{Z_b[k^\star]}\, Z_{b+1}[k^\star]$ over the last $K$ blocks of the raw ring, real input \Comment{the one re-read}
+    \State $w \gets (k^\star \cdot 2^{32} + \textsc{CordicAtan2}(\Sigma).\phi + B/2) / B$
+    \If{\textsc{Request}$(w)$ = \textsc{added}}
+        \State \textbf{if} the search's pending region is weak ($\mu < X\theta_t^2$): drop it, count windows from the next block only
+        \State drop the challenger region
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+Two lines of Algorithm~\ref{alg:carrier_track} came from traces of
+the EXTREME arm.  The tracking loop was implemented first and did
+not move that arm at all: the notch's word sat within 0.05\,Hz of the
+carrier throughout, and what lost the frame was the 5.1\,s
+\emph{before} the notch engaged, in which the raw carrier sat in a
+mask bin of one CFO shift and built an above-threshold tone region
+whose stability commit fired 123 blocks later -- as the frame arrived
+-- and whose ZC and header attempts held the receiver through the
+frame's tone field, which at 10\,dB below the carrier could not
+preempt them.  Hence the reset on \textsc{added}, of a \emph{weak}
+region only: a carrier's region is weak ($7\times$ the threshold on
+the traced failure) and a genuine peak's is above the strong-commit
+bar even at the knee, and a borderline carrier engages its notch at a
+random moment, mid-frame included, where dropping a strong region
+cost 68\,\% of the frames at ISR $-3$\,dB.  NORMAL never showed
+either effect: its 15-block window's false attempt is over long before
+a frame can arrive.  History depth $H$ is the other lesson from the
+shared ring: sized to the instance's own window, a NORMAL instance
+notched the EXTREME peer's comb; sized to one EXTREME tone field for
+every instance, a comb bin can be on at most two thirds of the history.
+
+\subsubsection*{What it costs and what it does}
+
+On the STM32H743 the whole mechanism -- preemption included -- costs
+44\,kB of RAM and 4.3\,kB of flash (\texttt{make armmeas}), host time
+on the same recordings is unchanged, the EXTREME sensitivity knee is
+identical with the feature compiled out, and the boards run it
+(\S\ref{sec:interference}).  On the sweep a CW carrier, which broke
+the link from ISR $-4$ to $-9$\,dB, no longer breaks it at any ratio
+measured up to $+10$\,dB at any of the three operating points; under a
+carrier alone the streaming receiver commits once a minute instead of
+being blind; and nothing of the modem's own is ever notched:
+\texttt{test\_stream} pins a NORMAL instance beside an EXTREME one
+through a full EXTREME frame at high SNR with the bank empty
+throughout, and the golden vectors -- clean frames with 4- and
+9-byte payloads, the preamble-heavy case -- are found carrier-free.
 
 \subsection{Channel Estimation and LLR Calibration, Exactly}
 \label{sec:est_cal_exact}

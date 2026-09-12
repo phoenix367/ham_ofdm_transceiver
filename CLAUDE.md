@@ -357,9 +357,10 @@ Cross-module invariants that are easy to break:
   LOCK. That limit is what remains after four fixes: preemption and
   the net key took the same-mode-frames column from -8.8 dB / never
   to -2.6 / -2.4 dB, and the carrier excision took a CW carrier from
-  -4.8 / -4.2 dB to no failure up to ISR +10 dB at NORMAL (EXTREME
-  partial: float under 15 % from +3 dB, C 38-63 %, the streaming
-  finder's one-window frequency estimate is the limit). Voice stays at
+  -4.8 / -4.2 dB to no failure up to ISR +10 dB at every operating
+  point (EXTREME: 6.7 % at -3 dB, 3.3 % at 0 dB, under 4 % elsewhere,
+  after the per-bin finder, the weak-region reset and the 1/64 release
+  ratio). Voice stays at
   -6..-10 dB (harmonics on most carriers, syllables on half the
   symbols: the weighting has no reference, and the lock goes at ISR
   0). Strong SSB voice alone makes the streaming receiver commit ~1x/s
@@ -370,10 +371,12 @@ Cross-module invariants that are easy to break:
   than the C receiver's: its global argmax over a 7-9 s recording has
   three times the stranger preambles to be stolen by. Open thread: a
   frequency-tracking loop on the notch's rejected component for
-  EXTREME. ON THE BOARDS (flashed 2026-09-12): 6000-byte file
-  byte-identical, 7/7 frames, 0 timeouts/retx, beacons clean; a
-  mismatched net key refuses frames on the air and a matched one
-  delivers the retransmission at once. The quiet wire's ~1/8 s header
+  EXTREME. ON THE BOARDS (flashed 2026-09-12, again with the per-bin
+  finder and the tracking notch): 6000-byte file byte-identical, 7/7
+  frames, 0 timeouts/retx, beacons clean both times; a mismatched net
+  key refuses frames on the air (5 timeouts in 72 s) and a matched one
+  delivers both queued messages within 25 s, the link holding rung
+  12. The quiet wire's ~1/8 s header
   attempts at EXTREME are PRE-EXISTING: 33 s of captured idle audio
   (`g_cap` over JTAG, 200 s per 128 kB at the bridge's 0.64 kB/s)
   replays identically through the pre-change and current host
@@ -397,26 +400,76 @@ Cross-module invariants that are easy to break:
   15/15 up to ISR +10 dB where the raw receiver decoded 0 -- so the
   receiver finds such carriers and notches them out of the SAMPLES
   before the Hilbert. Definitions shared by all twins, each of them
-  measured: excess bins are > DET_EXC_X=4 x the block's MEAN in-band
-  power (the median is zero for a carrier alone on a quiet channel and
-  then every leakage crumb counts; at 4x a half-bin carrier keeping
-  40 % of its power per bin is still seen; DET_N_EXC=4 slots keep it
-  in the count when noise peaks compete), stationary = in excess in
-  >= 85 % of blocks (hits*20 >= 17*H) over the whole recording or,
-  streaming, the last 2 x total_blocks (a comb bin of a preamble
-  TRAIN is on exactly 2/3 of the time -- do not shorten the history
-  below one tone field or you notch the peer's preamble; EXTREME's is
-  10 s), frequency = bin + phase advance between consecutive blocks
-  (unambiguous over +-half a bin; take the strongest bin of an
-  adjacent group, the far one wraps), notch r=0.9921 Q14 with the
-  output saturated to int16. The bank runs ONCE per sample index
+  measured: a bin is ON when 2*pow > 3*mean (1.5x the block's MEAN
+  in-band power; the median is zero for a carrier alone on a quiet
+  channel), STATIONARY when ON in >= 85 % of blocks (hits*20 >=
+  17*H) over the whole recording or, streaming, the last EXTREME tone
+  field (a comb bin of a preamble TRAIN is on exactly 2/3 of the time
+  -- do not shorten the history below one tone field or you notch the
+  peer's preamble), a CANDIDATE when its averaged bin/mean ratio is
+  >= 2.5 (Q8 640), and NOT A CARRIER when a neighbour one subcarrier
+  away (B/128 bins) is on half the time at >= 1/8 of its ratio: that
+  is a modulated comb -- our own subcarriers at ~11x the mean for the
+  whole frame, an EXTREME frame outlasting the streaming history. A
+  first finder counted only the top 4 bins above 4x per block: it
+  missed a split carrier (35-53 % PER at ISR 0 dB at EXTREME) and its
+  slot limit was, unnoticed, what kept our own subcarriers out. The
+  1/8 (not 1/2): a subcarrier that is also a comb bin averages <= ~3x
+  its data neighbours even in the shortest frame (the 9-byte ROBUST
+  golden read 2.8x), a carrier worth notching (ISR >= -4.6 dB) is > 8x
+  any subcarrier; and the neighbour needs only 50 % duty because one
+  frame plus padding puts that comb-and-subcarrier bin at 87 % and its
+  neighbours at 74 %. The float model finds on 512-point blocks
+  whatever its detector uses so a split carrier's other half (one bin
+  away) is never at the subcarrier spacing. Frequency = bin + phase
+  advance between consecutive blocks over ALL pairs (unambiguous over
+  +-half a bin; take the strongest bin of an adjacent group, the far
+  one wraps), notch r=0.9921 Q14 with the output saturated to int16.
+  Streaming keeps the history as one bit per bin (3840 B per
+  instance) and judges a stationary group from DET_FIND_BLOCKS=64
+  blocks re-read from the raw ring as REAL samples (ratios of the
+  group and its neighbours, the strongest bin's phase advance). The bank runs ONCE per sample index
   (`g_notch_done`): every instance pushes the same samples, the first
   filters and writes the ring, the rest skip -- and `rxs_open` clears
   it, so open every live instance before the first push. Release is
   the bank's own monitor (rejected < input/32 for 4 ticks of 4096
   samples -- at 256 white noise tripped the ratio every few ticks --
   OR rejected < 4 LSB rms, without which the notch's ringing on a
-  silent input held it forever). A rest-band trim in the tone metric
+  silent input held it forever). While the carrier is present the
+  notch TRACKS it (`NOTCH_SUB`): in - out IS the carrier, mixed down
+  with the notch's own NCO, the phase of 256-sample sums unwrapped
+  sub-block to sub-block (+-23 Hz pull-in = a full bin -- a whole-tick
+  phase would alias above 1.5 Hz), half the per-sample error applied
+  per tick, clamped to one bin, by RETUNING the coefficients with the
+  states kept. Needed because the streaming finder estimates from one
+  tone window: at EXTREME that was a few Hz off, the notch attenuated
+  the carrier ~10 dB and the arm sat at 35-63 % PER from ISR 0 up
+  where the float model (whole-recording estimate) decoded; the loop
+  pulls a 3 Hz error to 0.01 Hz in 3 s (`test_primitives`). Track only
+  while rejected > input/32 -- tracking on noise walks the notch. And
+  the loop was NOT what the EXTREME arm needed: the trace showed the
+  word within 0.05 Hz all along; what lost the frame was the 5.1 s
+  BEFORE the notch engaged, in which the raw carrier sat in a mask bin
+  of one CFO shift and built an above-threshold region whose stability
+  commit fired 123 blocks later, as the frame arrived, and whose ZC and
+  header attempts held the receiver through the frame's tone field
+  (the frame, 10 dB weaker, cannot preempt it). So when a notch is
+  ADDED (`notch_bank_request` == 2) `carrier_track` drops the search's
+  pending region and only counts windows starting after that block
+  (`test_stream` "EXTREME frame under a CW carrier 10 dB above it").
+  NORMAL never showed it: a 15-block window's false attempt is over
+  long before a frame can arrive. The reset is gated on the region
+  being WEAK (< 64x thr^2): a borderline carrier engages mid-frame and
+  dropping a strong region cost 68 % at ISR -3 dB. The bank's release
+  ratio is 1/64 of the input (`NOTCH_REL_DIV`), not 1/32: white noise
+  in the notch's slice is ~0.8 %, the finder engages on carriers from
+  ~1 %, and at 1/32 a 1.6 % carrier flapped add/release every 1.4 s
+  with a search reset per add -- zero commits. The streaming finder
+  judges from per-bin EWMAs of the ratio (`ravg`, tau 64 blocks) and
+  re-reads the ring ONLY for a passing candidate's frequency: judging
+  every group by re-reading was 1472 FFTs per block during an EXTREME
+  frame (23 stationary subcarriers = 23 groups), which stalled QEMU
+  for 20 min and would not run on the part. A rest-band trim in the tone metric
   was tried first and REMOVED: it moved a noisy golden vector's
   coarse shift (the near-tie) and bought nothing. `test_rx` pins the
   found phase word and the decode bit-exact against the fixed model;

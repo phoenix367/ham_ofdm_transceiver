@@ -52,36 +52,18 @@ def _div_round(a: int, b: int) -> int:
     return -((-a + b // 2) // b)
 
 
-# EXCESS BINS of one detection block (the float model's FullOFDMModem.EXC_X):
-# integer twin of the float definition and of cport det_block_excess. The
-# clamp is EXC_X times the in-band mean (floor division by B/2-1 bins), and
-# the top N_EXC bins above the clamp are kept by an ascending scan with
-# strict replacement, so ties resolve to the lower bin. The
-# stationary-carrier finder (_find_tones) counts how often a bin is in
-# excess.
-EXC_X = 4
-N_EXC = 4
+# STATIONARY-CARRIER FINDER constants, integer twins of the float model's
+# FullOFDMModem.IND_X / STATIONARY_FRAC / AVG_X (and of cport rx_detect.c,
+# bit-exact): a bin is ON when 2*pow > 3*mean (1.5x the in-band mean,
+# floor division by B/2-1 bins); stationary when hits*20 >= 17*nb; a
+# candidate when its summed Q8 ratio reaches 640*nb (2.5x); rejected as a
+# modulated comb when a neighbour one subcarrier away (B/128 bins) is on
+# half the time (hits*2 >= nb) at >= 1/8 of its ratio.
+IND_NUM, IND_DEN = 3, 2
+STAT_NUM, STAT_DEN = 17, 20
+AVG_Q8 = 640
+COMB_RATIO = 8
 MIN_TONE_BLOCKS = 8
-
-
-def block_excess(pow_row, B):
-    """(bins, excess) of the top N_EXC in-band bins of one block's power
-    spectrum above EXC_X x median; both lists may be empty."""
-    band = np.asarray(pow_row[1:B // 2], dtype=np.int64)
-    thr = EXC_X * (int(band.sum()) // len(band))
-    top = []  # (value, bin), descending by value, earlier bin first on ties
-    for k in range(1, B // 2):
-        v = int(pow_row[k])
-        if v <= thr:
-            continue
-        pos = len(top)
-        while pos > 0 and v > top[pos - 1][0]:
-            pos -= 1
-        if pos < N_EXC:
-            top.insert(pos, (v, k))
-            del top[N_EXC:]
-    return [k for _, k in top], [v - thr for v, _ in top]
-
 
 
 class WeightAcc:
@@ -259,50 +241,55 @@ class FixedReceiver:
 
     def _find_tones(self, samples):
         """Phase words of up to NOTCH_MAX carriers present through the
-        whole recording."""
+        whole recording (twin of cport rx_find_tones, bit-exact)."""
         B = self.B
+        S = B // self.N
         x = np.asarray(samples, dtype=np.int64)
         nb = len(x) // B
         if nb < MIN_TONE_BLOCKS:
             return []
-        hits = np.zeros(B // 2, dtype=np.int64)
-        energy = np.zeros(B // 2, dtype=np.int64)
-        per_block = []  # {bin: (re, im)}
-        for b in range(nb):
-            re, im, _e = fft_bfp(x[b * B:(b + 1) * B], np.zeros(B, dtype=np.int64), 13)
-            pw = re[:B // 2] * re[:B // 2] + im[:B // 2] * im[:B // 2]
-            bins, _exc = block_excess(pw, B)
-            d = {}
-            for k in bins:
-                d[k] = (int(re[k]), int(im[k]))
-                hits[k] += 1
-                energy[k] += int(pw[k])
-            per_block.append(d)
+        half = B // 2
+        hits = np.zeros(half, dtype=np.int64)
+        sum_q8 = np.zeros(half, dtype=np.int64)
+        zeros = np.zeros(B, dtype=np.int64)
+        for b in range(nb):            # pass 1: per-bin statistics
+            re, im, _e = fft_bfp(x[b * B:(b + 1) * B], zeros, 13)
+            pw = re[:half] * re[:half] + im[:half] * im[:half]
+            mean = int(pw[1:].sum()) // (half - 1)
+            on = pw[1:] * IND_DEN > IND_NUM * mean
+            hits[1:] += on
+            if mean > 0:
+                sum_q8[1:] += (pw[1:] << 8) // mean
+        stat = hits * STAT_DEN >= STAT_NUM * nb
+        cand = stat & (sum_q8 >= AVG_Q8 * nb)
+        cand[0] = False
+        keep = cand.copy()
+        for k in np.flatnonzero(cand):
+            for nbk in (k - S, k + S):
+                if 1 <= nbk < half and hits[nbk] * 2 >= nb and sum_q8[nbk] * COMB_RATIO >= sum_q8[k]:
+                    keep[k] = False
+        bins = [int(k) for k in np.flatnonzero(keep)]
         words = []
-        k = 1
-        while k < B // 2 and len(words) < NOTCH_MAX:
-            if hits[k] * 20 < 17 * nb:
-                k += 1
-                continue
-            j = k
-            while j + 1 < B // 2 and hits[j + 1] * 20 >= 17 * nb:
+        i = 0
+        while i < len(bins) and len(words) < NOTCH_MAX:
+            j = i
+            while j + 1 < len(bins) and bins[j + 1] == bins[j] + 1:
                 j += 1
-            best = k
-            for q in range(k, j + 1):
-                if energy[q] > energy[best]:
-                    best = q
-            sr = si = 0
-            for b in range(nb - 1):
-                a = per_block[b].get(best)
-                c = per_block[b + 1].get(best)
-                if a is None or c is None:
-                    continue
-                sr += a[0] * c[0] + a[1] * c[1]      # conj(X_b) * X_{b+1}
-                si += a[0] * c[1] - a[1] * c[0]
+            group = bins[i:j + 1]
+            best = max(group, key=lambda k: (int(sum_q8[k]), -k))
+            sr = si = 0                # pass 2: phase advance of that bin
+            pr = pi = 0
+            for b in range(nb):
+                re, im, _e = fft_bfp(x[b * B:(b + 1) * B], zeros, 13)
+                cr, ci = int(re[best]), int(im[best])
+                if b:
+                    sr += pr * cr + pi * ci
+                    si += pr * ci - pi * cr
+                pr, pi = cr, ci
             if sr != 0 or si != 0:
                 ang, _mag = cordic_atan2(si, sr)
                 words.append(((best << 32) + ang + B // 2) // B & 0xFFFFFFFF)
-            k = j + 1
+            i = j + 1
         return words
 
     def _excise(self, samples):

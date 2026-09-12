@@ -279,19 +279,31 @@ model and the C port (the integer twins bit-exact with each other):
 - **Stationary-carrier excision** (`FullOFDMModem.excise`, fixed
   `_find_tones`/`dsp.Notch`, C `rx_find_tones`/`notch_bank_t`, streaming
   `carrier_track` + one global bank in front of the shared ring). Per
-  detection block the in-band bins above 4× the block's MEAN power are
-  its excess bins (at most 4; the mean, not the median, because a
-  carrier alone on a quiet channel has a median of zero). A bin in
-  excess in ≥85 % of the blocks (the whole recording frame-at-once; the
-  last two tone windows streaming) is a carrier: our own comb is on for
-  one tone field, a stranger's preamble train lights each bin 2/3 of
-  the time, noise never repeats. Its frequency inside the bin is the
-  phase advance of that bin between consecutive blocks (unambiguous
-  over ±half a bin; the strongest bin of an adjacent group is the
-  closest), and a second-order IIR notch 30 Hz wide (r = 0.9921, Q14)
-  removes it from the samples before the Hilbert. The streaming bank
+  block every in-band bin above 1.5× the block's MEAN power is on (the
+  mean, not the median, because a carrier alone on a quiet channel has
+  a median of zero). A bin on in ≥85 % of the blocks (the whole
+  recording frame-at-once; the last EXTREME tone field streaming) with
+  an averaged bin/mean ratio ≥2.5 is a carrier candidate: our own comb
+  is on for one tone field, a stranger's preamble train lights each bin
+  2/3 of the time, noise never repeats. A candidate whose neighbour one
+  subcarrier away is on half the time at ≥1/8 of its power is a
+  modulated comb (our own subcarriers, a peer's EXTREME frame) and is
+  left alone. Its frequency inside the bin is the phase advance of that
+  bin between consecutive blocks (unambiguous over ±half a bin; the
+  strongest bin of an adjacent group is the closest), and a second-order
+  IIR notch 30 Hz wide (r = 0.9921, Q14) removes it from the samples
+  before the Hilbert. The streaming bank
   releases a notch once its rejected power stays under 1/32 of the
-  input (or under 4 LSB rms) for four 4096-sample ticks.
+  input (or under 4 LSB rms) for four 4096-sample ticks, and TRACKS the
+  carrier while it is present: the rejected component (input minus
+  output) is the carrier, so each notch mixes it down with an NCO at its
+  own frequency, unwraps the phase of 256-sample sums (±23 Hz pull-in,
+  a full bin) and applies half the measured per-sample error at every
+  tick by retuning the coefficients with the filter states kept. A 3 Hz
+  mis-estimate converges to 0.01 Hz in 3 s (`test_primitives`). When a
+  notch is added the search also drops its pending tone region: it was
+  built on the raw carrier, and at EXTREME its late stability commit
+  used to hold the receiver through the frame that followed.
 - **Interference weighting** (`Transceiver.block_weights`, fixed
   `WeightAcc`, C `rxd_wacc_t`). Each symbol's decision-directed residual
   per data carrier, divided by |H| (the noise-plus-interference

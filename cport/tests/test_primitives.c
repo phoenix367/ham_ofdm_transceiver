@@ -6,6 +6,7 @@
 #include "../src/fxp.h"
 #include "../src/fft.h"
 #include "../src/dsp.h"
+#include "../src/rom_tables.h"
 #include "test_vectors.h"
 
 static int g_pass, g_fail;
@@ -117,6 +118,41 @@ int main(void)
             }
         }
         check("cordic atan2/mag", ok);
+    }
+
+    /* notch frequency tracking (dsp.h NOTCH_SUB): a carrier from the NCO
+     * ROM at 1503 Hz plus noise 34 dB below it, the notch requested 3 Hz
+     * low (the one-window estimate's kind of error at EXTREME); after
+     * 3 s the bank's word must be within 0.3 Hz of the carrier and the
+     * output's carrier residual must be at least 12 dB below what the
+     * untracked notch let through */
+    {
+        notch_bank_t b;
+        uint32_t w_true = 537944654u, w_req = w_true - (uint32_t)(3.0 * 4294967296.0 / 12000.0);
+        uint32_t ph = 0, lcg = 99u;
+        double err_hz, r0 = 0, r1 = 0;
+        int n, k;
+        notch_bank_clear(&b);
+        notch_bank_request(&b, w_req);
+        for (n = 0; n < 36000; n++) {
+            int32_t v, y;
+            lcg = lcg * 1103515245u + 12345u;
+            v = (int32_t)(((int64_t)8000 * NCO_COS[ph >> 20]) >> 15)
+                + (int32_t)((lcg >> 16) % 400u) - 200;
+            ph += w_true;
+            y = notch_bank_push(&b, (int16_t)v);
+            if (n < 6000) r0 += (double)y * y;          /* first 0.5 s, untracked */
+            if (n >= 30000) r1 += (double)y * y;        /* last 0.5 s, tracked */
+        }
+        err_hz = ((double)(int32_t)(b.word[0] - w_true)) * 12000.0 / 4294967296.0;
+        k = b.retunes[0] > 0;
+        printf("  notch tracking: error %+.3f Hz after 3 s, %lld retunes, "
+               "residual power x%.3f\n", err_hz, (long long)b.retunes[0],
+               r1 / r0);
+        check("notch tracking pulls a 3 Hz mis-estimate under 0.3 Hz",
+              k && err_hz > -0.3 && err_hz < 0.3 && b.active[0]);
+        check("notch tracking cuts the carrier residual by >= 12 dB",
+              r1 < r0 * 0.0631);
     }
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

@@ -1,4 +1,7 @@
 #include "dsp.h"
+#ifdef NOTCH_DEBUG
+#include <stdio.h>
+#endif
 #include "fxp.h"
 #include "rom_tables.h"
 
@@ -25,12 +28,17 @@ void hilbert_analytic(const int16_t *x, int n, samp_t *out_i, samp_t *out_q)
 
 #define NOTCH_MERGE_WORD ((uint32_t)(20.0 * 4294967296.0 / 12000.0)) /* 20 Hz */
 
-void notch_init(notch_t *f, uint32_t word)
+void notch_retune(notch_t *f, uint32_t word)
 {
     int32_t c = NCO_COS[word >> (PHASE_BITS - NCO_LUT_BITS)];  /* Q15 */
     f->b1 = -c;                                     /* -2c in Q14 */
     f->a1 = (int32_t)rshift_round((int64_t)NOTCH_R_Q14 * c, 14); /* 2rc, Q14 */
     f->a2 = NOTCH_R2_Q14;
+}
+
+void notch_init(notch_t *f, uint32_t word)
+{
+    notch_retune(f, word);
     f->x1 = f->x2 = f->y1 = f->y2 = 0;
 }
 
@@ -61,6 +69,7 @@ void notch_bank_clear(notch_bank_t *b)
         b->idle[i] = 0;
         b->rej[i] = 0;
         b->word[i] = 0;
+        b->retunes[i] = 0;
     }
     b->tot = 0;
     b->n_tick = 0;
@@ -111,7 +120,13 @@ int notch_bank_request(notch_bank_t *b, uint32_t word)
     b->active[slot] = 1;
     b->idle[slot] = 0;
     b->rej[slot] = 0;
-    return 1;
+    b->ph[slot] = 0;
+    b->sub_re[slot] = b->sub_im[slot] = 0;
+    b->sub_n[slot] = 0;
+    b->have_ang[slot] = 0;
+    b->dphi[slot] = 0;
+    b->n_dphi[slot] = 0;
+    return 2;
 }
 
 int16_t notch_bank_push(notch_bank_t *b, int16_t x)
@@ -124,25 +139,73 @@ int16_t notch_bank_push(notch_bank_t *b, int16_t x)
             continue;
         {
             int16_t in = y;
+            int32_t d;
+            int idx;
             y = notch_step(&b->f[i], in);
-            b->rej[i] += (int64_t)(in - y) * (in - y);
+            d = (int32_t)in - y;                     /* the rejected carrier */
+            b->rej[i] += (int64_t)d * d;
+            /* mix it down with the notch's own NCO (see NOTCH_SUB) */
+            idx = (int)(b->ph[i] >> (PHASE_BITS - NCO_LUT_BITS));
+            b->sub_re[i] += (int64_t)d * NCO_COS[idx];
+            b->sub_im[i] -= (int64_t)d
+                            * NCO_COS[(idx + 3 * NCO_LUT_N / 4) & (NCO_LUT_N - 1)];
+            b->ph[i] += b->word[i];
+            if (++b->sub_n[i] >= NOTCH_SUB) {
+                int64_t ang, mag;
+                cordic_atan2(b->sub_im[i], b->sub_re[i], &ang, &mag);
+                if (b->have_ang[i]) {
+                    /* wrap to +-half a turn: +-23 Hz per 256 samples */
+                    b->dphi[i] += (int64_t)(int32_t)(uint32_t)(ang - b->last_ang[i]);
+                    b->n_dphi[i]++;
+                }
+                b->last_ang[i] = ang;
+                b->have_ang[i] = 1;
+                b->sub_re[i] = b->sub_im[i] = 0;
+                b->sub_n[i] = 0;
+            }
         }
     }
     if (++b->n_tick >= NOTCH_TICK) {
-        /* release a notch whose rejected component has fallen under 1/32
-         * of the input power (the carrier is gone; the 30 Hz of wanted
-         * signal it removes is ~1.4 % of the 2.1 kHz band) for
-         * NOTCH_IDLE_TICKS in a row */
+        /* release a notch whose rejected component has fallen under
+         * NOTCH_REL_DIV-th of the input power for NOTCH_IDLE_TICKS in a
+         * row: white noise in the notch's ~50 Hz slice is ~0.8 % of a
+         * 6 kHz input (+-17 % per 4096-sample tick), a carrier the finder
+         * engages on (>= 2.5x the per-bin mean at 512 bins) is >= 1 %.
+         * At 1/32 a carrier at ISR -3 dB at EXTREME (1.6 %) was released
+         * 1.4 s after every engage, found again, re-added -- and every
+         * re-add reset the tone search: 68 % PER, zero commits. */
         for (i = 0; i < NOTCH_MAX; i++) {
             if (!b->active[i])
                 continue;
-            if (b->rej[i] * 32 <= b->tot || b->rej[i] <= NOTCH_MIN_REJ) {
+            if (b->rej[i] * NOTCH_REL_DIV <= b->tot || b->rej[i] <= NOTCH_MIN_REJ) {
                 if (++b->idle[i] >= NOTCH_IDLE_TICKS)
                     b->active[i] = 0;
             } else {
                 b->idle[i] = 0;
+                /* carrier present: track its frequency (NOTCH_SUB) */
+                if (b->n_dphi[i] >= 8) {
+                    int64_t dw = b->dphi[i] / ((int64_t)b->n_dphi[i] * NOTCH_SUB);
+                    dw /= 2;                        /* half the error per tick */
+                    if (dw > (int64_t)NOTCH_TRACK_MAX_WORD)
+                        dw = NOTCH_TRACK_MAX_WORD;
+                    if (dw < -(int64_t)NOTCH_TRACK_MAX_WORD)
+                        dw = -(int64_t)NOTCH_TRACK_MAX_WORD;
+                    if (dw != 0) {
+                        b->word[i] = (uint32_t)((int64_t)b->word[i] + dw);
+                        notch_retune(&b->f[i], b->word[i]);
+                        b->retunes[i]++;
+                    }
+#ifdef NOTCH_DEBUG
+                    fprintf(stderr, "notch %d: word %u (%.2f Hz) dw %lld rej/tot %.3f n_dphi %d\n",
+                            i, (unsigned)b->word[i], (double)b->word[i] * 12000.0 / 4294967296.0,
+                            (long long)dw, (double)b->rej[i] / (double)(b->tot ? b->tot : 1),
+                            b->n_dphi[i]);
+#endif
+                }
             }
             b->rej[i] = 0;
+            b->dphi[i] = 0;
+            b->n_dphi[i] = 0;
         }
         b->tot = 0;
         b->n_tick = 0;
