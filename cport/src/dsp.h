@@ -38,4 +38,56 @@ void nco_derotate(const samp_t *in_i, const samp_t *in_q, int n,
 /* vectoring-mode CORDIC: angle in signed phase-word units, |x + jy| */
 void cordic_atan2(int64_t y, int64_t x, int64_t *angle, int64_t *mag);
 
+/* STATIONARY-CARRIER NOTCH (the float model's FullOFDMModem.notch, the
+ * fixed model's dsp.Notch -- integer twins, bit-exact). Second-order
+ * real IIR, NOTCH_BW_HZ wide, centred on a 32-bit phase word:
+ *   y = x - 2c x1 + x2 + 2rc y1 - r^2 y2,  r = 1 - pi*BW/fs
+ * Coefficients in Q14 (b1 = -c_q15 is exactly -2c in Q14), states are
+ * sample values, the accumulator is int64, the output rounds and
+ * saturates to int16 -- the ring stores int16. */
+#define NOTCH_MAX 3
+#define NOTCH_R_Q14 16255      /* r = 1 - pi*30/12000 = 0.992146 */
+#define NOTCH_R2_Q14 16128     /* r^2 */
+#define NOTCH_TICK 4096        /* samples per release evaluation: long
+                                * enough (~34 degrees of freedom in the
+                                * 30-Hz slice) that white noise cannot
+                                * trip the 1/32 ratio by fluctuation --
+                                * at 256 it did, every few ticks */
+#define NOTCH_IDLE_TICKS 4     /* ~1.4 s of the carrier gone -> release */
+#define NOTCH_MIN_REJ (NOTCH_TICK * 16) /* rejected rms < 4 LSB counts as gone:
+                                         * with the input silent the notch's
+                                         * own ringing would otherwise hold
+                                         * it forever */
+
+typedef struct {
+    int32_t b1, a1, a2;
+    int32_t x1, x2, y1, y2;
+} notch_t;
+
+typedef struct {
+    notch_t f[NOTCH_MAX];
+    uint32_t word[NOTCH_MAX];
+    int active[NOTCH_MAX];
+    int idle[NOTCH_MAX];
+    int64_t rej[NOTCH_MAX];  /* (in - out)^2 of each stage this tick */
+    int64_t tot;             /* input^2 this tick */
+    int n_tick;
+} notch_bank_t;
+
+void notch_init(notch_t *f, uint32_t word);
+int16_t notch_step(notch_t *f, int16_t x);
+void notch_bank_clear(notch_bank_t *b);
+/* add a notch at word, or refresh one within NOTCH_MERGE_WORD of it;
+ * returns 1 if the bank holds it afterwards */
+int notch_bank_request(notch_bank_t *b, uint32_t word);
+int notch_bank_active(const notch_bank_t *b);
+/* is a notch already within tol_word of word? (refreshes its idle count) */
+int notch_bank_near(notch_bank_t *b, uint32_t word, uint32_t tol_word);
+/* run one sample through every active notch (and the release monitor) */
+int16_t notch_bank_push(notch_bank_t *b, int16_t x);
+/* analytic signal of the bank's output: hilbert_analytic on the notched
+ * samples, bit-exact with notching the array first */
+void hilbert_analytic_notched(const int16_t *x, int n, notch_bank_t *b,
+                              samp_t *out_i, samp_t *out_q);
+
 #endif /* OFDM_DSP_H */

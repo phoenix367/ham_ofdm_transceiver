@@ -25,6 +25,11 @@ Everything runs through the local venv (`./venv/bin/python`); install deps with
 - `./venv/bin/python experiments/ota_demo.py` — multi-packet stream decode demo.
 - `./venv/bin/python experiments/stream_mode.py [--trials N]` — streamed
   bursts vs per-frame preambles (delivery, goodput, fitted dB cost).
+- `./venv/bin/python experiments/interference.py [--trials N] [--quick]` —
+  co-channel interference sweep (stranger's preamble train / frames /
+  SSB voice / CW carrier vs ISR) on the float receiver and on the C
+  streaming receiver (`make -C cport interfrx` builds its harness);
+  ~22 min at 60 frames/point, `--quick` is a 1-minute regression check.
 - `./venv/bin/python experiments/fec_comparison.py`,
   `experiments/viterbi_recal.py`, `experiments/ldpc_recal.py`,
   `experiments/llr_shape.py`, `experiments/extreme_recal.py`,
@@ -341,6 +346,139 @@ Cross-module invariants that are easy to break:
   push_ms_max 2.7 s) -- at EXTREME every failed acquisition re-scanned
   its whole excursion on noise, forever. Prefer not committing garbage
   over recovering from having committed it.
+- CO-CHANNEL INTERFERENCE (`experiments/interference.py`, 60
+  frames/point, both receivers on byte-identical recordings with the
+  interferer on >= 5.1 s before the frame; `--quick` is the 1-minute
+  regression; README has the table). Against a stranger's PREAMBLE
+  TRAIN or FRAMES there is no margin beyond being the stronger signal:
+  the 10 % PER threshold is at ISR -3..-5 dB (C streaming) and at
+  EXTREME -2.5 dB with the interferer 15 dB under the NOISE -- its tone
+  comb integrates over the tone field exactly like ours and STEALS THE
+  LOCK. That limit is what remains after four fixes: preemption and
+  the net key took the same-mode-frames column from -8.8 dB / never
+  to -2.6 / -2.4 dB, and the carrier excision took a CW carrier from
+  -4.8 / -4.2 dB to no failure up to ISR +10 dB at NORMAL (EXTREME
+  partial: float under 15 % from +3 dB, C 38-63 %, the streaming
+  finder's one-window frequency estimate is the limit). Voice stays at
+  -6..-10 dB (harmonics on most carriers, syllables on half the
+  symbols: the weighting has no reference, and the lock goes at ISR
+  0). Strong SSB voice alone makes the streaming receiver commit ~1x/s
+  (41-56/min, header fails, ~25 % deaf); a stranger's frames now cost
+  74 header attempts/min (0.27 s each, the rearm re-tries the same
+  preamble region up to three times) instead of 25 captured frames.
+  The float model's figures at +10 dB on the stranger rows are WORSE
+  than the C receiver's: its global argmax over a 7-9 s recording has
+  three times the stranger preambles to be stolen by. Open thread: a
+  frequency-tracking loop on the notch's rejected component for
+  EXTREME. ON THE BOARDS (flashed 2026-09-12): 6000-byte file
+  byte-identical, 7/7 frames, 0 timeouts/retx, beacons clean; a
+  mismatched net key refuses frames on the air and a matched one
+  delivers the retransmission at once. The quiet wire's ~1/8 s header
+  attempts at EXTREME are PRE-EXISTING: 33 s of captured idle audio
+  (`g_cap` over JTAG, 200 s per 128 kB at the bridge's 0.64 kB/s)
+  replays identically through the pre-change and current host
+  receivers (12 NORMAL / 4 EXTREME commits, 0 notches) -- A/B the
+  captured wire before blaming a receiver change. The radio image
+  needed `-DMAX_SYMS=280` (its largest EXT frame is 276 symbols;
+  rx_internal.h's define is now guarded) and `g_wacc` in DTCM; D2 has
+  0.6 kB to spare -- a block summary is 552 B x 176 and the excess bins
+  are stored as BYTES, the carrier frequency being measured from the
+  raw ring at request time (EXC_FREQ_BLOCKS real-input FFTs) rather
+  than from stored spectra, which D2 could not hold. The sweep's
+  workers run one BLAS thread each (`--workers`); unpinned, 8 workers
+  opened 71 threads (load 10 on 8 cores).
+- STATIONARY-CARRIER EXCISION (float `FullOFDMModem.excise`, fixed
+  `_find_tones` + `dsp.Notch`, C `rx_find_tones`/`rx_excise_analytic`
+  frame-at-once and `carrier_track` + ONE global `notch_bank_t` in
+  `rx_stream.c`). A CW carrier at the frame's power blinds the tone
+  detector (leakage through the rectangular window into a dozen bins,
+  a 0.2x-amplitude correlation floor in the ZC stage and its energy
+  normalisation) and an ideal 30-Hz notch at its frequency decoded
+  15/15 up to ISR +10 dB where the raw receiver decoded 0 -- so the
+  receiver finds such carriers and notches them out of the SAMPLES
+  before the Hilbert. Definitions shared by all twins, each of them
+  measured: excess bins are > DET_EXC_X=4 x the block's MEAN in-band
+  power (the median is zero for a carrier alone on a quiet channel and
+  then every leakage crumb counts; at 4x a half-bin carrier keeping
+  40 % of its power per bin is still seen; DET_N_EXC=4 slots keep it
+  in the count when noise peaks compete), stationary = in excess in
+  >= 85 % of blocks (hits*20 >= 17*H) over the whole recording or,
+  streaming, the last 2 x total_blocks (a comb bin of a preamble
+  TRAIN is on exactly 2/3 of the time -- do not shorten the history
+  below one tone field or you notch the peer's preamble; EXTREME's is
+  10 s), frequency = bin + phase advance between consecutive blocks
+  (unambiguous over +-half a bin; take the strongest bin of an
+  adjacent group, the far one wraps), notch r=0.9921 Q14 with the
+  output saturated to int16. The bank runs ONCE per sample index
+  (`g_notch_done`): every instance pushes the same samples, the first
+  filters and writes the ring, the rest skip -- and `rxs_open` clears
+  it, so open every live instance before the first push. Release is
+  the bank's own monitor (rejected < input/32 for 4 ticks of 4096
+  samples -- at 256 white noise tripped the ratio every few ticks --
+  OR rejected < 4 LSB rms, without which the notch's ringing on a
+  silent input held it forever). A rest-band trim in the tone metric
+  was tried first and REMOVED: it moved a noisy golden vector's
+  coarse shift (the near-tie) and bought nothing. `test_rx` pins the
+  found phase word and the decode bit-exact against the fixed model;
+  `test_stream` pins engage-before-frame, decode and release.
+- INTERFERENCE WEIGHTING (`Transceiver.block_weights`, fixed
+  `WeightAcc`, C `rxd_wacc_t` -- integer twins bit-exact, goldens
+  regenerated). Per symbol and data carrier the decision-directed
+  residual of Y*conj(H) divided by |H| (noise+interference AMPLITUDE in
+  received units, scale 2^exp; BPSK uses Im alone); summed per carrier
+  on a RUNNING exponent (re-aligned when a louder symbol arrives --
+  storing every residual would cost 26 kB per instance) and per symbol
+  with its own; at block end every LLR x min(1, (median/sum)^2) of its
+  carrier AND its symbol, Q15, floored at 512 (1/64). Down only: the
+  LLR scale already carries |H|^2, so an up-weight would double-count
+  the fade. Applied after exponent alignment, before calibration and
+  quantisation, to the header as well (rx_stream S_HEADER/finish_frame,
+  rx_demod demod_block); `rxs_continue_burst` resets the accumulator.
+  The SNR estimator now reads ~0.2 dB differently on the CAL vector.
+- NET KEY (`packets.Header`, `Transceiver(net_key=)`, fixed
+  TX/RX `net_key`, C `packets_set_net_key`, UP_CFG_NET_KEY = 10,
+  console `config net_key`): the header CRC-8 seed is 0xFF ^ key, so
+  key 0 is the article's CRC (the worked examples still verify) and a
+  stranger's link frame fails at the HEADER, before its data block
+  costs the receiver 2.1 s and before its link-control word -- which
+  carries no identity -- poisons the ARQ and ladder (measured: 25
+  stranger frames/min accepted). BEACON and BCAST are public: a keyed
+  receiver re-checks those two types under key 0. One key per program
+  in C (a global); the sweep keys its link 0x5A and its strangers 0.
+  Both ends of a link must hold the same key; there is no negotiation.
+- The C STREAMING receiver PREEMPTS (`rx_stream.c` "PREEMPTION",
+  `RXS_PREEMPT`, `RXS_PREEMPT_LOG2_Q4`): the tone stage keeps
+  evaluating windows during the ZC-wait, header and data states as a
+  CHALLENGER under the search's own region/stability rules, and a
+  challenger that would commit with 3 dB more TONE-BIN ENERGY than the
+  locked peak aborts the decode and is committed in its place. Why: a
+  same-mode frame 20 dB below ours and 10 dB below the noise still
+  detects (its tone comb has ~+9 dB per-bin SNR), its header often
+  decodes, and the receiver then spent the stranger's whole data block
+  (2.1 s NORMAL, 32 s EXTREME) deaf -- our preamble inside that window
+  was consumed and, the search being newest-block-only, never
+  revisited: 18-28 % PER at NORMAL +10 dB from ISR -20 dB up against a
+  frame-at-once model that lost nothing. Three things in it are
+  load-bearing: (1) the bar is ENERGY (mantissa sum at the argmax
+  shift, restored through the window's block exponent -- BFP exponents
+  count headroom left-shifts, so true = aligned >> 2*e_min), not the
+  metric ratio -- the contrast metric saturates against its 1 % floor
+  regularizer above ~20 dB per-bin SNR, so two strong preambles 12 dB
+  apart score the same; (2) a live challenger region is CARRIED into
+  the search when the decode ends (`rearm`), gated on recency and on
+  the 64x strength bar -- without the carry a stranger whose data CRC
+  failed three blocks after our preamble became the argmax reset the
+  search past our preamble (a measured residual 8 % at ISR -20 dB),
+  and without the strength gate data-hover regions cost one failed
+  header per decoded frame; (3) our own data symbols put only
+  n_mask/16 of our power into a challenger window's tone bins (~-8 dB),
+  so a frame never preempts itself. Costs nothing measurable: the
+  EXTREME knee is identical with `-DRXS_PREEMPT=0` (59/56/54/45/39/11/0
+  of 60 per point, 0 false alarms in 60), host time within noise, and
+  `test_stream` pins both directions (weak stranger then strong frame
+  -> 1 preempt and the strong frame; strong then weak -> 0). A preempt
+  aborts a burst walk (`burst_resume_abs` = 0); the 15 s deadline in
+  the firmware covers it.
 - Mixing float and fixed receivers: the fixed chain's detector returns
   positions in ANALYTIC index space, offset by the 31-sample Hilbert
   group delay. It cancels inside `FixedReceiver.receive()` but any

@@ -8472,6 +8472,46 @@ static const int16_t TX_LDPC_HEAD[64] = {
 #define RX_LDPC_START 5115
 #define RX_LDPC_CFO_WORD INT64_C(2934)
 
+static const uint8_t TONE_PKT[252] = {
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 1, 0, 0,
+    1, 1, 0, 1, 0, 1, 1, 0,
+    0, 1, 0, 0, 0, 1, 1, 0,
+    0, 1, 0, 1, 0, 1, 1, 0,
+    0, 1, 1, 0, 0, 1, 1, 0,
+    0, 1, 1, 1, 0, 1, 1, 0,
+    1, 0, 0, 0, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 1, 0, 0, 1, 1, 0,
+    1, 0, 1, 1, 0, 1, 1, 0,
+    1, 1, 0, 0, 0, 1, 1, 0,
+    1, 1, 0, 1, 0, 1, 1, 0,
+    1, 1, 1, 0, 0, 1, 1, 0,
+    1, 1, 1, 1, 0, 1, 1, 1,
+    0, 0, 0, 0, 0, 1, 1, 1,
+    0, 0, 0, 1, 0, 1, 1, 1,
+    0, 0, 1, 0, 0, 1, 1, 1,
+    0, 0, 1, 1, 0, 1, 1, 1,
+    0, 1, 0, 0, 0, 1, 1, 1,
+    0, 1, 0, 1, 0, 1, 1, 1,
+    0, 1, 1, 0, 0, 1, 1, 1,
+    0, 1, 1, 1, 0, 1, 1, 1,
+    1, 0, 0, 0, 0, 1, 1, 1,
+    1, 0, 0, 1, 0, 1, 1, 1,
+    1, 0, 1, 0, 0, 1, 1, 1,
+    1, 0, 1, 1, 0, 1, 1, 1,
+    1, 1, 0, 0, 0, 1, 1, 1,
+    1, 1, 0, 1, 0, 1, 1, 1,
+    1, 1, 1, 0, 1, 1, 1, 1,
+    1, 1, 0, 1, 0, 0, 1, 0,
+    1, 1, 1, 0
+};
+
+#define TONE_WORD 537944654u
+#define TONE_AMP 12000
+#define TONE_FOUND_WORD 537794306u
+#define TONE_START 5115
+
 static const uint8_t HARQ_PKT[252] = {
     0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 1, 1, 0,
@@ -8516,10 +8556,10 @@ static const uint8_t HARQ_PKT[252] = {
 #define HARQ_B_START 5115
 #define HARQ_B_CFO_WORD INT64_C(4237)
 #define HARQ_LLR_N 784
-#define HARQ_LLR_HASH UINT64_C(13680599591611719755)
+#define HARQ_LLR_HASH UINT64_C(3066165086102124075)
 
 #define CAL_LLR_N 784
-#define CAL_LLR_HASH UINT64_C(1092829464088897446)
-#define CAL_SNR_DB 7.684531227416569
+#define CAL_LLR_HASH UINT64_C(4454373528557359925)
+#define CAL_SNR_DB 7.878747772632566
 
 #endif /* TEST_VECTORS_H */

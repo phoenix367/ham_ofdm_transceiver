@@ -101,6 +101,8 @@ enum {
                               * declares here and the board carries it
                               * into the capability record. Unset = 0 =
                               * "never said", which is not "none". */
+    UP_CFG_NET_KEY      = 10, /* header CRC-8 seed (packets.h): frames of
+                               * other nets fail at the header; 0 = open */
     UP_CFG_WIN_MAX      = 8  /* streamed-window ceiling we accept AND
                               * send (1..BURST_STREAM_MAX); declared to
                               * the peer in the capability record, as

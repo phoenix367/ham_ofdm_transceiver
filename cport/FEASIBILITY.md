@@ -469,6 +469,17 @@ The last row is the one that did not fit an H743VI and now does, with
 13612 B to spare -- tight enough that it should be read as "possible",
 not "comfortable".
 
+**Interference handling (2026-09-12).** Stationary-carrier excision,
+interference weighting and the net key (CLAUDE.md invariants) cost,
+measured with `make armmeas` on cport defaults before and after:
+.bss 818804 -> 863044 (+44240 B), .text 65721 -> 69977 (+4256 B). The
+RAM is `g_blk` (+80 B per block summary: the excess bins' complex
+values, +14080 B), `g_wacc` (the residual accumulators, 14832 B for
+three instances, dominated by MAX_SYMS per-symbol sums) and the
+per-instance excess history in `rxs_state` (~2.5 kB each); the global
+notch bank is under 200 B. Host time on the same recordings is
+unchanged (0.34 s NORMAL, 1.11-1.13 s EXTREME for 60/120 s of audio).
+
 Two properties worth keeping: a full store refuses `station_submit`
 exactly as a full queue always did (and `station_pool_free` lets a
 caller check before submitting a file in parts, so a transfer is refused

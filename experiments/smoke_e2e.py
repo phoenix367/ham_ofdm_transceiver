@@ -83,6 +83,28 @@ except Exception as exc:
     print(f"[FAIL] auto-mode RX: {exc}")
     results.append(False)
 
+# net key: a keyed link's frame is refused by an open receiver and by another
+# key (header CRC), decoded by its own; a beacon stays public
+from ofdm_phy.transceiver import DemodError
+trx_k = Transceiver(make_modem(LinkMode.NORMAL), net_key=0x5A)
+sig_k = trx_k.build_frame(data, mod=ModType.BPSK, spd=CCSpeed.R12)
+rx_k = np.concatenate([np.zeros(700), sig_k])
+try:
+    ok = trx_k.demod_frame(rx_k)[0] == data
+    for other in (0, 0x3C):
+        try:
+            Transceiver(make_modem(LinkMode.NORMAL), net_key=other).demod_frame(rx_k)
+            ok = False
+        except DemodError as exc:
+            ok = ok and str(exc).startswith("head")
+    sig_b = Transceiver(make_modem(LinkMode.NORMAL)).build_frame(beacon, mod=ModType.BPSK, spd=CCSpeed.R13)
+    ok = ok and trx_k.demod_frame(np.concatenate([np.zeros(700), sig_b]))[0] == beacon
+    print(f"[{'PASS' if ok else 'FAIL'}] net key: keyed frame private, beacon public")
+    results.append(ok)
+except Exception as exc:
+    print(f"[FAIL] net key: {type(exc).__name__}: {exc}")
+    results.append(False)
+
 # streamed burst: one preamble + one header for 8 packets, ZC resync every 4
 blocks = [Data(reserved=123, payload=bytes([65 + k]) * 27) for k in range(8)]
 trx = Transceiver(make_modem(LinkMode.NORMAL))

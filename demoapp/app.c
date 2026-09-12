@@ -1085,7 +1085,7 @@ static void usb_on_frame(void *ctx, uint8_t type, const uint8_t *pl, int len)
 static const struct { const char *name; int key; } USB_CFG[] = {
     { "rung_ceiling", 1 }, { "burst_window", 2 }, { "burst_stream", 3 },
     { "freq_trim_mhz", 4 }, { "audio_tap", 5 }, { "anchor", 6 },
-    { "diag_stream", 7 }, { "win_max", 8 },
+    { "diag_stream", 7 }, { "win_max", 8 }, { "net_key", 10 },
 };
 
 static int usb_command(char *line)

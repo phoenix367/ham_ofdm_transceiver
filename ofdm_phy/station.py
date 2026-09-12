@@ -94,7 +94,7 @@ class LinkStation:
                  backoff_range: typing.Tuple[float, float] = (1.0, 6.0),
                  freq_trim_cb: typing.Callable[[float], None] = None,
                  afc_max_trim_hz: float = 150.0, afc_anchor: bool = False,
-                 phy=None):
+                 phy=None, net_key: int = 0):
         # phy: optional PHY adapter (e.g. ofdm_phy.fixed.FixedPHY) providing
         # build_frame(pkt, mode, mod, spd) and demod_frame_auto(samples,
         # prev_data_llrs) -- None uses the float Transceiver chain.
@@ -112,6 +112,7 @@ class LinkStation:
         self.name = name
         self.rng = rng
         self.phy = phy
+        self.net_key = net_key   # header CRC seed (packets.Header)
         self.turnaround = turnaround
         self.timeout_margin = timeout_margin
         self.backoff_range = backoff_range
@@ -159,7 +160,7 @@ class LinkStation:
     def _trx(self, rung_idx: int) -> Transceiver:
         mode = LADDER[rung_idx].mode
         if mode not in self._modems:
-            self._modems[mode] = Transceiver(make_modem(mode))
+            self._modems[mode] = Transceiver(make_modem(mode), net_key=self.net_key)
         return self._modems[mode]
 
     def _take_fragment(self, rung_idx: int) -> typing.Optional[dict]:
@@ -276,7 +277,7 @@ class LinkStation:
                 pkt, stats, mode = self.phy.demod_frame_auto(
                     samples, prev_data_llrs=self._harq_llrs)
             else:
-                pkt, stats, mode = Transceiver().demod_frame_auto(
+                pkt, stats, mode = Transceiver(net_key=self.net_key).demod_frame_auto(
                     samples, prev_data_llrs=self._harq_llrs, llr_recal="auto")
         except DemodError as exc:
             # keep the failed attempt's LLRs for chase combining with the

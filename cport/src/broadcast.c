@@ -90,7 +90,7 @@ int bc_receive(link_mode_t mode, const int16_t *samples, int n, int group,
     symbol_len = r.symbol_len;
     pre = bc_preamble_len(mode);
 
-    hilbert_analytic(samples, n, g_bi, g_bq);
+    rx_excise_analytic(mode, samples, n, g_bi, g_bq);
     memset(g_bi + n, 0, sizeof(*g_bi) * (size_t)symbol_len);
     memset(g_bq + n, 0, sizeof(*g_bq) * (size_t)symbol_len);
 

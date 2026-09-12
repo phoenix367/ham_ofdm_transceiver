@@ -81,6 +81,7 @@ class RxStats:
     cfo_hz: float = 0.0
     harq_combined: bool = False  # decode needed chase combining
     llr_alpha: float = 1.0       # header-fitted LLR temperature
+    notches_hz: list = field(default_factory=list)  # carriers excised first
 
 
 @dataclass
@@ -103,6 +104,7 @@ class StreamStats:
     start_sample: int = 0
     cfo_hz: float = 0.0
     llr_alpha: float = 1.0
+    notches_hz: list = field(default_factory=list)
     blocks: typing.List[BlockStats] = field(default_factory=list)
     # (block index, timing correction in samples, CFO correction in Hz) for
     # every ZC resync that locked; a resync that failed the plausibility
@@ -128,8 +130,10 @@ STREAM_RESYNC_EVERY = 4
 
 class Transceiver:
     def __init__(self, modem: FullOFDMModem = None,
-                 papr_cutoff_db: float = 6.0, papr_filter_hz: float = 3000.0):
+                 papr_cutoff_db: float = 6.0, papr_filter_hz: float = 3000.0,
+                 net_key: int = 0):
         self._modem = modem if modem is not None else FullOFDMModem()
+        self.net_key = net_key   # header CRC seed, see packets.Header
         self._papr_cutoff_db = papr_cutoff_db
         self._papr_filter_hz = papr_filter_hz
         # LLR recalibration: None = raw (article-faithful), "auto" = apply
@@ -179,7 +183,7 @@ class Transceiver:
 
     def build_frame(self, packet: typing.Union[Beacon, Data],
                     mod: ModType = ModType.BPSK, spd: CCSpeed = CCSpeed.R13,
-                    clip: bool = True, fec: str = "cc") -> np.ndarray:
+                    clip: bool = True, fec: str = "cc", net_key: int = None) -> np.ndarray:
         """Build the complete baseband frame (float64 audio samples).
 
         fec="ldpc" codes the DATA block with the rate-1/3 IRA LDPC instead of
@@ -198,7 +202,8 @@ class Transceiver:
         chunks = list(m.gen_preamble())
 
         m.set_mapper(HEADER_MAPPER)
-        for row in self._encode_block(header.encode(), HEADER_CODEC, HEADER_MAPPER):
+        key = self.net_key if net_key is None else net_key
+        for row in self._encode_block(header.encode(net_key=key), HEADER_CODEC, HEADER_MAPPER):
             chunks.append(m.modulate_symbol_cp(row))
 
         m.set_mapper(MAPPERS[mod])
@@ -269,7 +274,7 @@ class Transceiver:
         chunks = list(m.gen_preamble())
 
         m.set_mapper(HEADER_MAPPER)
-        for row in self._encode_block(header.encode(), HEADER_CODEC, HEADER_MAPPER):
+        for row in self._encode_block(header.encode(net_key=self.net_key), HEADER_CODEC, HEADER_MAPPER):
             chunks.append(m.modulate_symbol_cp(row))
 
         zc = m.gen_zc_preamble()
@@ -329,14 +334,54 @@ class Transceiver:
         llrs = []
         es_n0_carriers = []
         es_n0_list = []
+        resids = []
         for i in range(n_syms):
             sym = signal[pos + i * sym_len: pos + (i + 1) * sym_len]
             es_n0_pc, es_n0, llr = m.demodulate_symbol_cp_soft(sym)
             llrs.append(llr)
             es_n0_carriers.append(es_n0_pc)
             es_n0_list.append(es_n0)
+            resids.append(m.last_resid)
 
-        return np.concatenate(llrs), np.mean(es_n0_carriers, axis=0), float(np.mean(es_n0_list))
+        llr_block = np.stack(llrs)                    # (n_syms, carriers*mu)
+        w_sym, w_car = self.block_weights(np.stack(resids))
+        mu = llr_block.shape[1] // len(w_car)
+        llr_block = llr_block * w_sym[:, None] * np.repeat(w_car, mu)[None, :]
+        return llr_block.ravel(), np.mean(es_n0_carriers, axis=0), float(np.mean(es_n0_list))
+
+    # INTERFERENCE WEIGHTING. A carrier or a voice harmonic sitting on one
+    # subcarrier is ~17 dB above the per-carrier signal there, and the
+    # per-symbol noise variance the LLRs are scaled by is an AVERAGE over
+    # carriers -- so the hit carrier's LLRs are large, confident and wrong,
+    # and even the header fails from ISR -7 dB (measured,
+    # experiments/interference.py). A syllable of voice does the same to
+    # a run of symbols. The fix weights every LLR by how reliable its
+    # carrier and its symbol were over the whole block: the summed
+    # residual of each carrier (over the symbols) and of each symbol
+    # (over the carriers) against the block's median, squared (the
+    # residual is an amplitude, the weight belongs on a power), capped at
+    # 1 (only ever DOWN-weight -- the LLR scale already carries the
+    # channel gain) and floored at 1/64 (a soft erasure, never a hard
+    # one). The fixed model and the C port carry the same rule in Q15,
+    # bit-exact with each other; the header (BPSK, 6 symbols) goes
+    # through it too.
+    WEIGHT_FLOOR = 1.0 / 64.0
+
+    @classmethod
+    def block_weights(cls, resid: np.ndarray):
+        """(per-symbol, per-carrier) weights from a (n_syms, carriers)
+        residual matrix; the median is the upper middle element, as the
+        integer twins take it."""
+        per_car = resid.sum(axis=0)
+        per_sym = resid.sum(axis=1)
+
+        def w(v):
+            med = np.sort(v)[len(v) // 2]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                r = np.where(v > 0, med / np.maximum(v, 1e-300), 1.0)
+            return np.clip(np.minimum(r, 1.0) ** 2, cls.WEIGHT_FLOOR, 1.0)
+
+        return w(per_sym), w(per_car)
 
     def _fit_llr_alpha(self, hdr_llrs: np.ndarray, hdr_bits: np.ndarray) -> float:
         """Front-end LLR calibration from the decoded header.
@@ -366,7 +411,8 @@ class Transceiver:
         """
         m = self._modem
 
-        analytic = hilbert(np.asarray(real_signal, dtype=np.float64)).astype(np.complex64)
+        real_signal, notches = m.excise(np.asarray(real_signal, dtype=np.float64))
+        analytic = hilbert(real_signal).astype(np.complex64)
 
         det = m.detect_preamble(analytic)
         if det is None:
@@ -384,7 +430,7 @@ class Transceiver:
         try:
             hdr_llrs, _, _ = self._demod_symbols(corrected, start, n_hdr_syms)
             hdr_bits = self._decode_block(hdr_llrs, HEADER_CODEC, Header.PACKET_SIZE)
-            header = Header.decode(hdr_bits, check_crc=check_crc)
+            header = Header.decode(hdr_bits, check_crc=check_crc, net_key=self.net_key)
         except DemodError:
             raise
         except Exception as exc:
@@ -447,6 +493,7 @@ class Transceiver:
             cfo_hz=cfo,
             harq_combined=combined,
             llr_alpha=llr_alpha,
+            notches_hz=notches,
         )
 
         return packet, stats
@@ -503,7 +550,8 @@ class Transceiver:
         """
         m = self._modem
 
-        analytic = hilbert(np.asarray(real_signal, dtype=np.float64)).astype(np.complex64)
+        real_signal, notches = m.excise(np.asarray(real_signal, dtype=np.float64))
+        analytic = hilbert(real_signal).astype(np.complex64)
         det = m.detect_preamble(analytic)
         if det is None:
             raise DemodError("no preamble")
@@ -518,14 +566,15 @@ class Transceiver:
         try:
             hdr_llrs, _, _ = self._demod_symbols(sig, start, n_hdr_syms)
             hdr_bits = self._decode_block(hdr_llrs, HEADER_CODEC, Header.PACKET_SIZE)
-            header = Header.decode(hdr_bits, check_crc=check_crc)
+            header = Header.decode(hdr_bits, check_crc=check_crc, net_key=self.net_key)
         except DemodError:
             raise
         except Exception as exc:
             raise DemodError("head") from exc
 
         stats = StreamStats(header=header, start_sample=start, cfo_hz=cfo,
-                            llr_alpha=self._fit_llr_alpha(hdr_llrs, hdr_bits))
+                            llr_alpha=self._fit_llr_alpha(hdr_llrs, hdr_bits),
+                            notches_hz=notches)
 
         codec = LDPCCodec if header.ver == 2 else CODECS[header.spd]
         mapper = MAPPERS[header.mod]
@@ -615,6 +664,7 @@ class Transceiver:
                 self._AUTO_TRX_CACHE[mode] = Transceiver(make_modem(mode))
             trx = self._AUTO_TRX_CACHE[mode]
             trx.llr_recal = llr_recal
+            trx.net_key = self.net_key
             try:
                 packet, stats = trx.demod_frame(real_signal, check_crc=check_crc,
                                                 prev_data_llrs=prev_data_llrs)

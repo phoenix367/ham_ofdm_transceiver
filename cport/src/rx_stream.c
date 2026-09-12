@@ -29,6 +29,42 @@
 #define BLK_CAP_ROBUST 32                /* >= 30  */
 #define BLK_TOTAL (BLK_CAP_NORMAL + BLK_CAP_ROBUST + BLK_CAP)
 #define DECLINE_BLOCKS 3
+/* PREEMPTION. The tone stage keeps evaluating windows while the header
+ * and data states run, as a CHALLENGER tracked by the same region /
+ * stability rules as the search. A challenger that would commit and
+ * whose preamble arrives with more tone-bin energy than the one this
+ * frame was committed on (by RXS_PREEMPT_LOG2_Q4) aborts the decode
+ * and is committed in its place.
+ *
+ * Why: a same-mode frame 20 dB below ours (10 dB under the noise at
+ * +10 dB SNR) still detects -- its tone comb has ~+9 dB per-bin SNR --
+ * and its header often decodes, after which this receiver used to spend
+ * the stranger's whole data block (2.1 s NORMAL, 32 s EXTREME) deaf;
+ * our own preamble inside that window was consumed and, the search
+ * being newest-block-only, never revisited. Measured 18-28 % PER at
+ * NORMAL +10 dB from ISR -20 dB up against a frame-at-once model that
+ * lost nothing (experiments/interference.py). The ratio, not a plain
+ * "any new peak": an interferer at or above our own power destroys the
+ * frame in progress anyway (ISR 0 dB is ~100 % PER in the sweep), so
+ * switching to the stronger signal is right on average, and the 3 dB
+ * margin keeps an equal-power stranger, which may or may not kill the
+ * frame in hand, from taking it for certain.
+ * -DRXS_PREEMPT=0 builds the old behaviour for A/B. */
+#ifndef RXS_PREEMPT
+#define RXS_PREEMPT 1
+#endif
+/* The bar is the challenger's TONE-BIN ENERGY against the locked
+ * frame's, as log2 in Q4 (16 = one octave = 3 dB), not the metric
+ * ratio: the contrast metric saturates against its 1 % floor
+ * regularizer once the per-bin SNR passes ~20 dB, so two strong
+ * preambles 12 dB apart score the same and the ratio cannot order
+ * them. Tone-bin energy is what "stronger" means and does not
+ * saturate. Our own data symbols in the challenger's window put only
+ * n_mask/N_DATA_CARRIERS of our power in the tone bins (~-8 dB), below
+ * the bar even before the challenger has to pass the commit rule. */
+#ifndef RXS_PREEMPT_LOG2_Q4
+#define RXS_PREEMPT_LOG2_Q4 16
+#endif
 /* ZC search margin either side of the tone field's end, in blocks.
  *
  * Counted in BLOCKS, not samples, so it tracks B -- which is what the
@@ -55,7 +91,44 @@ typedef struct {
     int64_t band;
     int64_t dot[2][MAX_SHIFTS];
     int exp;
+    /* excess bins of this block (rx_internal.h det_block_excess),
+     * strongest first, for the rolling carrier finder. Bytes, not
+     * values: D2 holds 176 of these beside the raw ring with ~2 kB to
+     * spare, so the carrier's frequency is measured from the raw ring
+     * at request time rather than from stored spectra. */
+    uint8_t exc_bin[DET_N_EXC];
+    int8_t n_exc;
 } blk_sum_t;
+
+/* STATIONARY-CARRIER EXCISION, streaming twin of rx_find_tones (reasoning
+ * in ofdm.py, FullOFDMModem.EXC_X). Each instance keeps a rolling history
+ * of its blocks' excess bins, EXC_HIST_SAMPLES deep = one EXTREME tone
+ * field (3 x 160 x 128 samples, 5.1 s) WHATEVER ITS OWN MODE, so that a
+ * bin lit by a tone comb -- ours, a stranger's preamble train, or a
+ * peer's EXTREME preamble seen by the NORMAL instance -- is on for at
+ * most 2/3 of the history and never reaches the 85 % stationarity
+ * fraction, while a carrier does. The bank is GLOBAL and filters the
+ * SHARED ring, so a NORMAL instance sized for its own 0.32 s window
+ * would notch the EXTREME peer's comb out from under the EXTREME
+ * instance (measured: it did, 3 notches per frame on the other-mode
+ * preamble arm of the sweep). A carrier's frequency comes from the
+ * inter-block phase advance over the summary window, and the request
+ * goes to that one bank on the push path: every consumer (tone stage,
+ * ZC, demod, every instance) then reads the notched samples. The bank
+ * releases a notch by its own monitor once the carrier is gone
+ * (dsp.c). 5.1 s of latency at onset is the price of never notching a
+ * preamble; the sweep gives the streaming receiver that lead.
+ *
+ * The frequency is measured at request time from the raw ring: the
+ * last EXC_FREQ_BLOCKS blocks are re-read as REAL samples (the
+ * positive bins of a real block's FFT are the analytic signal's, and
+ * no Hilbert is needed), and the bin's phase advance between
+ * consecutive blocks gives the frequency inside the bin. Once a notch
+ * is up the ring holds notched samples, so a bin that already has a
+ * notch within a bin's width only refreshes it. */
+#define HIST_MAX 256
+#define EXC_HIST_SAMPLES (3 * 160 * FFT_BINS)   /* EXTREME tone field */
+#define EXC_FREQ_BLOCKS 64
 
 /* Raw (NOT derotated) lag-FFT_BINS correlation per block, including the
  * products that straddle the previous block. Summing these over the tone
@@ -89,6 +162,18 @@ static int64_t div_round_signed(int64_t a, int64_t b)
     return a >= 0 ? (a + b / 2) / b : -((-a + b / 2) / b);
 }
 
+/* tone-peak tracker: the argmax over one contiguous above-threshold
+ * region of window offsets, plus the decline count that ends it. One
+ * for the search, one for the challenger that runs during a decode. */
+typedef struct {
+    int crossed, decline;
+    int64_t best_metric;
+    int64_t best_energy;  /* tone-bin energy at the argmax, log2 Q4 */
+    int64_t best_off_blk, min_blk; /* min_blk: earliest window START */
+    int best_shift;
+    int64_t best_eval_blk; /* when the argmax was last improved */
+} peak_t;
+
 struct rxs_state {
     int inst;
     rxd_t demod;
@@ -104,12 +189,17 @@ struct rxs_state {
     /* state machine */
     enum { S_SEARCH, S_ZC_WAIT, S_HEADER, S_DATA } st;
     int active;               /* 0 = consume samples, skip the work */
-    int crossed, decline;
-    int64_t best_metric;
-    int64_t best_off_blk, min_blk;
-    int best_shift;
+    peak_t pk;                /* the search */
+    peak_t ch;                /* the challenger, live during a decode */
+    int64_t locked_metric;    /* what the frame in progress committed on */
+    int64_t locked_energy;    /* its tone-bin energy, log2 Q4 */
+    /* rolling carrier finder */
+    uint8_t hist_bin[HIST_MAX][DET_N_EXC];
+    int8_t hist_n[HIST_MAX];
+    int16_t hits[512 / 2];          /* DET_B max: EXTREME 512 */
+    int hist_len, hist_fill, hist_pos;
+    int64_t preempts;         /* decodes abandoned for a stronger peak */
     int64_t cs_abs, start_abs, cfo_word;
-    int64_t best_eval_blk; /* when the argmax was last improved */
     int64_t cw; /* coarse tone word */
     int sym_idx, n_hdr, n_data, mu, cap, use_ldpc;
     /* streamed bursts: data_base is the first symbol of the CURRENT
@@ -139,6 +229,11 @@ static struct rxs_state g_pool[RXS_MAX_INST];
  * FIR per extracted sample and removes the per-instance analytic rings
  * entirely (2 B/sample raw vs 8 B/sample analytic per instance). */
 static int16_t g_raw[RXS_RAW_RING_LEN];
+/* the notch bank in front of the shared ring, and the last sample index
+ * it has processed: instances push the same samples, the first to push
+ * an index filters and writes it, the others skip (idempotent ring) */
+static notch_bank_t g_bank;
+static int64_t g_notch_done = -1;
 static blk_sum_t g_blk[BLK_TOTAL];
 static lag_sum_t g_lag[LAG_TOTAL];
 static const int BLK_CAP_OF[3] = { BLK_CAP_NORMAL, BLK_CAP_ROBUST, BLK_CAP };
@@ -150,6 +245,7 @@ static const int LAG_OFF_OF[3] = { 0, LAG_CAP_NORMAL,
                                    LAG_CAP_NORMAL + LAG_CAP_ROBUST };
 static llr_t g_h64[RXS_MAX_INST][MAX_LLRS], g_d64[RXS_MAX_INST][MAX_LLRS];
 static int g_hexps[RXS_MAX_INST][MAX_SYMS], g_dexps[RXS_MAX_INST][MAX_SYMS];
+static rxd_wacc_t g_wacc[RXS_MAX_INST];   /* interference weighting, per block */
 /* per-call scratch (never live across rxs_push calls) */
 /* No segment scratch: the tone stage's residual and the ZC scan both
  * pull through zc_ring_fetch, which reads the shared raw ring directly
@@ -317,9 +413,18 @@ rxs_t *rxs_open(link_mode_t mode, int calibrate)
         r->zc_anchor = 0;
     r->zc_win = r->demod.symbol_len + 2 * ZC_ANCHOR_MARGIN_BLK * r->B;
 #endif
+    r->hist_len = EXC_HIST_SAMPLES / r->B;   /* 240 / 120 / 120 blocks */
+    if (r->hist_len > HIST_MAX)
+        r->hist_len = HIST_MAX;
+    /* one bank for the shared ring; a fresh instance starts a fresh
+     * stream (every live instance is opened before the first push) */
+    notch_bank_clear(&g_bank);
+    g_notch_done = -1;
     r->st = S_SEARCH;
     r->active = 1;
-    r->best_metric = -1;
+    r->pk.best_metric = -1;
+    r->ch.best_metric = -1;
+    r->locked_metric = -1;
     r->last_eval_blk = -1;
     r->ring_hwm = 0;
     r->ring_miss = 0;
@@ -334,6 +439,108 @@ int64_t rxs_ring_hwm(const rxs_t *r)
 int64_t rxs_ring_miss(const rxs_t *r)
 {
     return r->ring_miss;
+}
+
+int64_t rxs_preempts(const rxs_t *r)
+{
+    return r->preempts;
+}
+
+int rxs_notches(void)
+{
+    return notch_bank_active(&g_bank);
+}
+
+#ifdef STREAM_DEBUG
+#include <stdio.h>
+void rxs_dump_bank(void)
+{
+    int i;
+    for (i = 0; i < NOTCH_MAX; i++)
+        fprintf(stderr, "bank slot %d: active %d word %u idle %d\n", i,
+                g_bank.active[i], (unsigned)g_bank.word[i], g_bank.idle[i]);
+}
+#endif
+
+#ifdef STREAM_DEBUG
+#include <stdio.h>
+#define SDBG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define SDBG(...)
+#endif
+
+/* rolling stationary-carrier finder (see HIST_MAX): fold this block's
+ * excess bins into the history and request a notch for any bin that has
+ * been in excess for 90 % of the last hist_len blocks */
+static void carrier_track(rxs_t *r, int64_t blk_idx, const blk_sum_t *bs)
+{
+    int e, k, H = r->hist_len;
+    if (r->hist_fill == H) {   /* drop the oldest block */
+        for (e = 0; e < r->hist_n[r->hist_pos]; e++)
+            r->hits[r->hist_bin[r->hist_pos][e]]--;
+    } else {
+        r->hist_fill++;
+    }
+    r->hist_n[r->hist_pos] = (int8_t)bs->n_exc;
+    for (e = 0; e < bs->n_exc; e++) {
+        r->hist_bin[r->hist_pos][e] = bs->exc_bin[e];
+        r->hits[bs->exc_bin[e]]++;
+    }
+    r->hist_pos = (r->hist_pos + 1) % H;
+    if (r->hist_fill < H)
+        return;
+    for (k = 1; k < r->B / 2; k++) {
+        int j, best = -1;
+        if (r->hits[k] * 20 < 17 * H)
+            continue;
+        j = k;
+        while (j + 1 < r->B / 2 && r->hits[j + 1] * 20 >= 17 * H)
+            j++;
+        /* the closest bin to the carrier is the strongest of the group:
+         * the block's excess list is strongest first */
+        for (e = 0; e < bs->n_exc && best < 0; e++)
+            if (bs->exc_bin[e] >= k && bs->exc_bin[e] <= j)
+                best = bs->exc_bin[e];
+        if (best < 0)
+            best = k;
+        /* a notch already within a bin's width of it: refresh, no
+         * re-estimate (the ring is notched there by now) */
+        if (!notch_bank_near(&g_bank, (uint32_t)(((int64_t)best << 32) / r->B),
+                             (uint32_t)(((int64_t)1 << 32) / r->B))) {
+            /* phase advance of the bin over the last EXC_FREQ_BLOCKS
+             * blocks, straight from the raw ring (real input) */
+            int64_t sr = 0, si = 0, ang, mag, b, pr = 0, pi = 0;
+            int K = r->hist_len < EXC_FREQ_BLOCKS ? r->hist_len : EXC_FREQ_BLOCKS;
+            int64_t first = blk_idx - K + 1, have = 0;
+            if (first < 0)
+                first = 0;
+            for (b = first; b <= blk_idx; b++) {
+                int64_t re[512], im[512];
+                int t, exp;
+                for (t = 0; t < r->B; t++) {
+                    re[t] = g_raw[(int)((b * r->B + t) % RXS_RAW_RING_LEN)];
+                    im[t] = 0;
+                }
+                fft_bfp(re, im, r->B, 13, &exp);
+                if (have) {
+                    sr += pr * re[best] + pi * im[best];
+                    si += pr * im[best] - pi * re[best];
+                }
+                pr = re[best];
+                pi = im[best];
+                have = 1;
+            }
+            if (sr != 0 || si != 0) {
+                uint32_t word;
+                cordic_atan2(si, sr, &ang, &mag);
+                word = (uint32_t)((((int64_t)best << 32) + ang + r->B / 2)
+                                  / r->B);
+                SDBG("carrier: bin %d word %u -> notch\n", best, word);
+                notch_bank_request(&g_bank, word);
+            }
+        }
+        k = j;
+    }
 }
 
 /* per-block summary: BFP spectrum -> band power + mask dots per shift */
@@ -404,6 +611,14 @@ static void block_summary(rxs_t *r, int64_t blk_idx)
         pow_[k] = re[k] * re[k] + im[k] * im[k];
     for (k = 1; k < B / 2; k++)
         bs->band += pow_[k];
+    {
+        int bins[DET_N_EXC], e;
+        int64_t exc[DET_N_EXC];
+        bs->n_exc = (int8_t)det_block_excess(pow_, B, bins, exc);
+        for (e = 0; e < bs->n_exc; e++)
+            bs->exc_bin[e] = (uint8_t)bins[e];
+    }
+    carrier_track(r, blk_idx, bs);
     for (sh = -r->max_shift; sh <= r->max_shift; sh++) {
         int64_t s0 = 0, s1 = 0;
         for (k = 0; k < B; k++) {
@@ -421,12 +636,12 @@ static void block_summary(rxs_t *r, int64_t blk_idx)
 /* running tone contrast for the window ending at blk_idx (windowed
  * exponent alignment + windowed median floor -- the causal divergence) */
 static void eval_tone_window(rxs_t *r, int64_t blk_idx, int64_t *metric_out,
-                             int *shift_out)
+                             int *shift_out, int64_t *energy_out)
 {
     int64_t band_al[BLK_CAP];
     int64_t off0 = blk_idx - r->total_blocks + 1;
     int e_min = 1 << 30, sh, b;
-    int64_t floor_v = 0, best = -1;
+    int64_t floor_v = 0, best = -1, best_sig = 0;
     int best_sh = 0;
     int n_band_bins = r->B / 2 - 1;
 
@@ -485,28 +700,37 @@ static void eval_tone_window(rxs_t *r, int64_t blk_idx, int64_t *metric_out,
         if (metric > best) {
             best = metric;
             best_sh = sh - r->max_shift;
+            best_sig = sig0 + sig1;
         }
     }
     *metric_out = best;
     *shift_out = best_sh;
+    /* absolute tone-bin energy: the window's mantissas are aligned to
+     * e_min, and a BFP exponent counts headroom LEFT-shifts, so the true
+     * energy is the aligned sum >> 2*e_min (fft_bfp, rx_demod.c) */
+    *energy_out = (best_sig > 0 ? rxd_log2_q4(best_sig) : 0)
+                  - (int64_t)32 * e_min;
 }
 
-#ifdef STREAM_DEBUG
-#include <stdio.h>
-#define SDBG(...) fprintf(stderr, __VA_ARGS__)
-#else
-#define SDBG(...)
-#endif
 
 /* commit the tone peak: coarse CFO word from shift + lag-N residual */
 static void tone_commit(rxs_t *r)
 {
     int seg_n = 2 * r->T * FFT_BINS;
-    SDBG("tone_commit: off_blk=%lld cs=%lld shift=%d metric=%lld\n",
-         (long long)r->best_off_blk, (long long)(r->best_off_blk * r->B),
-         r->best_shift, (long long)r->best_metric);
-    r->cs_abs = r->best_off_blk * r->B;
-    r->cw = (int64_t)r->best_shift * r->word_per_bin;
+    SDBG("tone_commit: off_blk=%lld cs=%lld shift=%d metric=%lld energy=%lld\n",
+         (long long)r->pk.best_off_blk, (long long)(r->pk.best_off_blk * r->B),
+         r->pk.best_shift, (long long)r->pk.best_metric,
+         (long long)r->pk.best_energy);
+    r->cs_abs = r->pk.best_off_blk * r->B;
+    r->cw = (int64_t)r->pk.best_shift * r->word_per_bin;
+    /* arm the challenger: only windows starting AFTER this peak, and
+     * this peak's metric is the bar it has to clear (x RXS_PREEMPT_X) */
+    r->locked_metric = r->pk.best_metric;
+    r->locked_energy = r->pk.best_energy;
+    r->ch.crossed = 0;
+    r->ch.decline = 0;
+    r->ch.best_metric = -1;
+    r->ch.min_blk = r->pk.best_off_blk + 1;
     {   /* Summed from the per-block summaries -- the tone segment is NOT
          * re-read. The blocks were correlated raw, so the coarse word is
          * removed here as an angle subtraction (blk_sum_t). Before this,
@@ -517,7 +741,7 @@ static void tone_commit(rxs_t *r)
         for (b = 0; b < nb; b++) {
             const lag_sum_t *ls =
                 &g_lag[r->lag_base
-                       + (int)((r->best_off_blk + b) & r->lag_mask)];
+                       + (int)((r->pk.best_off_blk + b) & r->lag_mask)];
             rr += ls->re;   ri += ls->im;
             rr2 += ls->re2; ri2 += ls->im2;
         }
@@ -542,7 +766,7 @@ static void tone_commit(rxs_t *r)
                 fprintf(stderr,
                         "[lag] mode=%d nb=%d off_blk=%lld  old=%lld new=%lld"
                         "  diff=%lld (%.4f Hz)\n",
-                        (int)r->mode, nb, (long long)r->best_off_blk,
+                        (int)r->mode, nb, (long long)r->pk.best_off_blk,
                         (long long)ref, (long long)fine,
                         (long long)(fine - ref),
                         (double)(fine - ref) * 12000.0 / 4294967296.0);
@@ -556,11 +780,110 @@ static void tone_commit(rxs_t *r)
 
 static void rearm(rxs_t *r, int64_t guard_abs)
 {
+    int64_t newest = r->abs_n / r->B - 1;
     r->st = S_SEARCH;
-    r->crossed = 0;
-    r->decline = 0;
-    r->best_metric = -1;
-    r->min_blk = (guard_abs + r->B - 1) / r->B;
+    if (r->ch.crossed
+        && newest - r->ch.best_eval_blk <= r->total_blocks + DECLINE_BLOCKS
+        && r->ch.best_metric >= (int64_t)r->thr_q10 * r->thr_q10
+                                    * WEAK_COMMIT_X) {
+        /* A challenger region is still open as the decode ends: carry it
+         * into the search instead of restarting past the frame. Measured
+         * need: a weak stranger's frame FAILED its data CRC three blocks
+         * after our +10 dB preamble had become the challenger's argmax
+         * (metric 3.5e9, energy 67 Q4 over the bar) but before its region
+         * had ended, and the old reset put the search's floor past our
+         * preamble -- the next commits were garbage on our own data
+         * symbols. The recency test keeps a stale region from an unmute
+         * (rxs_set_active) or a long-finished decode out of it, and the
+         * strength gate keeps out the data-hover regions that only ever
+         * commit by stability: carrying those cost one failed header per
+         * decoded frame on a busy channel (measured 3 -> 6 commits per
+         * 10 s of a stranger's traffic) for nothing. */
+        r->pk = r->ch;
+    } else {
+        r->pk.crossed = 0;
+        r->pk.decline = 0;
+        r->pk.best_metric = -1;
+        r->pk.min_blk = (guard_abs + r->B - 1) / r->B;
+    }
+    r->ch.crossed = 0;
+    r->ch.decline = 0;
+    r->ch.best_metric = -1;
+}
+
+/* Fold one window evaluation into a peak tracker, S_SEARCH's rule for
+ * both the search and the challenger. Returns 1 when the tracker's
+ * commit rule fires: the above-threshold region ended on a STRONG
+ * argmax, or the argmax has held for a full window span of newer
+ * evaluations (see the S_SEARCH comment for why each clause exists). */
+static int track_peak(const rxs_t *r, peak_t *p, int64_t blk,
+                      int64_t metric, int shift, int64_t energy)
+{
+    int64_t thr2 = (int64_t)r->thr_q10 * r->thr_q10;
+    int64_t off = blk - r->total_blocks + 1;
+    if (metric > thr2 && off >= p->min_blk) {
+        p->crossed = 1;
+        p->decline = 0;
+        if (metric > p->best_metric) {
+            p->best_metric = metric;
+            p->best_energy = energy;
+            p->best_off_blk = off;
+            p->best_shift = shift;
+            p->best_eval_blk = blk;
+        }
+    } else if (p->crossed) {
+        p->decline++;
+    }
+    return p->crossed
+           && ((p->decline >= DECLINE_BLOCKS
+                && p->best_metric >= thr2 * WEAK_COMMIT_X)
+               || blk - p->best_eval_blk >= r->total_blocks + DECLINE_BLOCKS);
+}
+
+/* The challenger: evaluate the newest window while a decode is in
+ * progress and, if a later peak commits with RXS_PREEMPT_LOG2_Q4 more
+ * tone-bin energy than this frame was committed on, abandon the frame
+ * for it.
+ * Returns 1 when the state machine has been redirected. */
+static int challenge(rxs_t *r)
+{
+#if RXS_PREEMPT
+    int64_t blk = r->abs_n / r->B - 1, metric, energy;
+    int shift;
+    if (blk < r->total_blocks - 1 || blk == r->last_eval_blk
+        || blk - r->total_blocks + 1 < r->ch.min_blk)
+        return 0;
+    r->last_eval_blk = blk;
+    eval_tone_window(r, blk, &metric, &shift, &energy);
+    if (metric > (int64_t)r->thr_q10 * r->thr_q10 || r->ch.crossed) {
+        SDBG("challenge: st=%d blk=%lld metric=%lld sh=%d e=%lld crossed=%d "
+             "decline=%d best=%lld off=%lld\n", (int)r->st, (long long)blk,
+             (long long)metric, shift, (long long)energy, r->ch.crossed,
+             r->ch.decline, (long long)r->ch.best_metric,
+             (long long)r->ch.best_off_blk);
+    }
+    if (!track_peak(r, &r->ch, blk, metric, shift, energy))
+        return 0;
+    if (r->ch.best_energy < r->locked_energy + RXS_PREEMPT_LOG2_Q4) {
+        /* not worth the frame in hand: drop this region, keep listening */
+        r->ch.crossed = 0;
+        r->ch.decline = 0;
+        r->ch.best_metric = -1;
+        return 0;
+    }
+    SDBG("preempt: st=%d locked=%lld/e%lld challenger=%lld/e%lld off_blk=%lld\n",
+         (int)r->st, (long long)r->locked_metric, (long long)r->locked_energy,
+         (long long)r->ch.best_metric, (long long)r->ch.best_energy,
+         (long long)r->ch.best_off_blk);
+    r->preempts++;
+    r->pk = r->ch;
+    r->burst_resume_abs = 0;   /* a burst walk cannot continue from here */
+    tone_commit(r);
+    return 1;
+#else
+    (void)r;
+    return 0;
+#endif
 }
 
 /* finish the data block: quantize/calibrate, decode, CRC, SNR estimate */
@@ -583,6 +906,7 @@ static int finish_frame(rxs_t *r, rxs_event_t *ev)
             g_d64[r->inst][s * r->cap + k] >>= sh;
     }
     r->data_scale = 2 * e_min;
+    rxd_wacc_apply(&g_wacc[r->inst], g_d64[r->inst], r->mu);
 
     if (r->demod.calibrate && r->mu <= 2) {
         int fit_shift = 0;
@@ -661,37 +985,22 @@ static int advance(rxs_t *r, rxs_event_t *ev)
         switch (r->st) {
         case S_SEARCH: {
             int64_t blk = r->abs_n / r->B - 1; /* newest complete block */
-            int64_t metric;
+            int64_t metric, energy;
             int shift;
-            if (blk < r->total_blocks - 1 || blk < r->min_blk
+            if (blk < r->total_blocks - 1 || blk < r->pk.min_blk
                 || blk == r->last_eval_blk)
                 return 0;
             r->last_eval_blk = blk;
-            eval_tone_window(r, blk, &metric, &shift);
+            eval_tone_window(r, blk, &metric, &shift, &energy);
             /* partial tone overlap already crosses the threshold ~a full
              * window before the true peak, so a decline-from-best rule
              * commits too early (measured). Instead: track the argmax over
              * the whole contiguous above-threshold REGION and commit when
              * the metric falls back below threshold -- causal, and the
              * true (fully-aligned) window is guaranteed to have been
-             * evaluated. */
-            {
-                int64_t off = blk - r->total_blocks + 1;
-                if (metric > (int64_t)r->thr_q10 * r->thr_q10
-                    && off >= r->min_blk) {
-                    r->crossed = 1;
-                    r->decline = 0;
-                    if (metric > r->best_metric) {
-                        r->best_metric = metric;
-                        r->best_off_blk = off;
-                        r->best_shift = shift;
-                        r->best_eval_blk = blk;
-                    }
-                } else if (r->crossed) {
-                    r->decline++;
-                }
-            }
-            /* commit when the above-threshold region ends, OR when the
+             * evaluated (track_peak).
+             *
+             * Commit when the above-threshold region ends, OR when the
              * argmax has been stable for a full window span of newer
              * evaluations (quiet channels: data symbols can hover at the
              * threshold so the region never cleanly ends, but the aligned
@@ -721,12 +1030,7 @@ static int advance(rxs_t *r, rxs_event_t *ev)
              * failed EXTREME acquisition re-scanned its excursion, on
              * noise, forever). Prefer not committing garbage over
              * recovering from having committed it. */
-            if (r->crossed
-                && ((r->decline >= DECLINE_BLOCKS
-                     && r->best_metric >= (int64_t)r->thr_q10 * r->thr_q10
-                                              * WEAK_COMMIT_X)
-                    || blk - r->best_eval_blk
-                           >= r->total_blocks + DECLINE_BLOCKS)) {
+            if (track_peak(r, &r->pk, blk, metric, shift, energy)) {
                 tone_commit(r);
                 continue;
             }
@@ -735,6 +1039,13 @@ static int advance(rxs_t *r, rxs_event_t *ev)
         case S_ZC_WAIT: {
             int ft;
             int64_t fw;
+            /* the challenger runs here too: the ZC wait is ~25 blocks at
+             * NORMAL, longer than the 15-block tone window, so a stronger
+             * preamble landing inside it would otherwise be seen only by
+             * its partial-overlap tail windows once the header started
+             * (measured: a residual 8 % loss at ISR -20 dB without this) */
+            if (challenge(r))
+                continue;
             if (r->abs_n < r->cs_abs + r->zc_anchor + r->zc_win)
                 return 0;
             {
@@ -767,6 +1078,7 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                         + N_DATA_CARRIERS - 1) / N_DATA_CARRIERS;
             r->sym_idx = 0;
             r->demod.last_hyp = -1;
+            rxd_wacc_reset(&g_wacc[r->inst]);
             r->st = S_HEADER;
             continue;
         }
@@ -776,6 +1088,8 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                           * r->demod.symbol_len;
             int win_buf[5], win_n = 0;
             const int *window = 0;
+            if (challenge(r))
+                continue;
             if (r->abs_n < pos + r->demod.symbol_len)
                 return 0;
             if (r->demod.last_hyp >= 0) {
@@ -793,9 +1107,13 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                 rearm(r, pos + r->demod.symbol_len);
                 continue;
             }
-            g_hexps[r->inst][r->sym_idx] = rxd_demod_symbol(
-                &r->demod, si, sq, (int)pos, r->cfo_word, 1, window, win_n,
-                g_h64[r->inst] + r->sym_idx * N_DATA_CARRIERS);
+            {
+                int64_t rho[N_DATA_CARRIERS];
+                g_hexps[r->inst][r->sym_idx] = rxd_demod_symbol(
+                    &r->demod, si, sq, (int)pos, r->cfo_word, 1, window, win_n,
+                    g_h64[r->inst] + r->sym_idx * N_DATA_CARRIERS, rho);
+                rxd_wacc_add(&g_wacc[r->inst], rho, g_hexps[r->inst][r->sym_idx]);
+            }
             r->sym_idx++;
             if (r->sym_idx < r->n_hdr)
                 continue;
@@ -813,6 +1131,7 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                 }
                 r->hdr_scale = 2 * e_min;
             }
+            rxd_wacc_apply(&g_wacc[r->inst], g_h64[r->inst], 1);
             rxd_quantize(g_h64[r->inst], r->n_hdr * N_DATA_CARRIERS, 6, g_q64);
             rxd_decode_block(g_q64, r->n_hdr * N_DATA_CARRIERS, CC_R13, 0,
                              HEADER_BITS, r->hdr_bits);
@@ -867,6 +1186,7 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                            + (int64_t)r->n_hdr * r->demod.symbol_len;
             r->blk_idx = 0;
             r->burst_resume_abs = 0;
+            rxd_wacc_reset(&g_wacc[r->inst]);
             r->st = S_DATA;
             continue;
         }
@@ -877,6 +1197,8 @@ static int advance(rxs_t *r, rxs_event_t *ev)
             int win_buf[5], win_n = 0;
             const int *window = 0;
             int k;
+            if (challenge(r))
+                continue;
             if (r->abs_n < pos + r->demod.symbol_len)
                 return 0;
             if (r->demod.last_hyp >= 0) {
@@ -893,9 +1215,13 @@ static int advance(rxs_t *r, rxs_event_t *ev)
                 rearm(r, pos + r->demod.symbol_len);
                 continue;
             }
-            g_dexps[r->inst][r->sym_idx] = rxd_demod_symbol(
-                &r->demod, si, sq, (int)pos, r->cfo_word, r->mu, window,
-                win_n, g_d64[r->inst] + r->sym_idx * r->cap);
+            {
+                int64_t rho[N_DATA_CARRIERS];
+                g_dexps[r->inst][r->sym_idx] = rxd_demod_symbol(
+                    &r->demod, si, sq, (int)pos, r->cfo_word, r->mu, window,
+                    win_n, g_d64[r->inst] + r->sym_idx * r->cap, rho);
+                rxd_wacc_add(&g_wacc[r->inst], rho, g_dexps[r->inst][r->sym_idx]);
+            }
             r->sym_idx++;
             if (r->sym_idx < r->n_data)
                 continue;
@@ -944,7 +1270,11 @@ int rxs_push(rxs_t *r, const int16_t *chunk, int n, rxs_event_t *ev)
         /* the ring write and the abs_n advance happen even when muted:
          * the ring is shared and indexed by abs_n, so an instance that
          * stopped counting would corrupt the others' history */
-        g_raw[(int)(r->abs_n % RXS_RAW_RING_LEN)] = chunk[m];
+        if (r->abs_n > g_notch_done) {   /* first instance to see this index */
+            g_raw[(int)(r->abs_n % RXS_RAW_RING_LEN)] =
+                notch_bank_push(&g_bank, chunk[m]);
+            g_notch_done = r->abs_n;
+        }
         r->abs_n++;
         if (!r->active)
             continue;
@@ -1002,6 +1332,7 @@ int rxs_continue_burst(rxs_t *r, int resync_every)
     r->data_base = base;
     r->burst_resync = resync_every;
     r->sym_idx = 0;
+    rxd_wacc_reset(&g_wacc[r->inst]);
     r->st = S_DATA;
     return 1;
 }

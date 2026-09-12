@@ -25,6 +25,14 @@
 #define PKT_BITS_FROM_HDR(typ, len) \
     ((typ) == PKT_TYP_EXT_DATA ? 36 + 8 * (len) : (len))
 
+/* NET KEY (packets.Header in the model): seeds the header CRC-8 with
+ * 0xFF ^ key, so a stranger's link frame fails at the header instead of
+ * feeding its link-control word to the station; key 0 is the article's
+ * CRC. BEACON and BCAST frames are public: a keyed receiver still
+ * accepts them under key 0. One key per program (one station). */
+void packets_set_net_key(uint8_t key);
+uint8_t packets_net_key(void);
+
 void header_encode(int ver, int typ, int mod, int spd, int len,
                    uint8_t out[HEADER_BITS]);
 

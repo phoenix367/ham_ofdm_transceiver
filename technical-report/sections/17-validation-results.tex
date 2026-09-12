@@ -176,6 +176,12 @@ harness named in their section.
         $-4.5$\,dB, 79\,\% $\to$ 100\,\% at $-3$\,dB \\
     Streamed bursts & $1.73\times$ throughput for 0.08\,dB at NORMAL;
         $1.21\times$ for $\sim$0.35\,dB at EXTREME \\
+    Interference: preemption, net key, carrier excision, LLR
+        weighting & same-mode stranger frames, C receiver: 10\,\%
+        threshold $-8.8 \to -2.6$\,dB and ``never'' $\to -2.4$\,dB (the
+        lock-stealing limit); CW carrier: $-4.8 / -4.2$\,dB $\to$ no
+        failure up to ISR $+10$\,dB at NORMAL; EXTREME knee identical,
+        host cost unchanged, $+44$\,kB RAM \\
     \midrule
     \multicolumn{2}{@{}l}{\textit{C implementation and boards}} \\
     RAM, three-mode receiver & 10\,MB host reference $\to$ 561\,KB
@@ -203,6 +209,81 @@ harness named in their section.
     \bottomrule
     \end{tabular}
 \end{table}
+
+\subsection{Co-channel Interference}
+\label{sec:interference}
+
+\texttt{experiments/interference.py} keys a third party over the
+channel while one frame is received and sweeps the
+interference-to-signal ratio (ISR: the interferer's mean power over
+the recording against the frame's power at the channel output).  The
+interferers are the same mode's preamble train, another mode's
+preamble train, a second link's data frames, synthesised SSB voice
+(pitch harmonics through formant resonators under a syllable
+envelope, 300--2700\,Hz) and a CW carrier; both the float
+frame-at-once receiver and the C streaming receiver see byte-identical
+recordings, 60 frames per point, the interferer on for at least one
+EXTREME tone field (5.1\,s) before the frame so that the streaming
+carrier finder is in steady state.  Table~\ref{tab:interference} gives
+the ISR at which PER crosses 10\,\% with the preemption of
+\S\ref{sec:tone_stream_preempt}, the excision of \S\ref{sec:excision},
+the weighting of \S\ref{sec:iweight} and the net key of
+\S\ref{sec:net_key} in place; ``never'' means PER stays under 10\,\%
+up to ISR $+10$\,dB.
+
+\begin{table}[H]
+    \centering
+    \caption{ISR (dB) at PER 10\,\%, float frame-at-once / C streaming receiver.  A lower figure means a weaker stranger already breaks the link.}
+    \label{tab:interference}
+    \footnotesize
+    \begin{tabular}{@{}lccc@{}}
+    \toprule
+    \textbf{Interferer} & \textbf{NORMAL $\frac12$, $-3$\,dB} & \textbf{NORMAL $\frac12$, $+10$\,dB} & \textbf{EXTREME $\frac13$, $-15$\,dB} \\
+    \midrule
+    same-mode preamble  & $-5.4$ / $-2.9$ & $-10.0$ / $-2.7$ & $-2.8$ / $-2.7$ \\
+    other-mode preamble & $-4.0$ / $-2.6$ & $-9.5$ / $-2.9$ & $-1.0$ / $-2.1$ \\
+    same-mode frames    & $-5.4$ / $-2.6$ & $-9.8$ / $-2.4$ & $-2.7$ / $-2.7$ \\
+    SSB voice           & $-8.9$ / $-5.8$ & $-10.0$ / $-8.2$ & $-2.2$ / $-2.1$ \\
+    CW carrier          & never / never & never / never & $-2.7$ / $-2.5$ \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Against a stranger's preamble train or frames there is still no
+margin beyond being the stronger signal: such an interferer breaks the
+link within 3--5\,dB of the wanted frame, and at EXTREME within
+$\sim$2.5\,dB where it is 15\,dB below the noise, because its tone
+comb integrates over the tone field exactly like the wanted one and
+steals the lock (the float model's poorer figures at $+10$\,dB on these
+rows are the global argmax over a recording that now holds three times
+as many stranger preambles).  What changed is everything else.  Before
+the four mechanisms the streaming receiver read $-8.8$\,dB and
+``never'' (an 18--28\,\% floor from ISR $-20$\,dB up) on same-mode
+frames -- a weak stranger's header captured it for a whole data block,
+and its CRC-valid frames (25 per minute) fed the ARQ and the ladder --
+and both receivers read $-7$ to $-9$\,dB on a CW carrier, which sits
+$\sim$17\,dB above the per-carrier signal on its bin, leaks into the
+neighbours and, 10\,dB above the signal, blinds the tone detector
+outright.  With preemption and the net key the same-mode-frames column
+is the lock-stealing limit and nothing else; with the excision a
+carrier no longer breaks the link at NORMAL at any ratio measured, and
+under a carrier alone the streaming receiver commits once a minute
+instead of being blind.  At EXTREME the carrier column is partial: the
+float receiver is back under 15\,\% PER from ISR $+3$\,dB, the
+streaming receiver at 38--63\,\%, because a $-15$\,dB frame leaves the
+carrier's frequency estimate noisier and the streaming finder
+estimates over one tone window where the float model has the whole
+recording.  Voice is unchanged ($-6$ to $-10$\,dB): its harmonics fall
+on most carriers and its syllables on half the symbols, so the
+weighting has no clean reference, and the detector's lock goes at ISR
+0\,dB.  A frequency-tracking loop on the notch's rejected component is
+the open thread.  The firmware with all four mechanisms runs on the
+two-board stand: a 6000-byte file crosses byte-identical in seven frames
+each way with no timeouts, the beacons are clean, a mismatched net key
+refuses frames on the air (four timeouts in 72\,s) and a matched one
+delivers the retransmission at once; the quiet wire's occasional header
+attempts predate the campaign, the same captured idle audio committing
+identically through the pre-change and current host receivers.
 
 \subsection{The System Demonstration}
 

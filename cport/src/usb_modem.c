@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "usb_modem.h"
+#include "packets.h"
 
 /* Staging ring. The host may be slow or absent; the modem must not
  * block on it and must not corrupt the queue when it fills. A dropped
@@ -148,6 +149,7 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
             case UP_CFG_ANCHOR: m->st->afc_anchor = v ? 1 : 0; break;
             case UP_CFG_DIAG_STREAM: m->diag_on = v ? 1 : 0; break;
             case UP_CFG_CODECS: m->st->my_codecs = (int)(v & 0xFF); break;
+            case UP_CFG_NET_KEY: packets_set_net_key((uint8_t)(v & 0xFF)); break;
             default: break;
             }
         }

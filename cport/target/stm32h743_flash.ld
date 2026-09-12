@@ -58,6 +58,9 @@ SECTIONS
         *(.bss.g_cs)
         /* broadcast engine: src payload + one group's packet bits */
         *(.bss.g_bc_src) *(.bss.g_bc_blocks)
+        /* the interference-weighting accumulators (rx_stream.c): ~10 kB
+         * at MAX_SYMS 280 that AXI, 1.7 kB over, could not take */
+        *(.bss.g_wacc)
         *(.dtcm_bss*)
         . = ALIGN(8); _edtcmbss = .;
     } > DTCM

@@ -37,8 +37,9 @@ LPF_TAPS = 33
 
 
 class FixedTransmitter:
-    def __init__(self, mode: LinkMode = LinkMode.NORMAL):
+    def __init__(self, mode: LinkMode = LinkMode.NORMAL, net_key: int = 0):
         self.mode = mode
+        self.net_key = net_key   # header CRC seed (packets.Header)
         self._m = make_modem(mode)  # float modem supplies constants only
 
         # pilot ROM: Q15 quantized ZC pilot values
@@ -127,7 +128,7 @@ class FixedTransmitter:
         data_codec = LDPCCodec if fec == "ldpc" else CODECS[spd]
 
         chunks = [self.preamble_rom]
-        for row in self._encode_block(header.encode(), HEADER_CODEC, HEADER_MAPPER):
+        for row in self._encode_block(header.encode(net_key=self.net_key), HEADER_CODEC, HEADER_MAPPER):
             chunks.append(self._modulate_symbol(row, HEADER_MAPPER))
         for row in self._encode_block(pkt_bits, data_codec, MAPPERS[mod]):
             chunks.append(self._modulate_symbol(row, MAPPERS[mod]))
@@ -176,7 +177,7 @@ class FixedTransmitter:
         data_codec = LDPCCodec if fec == "ldpc" else CODECS[spd]
 
         chunks = [self.preamble_rom]
-        for row in self._encode_block(header.encode(), HEADER_CODEC, HEADER_MAPPER):
+        for row in self._encode_block(header.encode(net_key=self.net_key), HEADER_CODEC, HEADER_MAPPER):
             chunks.append(self._modulate_symbol(row, HEADER_MAPPER))
         for k, block_bits in enumerate(bits):
             if resync_every and k and k % resync_every == 0:

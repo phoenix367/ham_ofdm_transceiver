@@ -625,6 +625,33 @@ def gen_vectors():
     out += [f"#define RX_LDPC_START {det[0]}",
             f"#define RX_LDPC_CFO_WORD INT64_C({int(det[1])})\n"]
 
+    # --- stationary carrier: excision, bit-exact words + decode -------------
+    # A NORMAL BPSK 1/3 frame plus a CW carrier synthesised from the NCO ROM
+    # (both sides can regenerate it exactly), amplitude 12000 at ~1503 Hz:
+    # the receiver must find the carrier's phase word and decode the frame.
+    from ofdm_phy.fixed.dsp import NCO as _NCO
+    tpkt = Data(reserved=77, payload=bytes(range(100, 127)))
+    tsig = txs[LinkMode.NORMAL].build_frame(tpkt)
+    ts = np.concatenate([pad, tsig]).astype(np.int64)
+    tone_word = int(round(1503.0 / 12000.0 * 2 ** 32))
+    tone_amp = 12000
+    ph = (np.arange(len(ts), dtype=np.int64) * tone_word) & 0xFFFFFFFF
+    rom = np.asarray(_NCO._rom()[0], dtype=np.int64)
+    tone = (tone_amp * rom[ph >> 20]) >> 15
+    ts = np.clip(ts + tone, -32768, 32767).astype(np.int64)
+    rxt = FixedReceiver(LinkMode.NORMAL)
+    twords = rxt._find_tones(ts)
+    assert len(twords) == 1, twords
+    tdec = rxt.receive(ts)[0]
+    assert np.array_equal(tdec.encode(), tpkt.encode())
+    tex, _ = rxt._excise(ts)
+    tdet = rxt._detect(*rxt.hilbert.analytic(np.asarray(tex, np.int64)))
+    assert tdet is not None
+    out += [carr("TONE_PKT", tpkt.encode(), "uint8_t"),
+            f"#define TONE_WORD {tone_word}u", f"#define TONE_AMP {tone_amp}",
+            f"#define TONE_FOUND_WORD {twords[0]}u",
+            f"#define TONE_START {tdet[0]}\n"]
+
     # --- HARQ: complementary erasures on a calibrated RX --------------------
     from ofdm_phy.transceiver import DemodError
     hpkt = Data(reserved=99, payload=bytes(range(27)))

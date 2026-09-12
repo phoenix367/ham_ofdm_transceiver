@@ -15,7 +15,7 @@ import typing
 
 import numpy as np
 import numpy.typing as npt
-from scipy.signal import fftconvolve
+from scipy.signal import fftconvolve, lfilter
 
 from .mapping import PSKMapper, BPSKMapper
 
@@ -443,6 +443,22 @@ class OFDMModem:
         H_power_sq = np.abs(H_data) ** 2
         mean_H_power = np.mean(H_power_sq)
 
+        # INTERFERENCE RESIDUAL per data carrier, for the block-level
+        # weighting in Transceiver._demod_symbols: the decision-directed
+        # error of the equalised symbol, scaled back by |H| so it is the
+        # noise-plus-interference AMPLITUDE in received units -- comparable
+        # across carriers and symbols whatever the channel does to each.
+        # For BPSK the imaginary part is pure noise, no decision needed.
+        H_abs = np.sqrt(H_power_sq)
+        if mu == 1:
+            resid = np.abs(imag_parts) * H_abs
+        elif mu == 2:
+            a_eq = 0.5 * (np.mean(np.abs(real_parts)) + np.mean(np.abs(imag_parts)))
+            resid = (np.abs(np.abs(real_parts) - a_eq) + np.abs(np.abs(imag_parts) - a_eq)) * H_abs
+        else:
+            resid = (np.abs(real_parts - q_re) + np.abs(imag_parts - q_im)) * H_abs
+        self.last_resid = resid
+
         updated_noise_var = noise_var_eq * mean_H_power
 
         alpha = 0.1
@@ -638,9 +654,49 @@ class FullOFDMModem(TiledOFDMModem):
     """Adds the Newman tone preamble (two 4-tone combs, AGC settling +
     coarse CFO estimation) in front of the ZC preamble."""
 
+    # STATIONARY-CARRIER EXCISION. A narrowband interferer (a CW carrier,
+    # a stuck tone) at the frame's own power is ~17 dB above the
+    # per-carrier signal on its bin, leaks through the rectangular
+    # detection window into a dozen neighbours, lands in some mask
+    # shift's tone bins, adds a correlation floor of ~0.2 x its amplitude
+    # ratio to the ZC stage and dominates that stage's energy
+    # normalisation: measured (experiments/interference.py) the detector
+    # is blind at ISR +10 dB and the demodulator fails from ISR -7 dB,
+    # while a 30-Hz notch at the carrier's frequency decodes 15/15 at
+    # every ratio up to +10 dB. So the receiver finds such carriers and
+    # notches them out of the samples before anything else runs:
+    #   * per detection block, the in-band bins above EXC_X times the
+    #     block's MEAN in-band power are its EXCESS bins (at most N_EXC;
+    #     the mean rather than the median because a carrier alone on a
+    #     quiet channel has a median of zero, and then every crumb of
+    #     leakage counts);
+    #   * a bin in excess in >= STATIONARY_FRAC of the blocks is a
+    #     carrier -- our own tone comb is on for one tone field only, a
+    #     stranger's preamble train lights each bin ~2/3 of the time,
+    #     and white noise's strongest bins (~5-6x the mean over 63-255
+    #     bins) pass a 4x clamp in a fair share of blocks but never the
+    #     same bin in 85 % of them. The clamp is as LOW as it is because
+    #     a carrier halfway between two bins keeps only 40 % of its power
+    #     in each, and the N_EXC slots are what keep such a carrier in
+    #     the count when noise peaks compete for them;
+    #   * its frequency inside the bin comes from the phase advance of
+    #     that bin between consecutive blocks (unambiguous over +-half a
+    #     bin, and the strongest bin of an adjacent group is the closest);
+    #   * a second-order IIR notch NOTCH_BW_HZ wide removes it.
+    # The fixed model and the C port carry the same definitions (integer
+    # twins, bit-exact with each other); the streaming receiver keeps a
+    # rolling history instead of the whole recording.
+    EXC_X = 4.0
+    N_EXC = 4
+    STATIONARY_FRAC = 0.85
+    MIN_TONE_BLOCKS = 8
+    MAX_NOTCHES = 3
+    NOTCH_BW_HZ = 30.0
+
     def __init__(self, *args, newman_preamble_tile=10, newman_threshold=1.6,
-                 detect_fft_len=None, **kwargs):
+                 detect_fft_len=None, excise=True, **kwargs):
         super().__init__(*args, **kwargs)
+        self._excise = excise
 
         self._newman_preamble_bins = np.arange(self._bin_center - 6, self._bin_center + 6 + 1, 4)
         self._newman_preamble_shifts = [0, 2]
@@ -834,6 +890,61 @@ class FullOFDMModem(TiledOFDMModem):
         bin_width_hz = self._sample_rate / N
         k = np.round((cfo_est - cfo_fine) / bin_width_hz)
         return float(cfo_fine + k * bin_width_hz)
+
+    # --- stationary-carrier excision (see EXC_X) ----------------------------
+
+    def find_stationary_tones(self, real_signal) -> typing.List[float]:
+        """Frequencies (Hz) of up to MAX_NOTCHES carriers present through
+        the whole recording, from the real samples' block spectra."""
+        B = self._detect_fft_len or self._fft_bins
+        x = np.asarray(real_signal, dtype=np.float64)
+        nb = len(x) // B
+        if nb < self.MIN_TONE_BLOCKS:
+            return []
+        spec = np.fft.rfft(x[:nb * B].reshape(nb, B), axis=1)[:, :B // 2]  # bins 0..B/2-1
+        pw = np.abs(spec) ** 2
+        mean = pw[:, 1:].mean(axis=1)
+        top = np.argsort(-pw[:, 1:], axis=1)[:, : self.N_EXC] + 1          # (nb, N_EXC) bins
+        vals = np.take_along_axis(pw, top, axis=1)
+        exc = vals > (self.EXC_X * mean)[:, None]
+        hits = np.zeros(B // 2, dtype=int)
+        energy = np.zeros(B // 2)
+        np.add.at(hits, top[exc], 1)
+        np.add.at(energy, top[exc], vals[exc])
+        stationary = np.flatnonzero(hits >= self.STATIONARY_FRAC * nb - 1e-9)
+        freqs = []
+        i = 0
+        while i < len(stationary) and len(freqs) < self.MAX_NOTCHES:
+            j = i
+            while j + 1 < len(stationary) and stationary[j + 1] == stationary[j] + 1:
+                j += 1
+            group = stationary[i:j + 1]
+            k = int(group[np.argmax(energy[group])])              # closest bin to the carrier
+            rows = np.flatnonzero(((top == k) & exc).any(axis=1))
+            both = rows[np.isin(rows + 1, rows)]                 # consecutive blocks, both in excess
+            if len(both):
+                s = np.sum(np.conj(spec[both, k]) * spec[both + 1, k])
+                freqs.append((k + np.angle(s) / (2 * np.pi)) * self._sample_rate / B)
+            i = j + 1
+        return freqs
+
+    def notch(self, real_signal, freqs_hz):
+        """Second-order IIR notch, NOTCH_BW_HZ wide, at each frequency."""
+        y = np.asarray(real_signal, dtype=np.float64)
+        r = 1.0 - np.pi * self.NOTCH_BW_HZ / self._sample_rate
+        for f in freqs_hz:
+            c = np.cos(2 * np.pi * f / self._sample_rate)
+            y = lfilter([1.0, -2 * c, 1.0], [1.0, -2 * r * c, r * r], y)
+        return y
+
+    def excise(self, real_signal):
+        """(signal with its stationary carriers notched, their frequencies)."""
+        if not self._excise:
+            return real_signal, []
+        freqs = self.find_stationary_tones(real_signal)
+        if not freqs:
+            return real_signal, []
+        return self.notch(real_signal, freqs), freqs
 
     def detect_preamble(self, signal: npt.NDArray[np.complex64]) -> typing.Optional[typing.Tuple[int, float]]:
         if not (coarse := self.detect_newman_preamble(signal)):

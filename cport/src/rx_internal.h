@@ -9,6 +9,7 @@
 #include "rx_demod.h"
 #include "conv.h"
 #include "arena.h"
+#include "rom_modes.h"
 
 /* LLR sample type. These hold demodulated soft values, measured peak
  * 1211062 across the suites -- 21 bits, so int32 keeps a ~1770x margin
@@ -49,14 +50,41 @@ typedef int32_t llr_t;
 #ifndef MAX_LLRS
 #define MAX_LLRS 8192
 #endif
-#define MAX_SYMS 400
+#ifndef MAX_SYMS
+#define MAX_SYMS 400   /* the radio build passes 280: its largest EXT frame is 276 symbols */
+#endif
 
 /* one symbol at seg (>= symbol_len samples), absolute position `pos` for
  * the CFO phase reference; window = NULL -> coarse/full search. llr
  * receives N_DATA_CARRIERS * mu values; returns the BFP exponent. */
+/* rho (N_DATA_CARRIERS, may be NULL): the symbol's interference residual
+ * per data carrier, scale 2^exp -- see rxd_wacc_t */
 int rxd_demod_symbol(rxd_t *r, const samp_t *seg_i, const samp_t *seg_q,
                      int pos, int64_t cfo_word, int mu,
-                     const int *window, int win_n, llr_t *llr);
+                     const int *window, int win_n, llr_t *llr, int64_t *rho);
+
+/* INTERFERENCE WEIGHTING of a block's LLRs (the float model's
+ * Transceiver.block_weights, the fixed model's WeightAcc -- bit-exact).
+ * A carrier or a voice harmonic on one subcarrier is ~17 dB above the
+ * per-carrier signal there and its LLRs are large, confident and wrong;
+ * a syllable does the same to a run of symbols. Each symbol's residual
+ * per carrier (decision-directed error of Y*conj(H) over |H|: the
+ * noise-plus-interference amplitude in received units, scale 2^exp) is
+ * accumulated per carrier on a running exponent and per symbol with its
+ * own; once the block is complete every LLR is scaled by
+ * min(1, (median/sum)^2) of its carrier and of its symbol, Q15, floored
+ * at 1/64 -- only ever down, never to zero. */
+typedef struct {
+    int64_t acc[N_DATA_CARRIERS];
+    int acc_e;
+    int64_t sym[MAX_SYMS];
+    int sym_e[MAX_SYMS];
+    int n;
+} rxd_wacc_t;
+void rxd_wacc_reset(rxd_wacc_t *w);
+void rxd_wacc_add(rxd_wacc_t *w, const int64_t *rho, int exp);
+/* arr: n symbols x N_DATA_CARRIERS*mu LLRs, exponent-aligned */
+void rxd_wacc_apply(const rxd_wacc_t *w, llr_t *arr, int mu);
 
 void rxd_quantize(const llr_t *arr, int n, int target_bits, llr_t *out);
 void rxd_decode_block(const llr_t *llrs, int n_total, cc_rate_t rate,
@@ -69,6 +97,26 @@ void rxd_calibrated_llrs(const llr_t *d64, int n, int scale_d,
 int rxd_snr_block_moments(const llr_t *arr, const int8_t *ref, int n,
                           int cap, int64_t *num_out, int64_t *den_out);
 int rxd_log2_q4(int64_t v);
+
+/* EXCESS BINS of one detection block (the float model's
+ * FullOFDMModem.EXC_X, the fixed model's block_excess): the top DET_N_EXC
+ * in-band bins above DET_EXC_X x mean(in-band bins) (floor division by
+ * B/2-1), and their excess over that clamp; the top bins are kept by an
+ * ascending scan with strict replacement (ties -> lower bin). The stationary-carrier finders
+ * (rx_find_tones here, the rolling one in rx_stream.c) count how often a
+ * bin is in excess. Shared so the twins stay bit-exact. `pow` is one
+ * block's power spectrum (any common scale); returns the count found. */
+#define DET_EXC_X 4
+#define DET_N_EXC 4
+#define DET_MIN_TONE_BLOCKS 8
+int det_block_excess(const int64_t *pow, int B, int *bins, int64_t *exc);
+
+/* stationary carriers of a whole recording (frame at once): up to
+ * NOTCH_MAX phase words, from the real samples' block spectra */
+int rx_find_tones(link_mode_t mode, const int16_t *x, int n, uint32_t *words);
+/* hilbert_analytic with those carriers notched out first */
+void rx_excise_analytic(link_mode_t mode, const int16_t *x, int n,
+                        samp_t *out_i, samp_t *out_q);
 double rxd_tile_db(link_mode_t mode);
 /* per-(mode, mu) output map for the SNR estimate: integer-estimator dB
  * in, float-reference dB out (rom_modes.h knots; see fixed/rx.py

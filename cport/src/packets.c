@@ -9,6 +9,11 @@ static uint8_t *put_bits(uint8_t *out, uint32_t val, int count)
     return out;
 }
 
+static uint8_t g_net_key = 0;
+
+void packets_set_net_key(uint8_t key) { g_net_key = key; }
+uint8_t packets_net_key(void) { return g_net_key; }
+
 void header_encode(int ver, int typ, int mod, int spd, int len,
                    uint8_t out[HEADER_BITS])
 {
@@ -18,7 +23,7 @@ void header_encode(int ver, int typ, int mod, int spd, int len,
     p = put_bits(p, (uint32_t)mod, 2);
     p = put_bits(p, (uint32_t)spd, 2);
     p = put_bits(p, (uint32_t)len, 8);
-    put_bits(p, crc8_lte(out, 17), 8);
+    put_bits(p, crc8_lte_seed(out, 17, 0xFFu ^ g_net_key), 8);
 }
 
 int data_encode(uint32_t reserved, const uint8_t *payload, int payload_len,
@@ -45,10 +50,17 @@ static uint32_t get_bits(const uint8_t *bits, int off, int count)
 int header_decode(const uint8_t bits[HEADER_BITS], int *ver, int *typ,
                   int *mod, int *spd, int *len)
 {
-    if (crc8_lte(bits, 17) != get_bits(bits, 17, 8))
-        return -1;
+    uint32_t their = get_bits(bits, 17, 8);
+    int t = (int)get_bits(bits, 2, 3);
+    if (crc8_lte_seed(bits, 17, 0xFFu ^ g_net_key) != their) {
+        /* public types (beacons, broadcasts) are still accepted under
+         * key 0 by a keyed receiver */
+        if (g_net_key == 0 || (t != PKT_TYP_BEACON && t != PKT_TYP_BCAST)
+            || crc8_lte(bits, 17) != their)
+            return -1;
+    }
     *ver = (int)get_bits(bits, 0, 2);
-    *typ = (int)get_bits(bits, 2, 3);
+    *typ = t;
     *mod = (int)get_bits(bits, 5, 2);
     *spd = (int)get_bits(bits, 7, 2);
     *len = (int)get_bits(bits, 9, 8);

@@ -127,3 +127,48 @@ def cordic_atan2(y: int, x: int):
 def cordic_mag(y: int, x: int) -> int:
     """Magnitude via CORDIC vectoring (angle discarded)."""
     return cordic_atan2(y, x)[1]
+
+
+# --- stationary-carrier notch: integer twin of cport/src/dsp.c notch_t ---
+# Second-order real IIR, NOTCH_BW_HZ wide, centred on a 32-bit phase word:
+#   y = x - 2c x1 + x2 + 2rc y1 - r^2 y2,  r = 1 - pi*BW/fs
+# Coefficients in Q14 (b1 = -c_q15 is exactly -2c in Q14), states are
+# sample values, the accumulator is int64, the output rounds and saturates
+# to int16 -- the C ring stores int16. Bit-exact with the C.
+NOTCH_BW_HZ = 30.0
+NOTCH_R_Q14 = 16255      # round((1 - pi*30/12000) * 2^14)
+NOTCH_R2_Q14 = 16128     # r^2
+NOTCH_MAX = 3
+
+
+class Notch:
+    def __init__(self, word: int):
+        c = int(NCO._rom()[0][(int(word) & 0xFFFFFFFF) >> (PHASE_BITS - NCO.LUT_BITS)])
+        self.b1 = -c
+        self.a1 = int(rshift_round(NOTCH_R_Q14 * c, 14))
+        self.a2 = NOTCH_R2_Q14
+        self.x1 = self.x2 = self.y1 = self.y2 = 0
+
+    def step(self, x: int) -> int:
+        acc = (int(x) << 14) + self.b1 * self.x1 + (self.x2 << 14) \
+              + self.a1 * self.y1 - self.a2 * self.y2
+        y = int(rshift_round(acc, 14))
+        y = max(-32768, min(32767, y))
+        self.x2, self.x1 = self.x1, int(x)
+        self.y2, self.y1 = self.y1, y
+        return y
+
+    def apply(self, samples):
+        out = np.empty(len(samples), dtype=np.int64)
+        for n, x in enumerate(np.asarray(samples, dtype=np.int64)):
+            out[n] = self.step(int(x))
+        return out
+
+
+def notch_words(samples, words):
+    """Run the samples through a notch at each word in turn (the C bank
+    applies them in slot order, which is request order)."""
+    y = np.asarray(samples, dtype=np.int64)
+    for w in words:
+        y = Notch(w).apply(y)
+    return y

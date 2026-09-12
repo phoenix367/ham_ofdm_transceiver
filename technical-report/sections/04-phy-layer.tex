@@ -69,7 +69,9 @@ followed by a header and the data block.  The header (25 bits:
 is always sent in the most robust configuration (BPSK, rate-1/3, six
 tiled symbols = 93 coded bits); its \texttt{mod}/\texttt{spd}/%
 \texttt{len} fields drive the data-block demodulation, and
-\texttt{ver=2} marks an LDPC-coded data block
+\texttt{ver=2} marks an LDPC-coded data block.  The CRC-8 is seeded
+with $\mathrm{0xFF} \oplus \mathit{key}$, the link's \emph{net key}
+(\S\ref{sec:net_key}); key 0 is the article's CRC
 (Section~\ref{sec:coding}).  Preamble bins carry deliberate gain
 ($\times 2$ for ZC symbols, $\times\sqrt{5.75}$ for tone combs) so the
 whole frame has uniform per-sample power --- Section~\ref{sec:sync}
@@ -942,6 +944,7 @@ model.
     $\theta_t$ & 1.6 / 1.5 / 1.30 & tone threshold on the contrast product (Q10: 1638 / 1536 / 1331) \\
     $\Delta$ & 3 blocks & \texttt{DECLINE\_BLOCKS}: region-end after this many below-threshold blocks \\
     $X$ & 64 & \texttt{WEAK\_COMMIT\_X}: region-end commit needs metric $\ge X\theta_t^2$ \\
+    $\Pi$ & 16 (Q4 $\log_2$) $= 3$\,dB & \texttt{RXS\_PREEMPT\_LOG2\_Q4}: a challenger peak arriving during a decode takes it over if its tone-bin energy exceeds the locked peak's by $\Pi$ \\
     \bottomrule
     \end{tabular}
 \end{table}
@@ -1091,6 +1094,89 @@ on the metric being strong.  That gate is the fix of
 isolated above-threshold spike ($\sim$10$\times\theta_t^2$ against
 $10^4$--$10^6\times$ for a real peak) whose region dies at once, and
 committing it anchored two blocks before the real preamble.
+
+\label{sec:tone_stream_preempt}
+The fourth departure is \emph{preemption}.  The frame-at-once model
+takes the global argmax over the recording, so a stronger preamble
+anywhere in it wins; the streaming receiver, once committed, used to
+demodulate the frame in hand to its end, and the search -- newest
+block only, summary ring one window deep -- never revisited what
+arrived meanwhile.  A same-mode frame 20\,dB below the wanted one
+(10\,dB under the noise at $+10$\,dB SNR) still detects, since its
+tone comb has $\sim$$+9$\,dB per-bin SNR, and its header often
+decodes; the receiver then spent the stranger's whole data block
+(2.1\,s at NORMAL, 32\,s at EXTREME) deaf, and a wanted frame starting
+inside that block was lost whole -- measured as 18--28\,\% PER at
+NORMAL $+10$\,dB from ISR $-20$\,dB up against a model that lost
+nothing (\S\ref{sec:interference}).  The tone stage therefore keeps
+evaluating windows during the header and data states as a
+\emph{challenger}, tracked by the same region and stability rules as
+the search; a challenger that would commit, and whose tone-bin energy
+(mantissa sum at the argmax shift, restored to absolute scale through
+the window's block exponent) exceeds the locked peak's by $\Pi$,
+aborts the decode and is committed in its place.  The bar is energy,
+not the contrast metric: the metric saturates against its 1\,\% floor
+regulariser once the per-bin SNR passes $\sim$20\,dB, so two strong
+preambles 12\,dB apart score alike and a ratio cannot order them.
+Energy is what ``stronger'' means and does not saturate; the wanted
+frame's own data symbols put only $n_m / 46$ of its power ($\sim$$-8$\,dB)
+into the tone bins of a challenger window, below the bar before the
+challenger even has to pass the commit rule.  The 3\,dB margin keeps an
+equal-power stranger, which may or may not destroy the frame in hand,
+from taking it for certain; an interferer at or above the wanted
+frame's power destroys it in any case (ISR 0\,dB is $\sim$100\,\% PER
+in the sweep), so switching to the stronger signal is right on
+average.  Two details were found by measurement rather than design:
+a challenger region still open when the decode in hand ends -- a
+stranger whose data CRC fails a few blocks after our preamble has
+become the challenger's argmax -- is \emph{carried} into the search
+instead of being reset past the frame (without it a residual 8\,\%
+loss remained at ISR $-20$\,dB), gated on recency and on the same
+$X\theta_t^2$ strength bar as the region-end commit so that data-hover
+regions, which only ever commit by stability, are not carried (each
+cost a failed header on a busy channel); and the challenger runs in
+the ZC-wait state as well, which at NORMAL is longer than the tone
+window.  \texttt{test\_stream} pins both directions on one geometry:
+a weak stranger followed by a strong frame 8000 samples into its data
+block decodes the strong frame with exactly one preempt, and the same
+pair the other way round decodes the strong frame with none.
+pair the other way round decodes the strong frame with none.
+
+\paragraph{Stationary-carrier excision.}
+\label{sec:excision}
+A CW carrier at the frame's own power defeats every stage at once: it
+leaks through the rectangular detection window into a dozen bins and
+lands in some mask shift's tone bins, it adds a correlation floor of
+$\sim$0.2 times its amplitude ratio to the ZC stage and dominates that
+stage's energy normalisation, and on its subcarrier it sits $\sim$17\,dB
+above the per-carrier signal.  Measured (\S\ref{sec:interference}) the
+detector is blind at ISR $+10$\,dB and the demodulator fails from ISR
+$-7$\,dB, while an ideal 30-Hz notch at the carrier's frequency decodes
+15 of 15 at every ratio up to $+10$\,dB.  So the receiver finds such
+carriers and notches them out of the \emph{samples} before the Hilbert
+transform, in all three implementations with one definition.  Per
+detection block the in-band bins above $4\times$ the block's mean power
+are its excess bins (at most four; the mean rather than the median,
+because a carrier alone on a quiet channel has a median of zero and
+then every crumb of leakage counts; $4\times$ because a carrier halfway
+between two bins keeps only 40\,\% of its power in each).  A bin in
+excess in at least 85\,\% of the blocks -- the whole recording frame at
+once, the last two tone windows streaming -- is a carrier: the
+receiver's own comb is on for one tone field, a stranger's preamble
+train lights each bin exactly two thirds of the time, and white noise
+never repeats a bin.  The carrier's frequency inside the bin is the
+phase advance of that bin between consecutive blocks, unambiguous over
+half a bin, taken at the strongest bin of an adjacent group (the
+closest one; the far one wraps).  A second-order IIR notch 30\,Hz wide
+($r = 0.9921$, Q14 coefficients, int16-saturated output) removes it.
+The streaming receiver keeps one notch bank in front of the shared
+sample ring, run once per sample index whichever instance pushes first,
+and releases a notch by its own monitor once the rejected power stays
+under 1/32 of the input, or under 4 LSB rms, for four 4096-sample
+ticks (shorter ticks let white noise trip the ratio; without the
+absolute floor the notch's ringing on a silent input held it forever).
+A rest-band trim inside the tone metric was tried first and removed: it
+moved a noisy golden vector's coarse shift and bought nothing.
 
 \begin{algorithm}[H]
 \caption{C streaming tone detector (\texttt{rx\_stream.c}).}
@@ -1334,6 +1420,36 @@ peak-normalized quantization of the parity path already compresses the
 LLRs enough that the fixed receiver matches or beats the recalibrated
 float one at $-9/-10$\,dB, and the calibrated mode buys a stable
 cross-frame scale for HARQ rather than packet error rate.
+
+\paragraph{Interference weighting.}
+\label{sec:iweight}
+The LLR scale above is a per-symbol noise variance averaged over the
+carriers, so a carrier or a voice harmonic sitting on one subcarrier --
+$\sim$17\,dB above the per-carrier signal there -- yields LLRs that are
+large, confident and wrong on that carrier while every other carrier's
+are slightly too small; a syllable does the same to a run of symbols.
+Measured (\S\ref{sec:interference}) even the header failed from ISR
+$-7$\,dB.  The receiver therefore weights every LLR by how reliable its
+carrier and its symbol were over the whole block.  Each symbol's
+decision-directed residual per data carrier -- for BPSK the imaginary
+part of $Y\,\overline{H}$, which is pure noise, for QPSK and 16-QAM the
+distance of $|{\rm Re}|$ and $|{\rm Im}|$ from the nearest level of the
+per-symbol amplitude estimate -- divided by $|H|$, is the
+noise-plus-interference \emph{amplitude} in received units, comparable
+across carriers and symbols whatever the channel does to each.  It is
+summed per carrier over the symbols and per symbol over the carriers,
+and each LLR is scaled by $\min(1, (\mathrm{median}/\mathrm{sum})^2)$ of
+its carrier and of its symbol, floored at $1/64$: only ever down,
+because the LLR scale already carries $|H|^2$ and an up-weight would
+count a fade twice; never to zero, so a hit carrier is a soft erasure
+the code can still use.  The header (BPSK, six symbols) goes through the
+same rule.  In the fixed model and the C port the residual is
+$\lvert{\rm Im}(Y\overline{H})\rvert / \lfloor\sqrt{|H|^2}\rfloor$ at the
+symbol's BFP exponent, accumulated per carrier on a running exponent --
+re-aligned whenever a louder symbol arrives, because storing every
+residual would cost 26\,kB per instance -- and per symbol with its own;
+the weights are Q15 and the twins agree bit for bit (the golden LLR
+hashes were regenerated once, from the fixed model).
 
 \subsection{The Decoders, Exactly: Soft Viterbi and IRA LDPC}
 \label{sec:dec_exact}

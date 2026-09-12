@@ -7,6 +7,8 @@
 #include "../src/packets.h"
 #include "../src/tx.h"
 #include "../src/rx_demod.h"
+#include "../src/rx_internal.h"
+#include "../src/rom_tables.h"
 #include "test_vectors.h"
 
 static int g_pass, g_fail;
@@ -178,6 +180,43 @@ int main(void)
     }
 
     /* HARQ chase combining on a calibrated RX: complementary erasures */
+    /* stationary-carrier excision (rx_detect.c rx_find_tones + dsp.c
+     * notch): a CW carrier synthesised from the NCO ROM on top of a
+     * NORMAL frame; the found phase word and the decode must match the
+     * fixed model exactly (gen_vectors.py TONE_*) */
+    {
+        rxd_t r;
+        rxd_header_t h;
+        int pkt_n = (int)sizeof(TONE_PKT);
+        int n = tx_build_frame(MODE_NORMAL, TONE_PKT, pkt_n, PKT_TYP_DATA,
+                               MOD_BPSK, CC_R13, g_samples + 700);
+        uint32_t words[NOTCH_MAX], ph = 0;
+        int i, nw, rc, start;
+        int64_t cfo;
+        memset(g_samples, 0, 700 * sizeof(int16_t));
+        for (i = 0; i < 700 + n; i++) {
+            int32_t v = g_samples[i]
+                        + (int32_t)(((int64_t)TONE_AMP * NCO_COS[ph >> 20]) >> 15);
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            g_samples[i] = (int16_t)v;
+            ph += TONE_WORD;
+        }
+        nw = rx_find_tones(MODE_NORMAL, g_samples, 700 + n, words);
+        check("carrier finder: one carrier, phase word bit-exact",
+              nw == 1 && words[0] == TONE_FOUND_WORD);
+        if (nw != 1 || words[0] != TONE_FOUND_WORD)
+            printf("  found %d word0 %u want %u\n", nw, nw ? words[0] : 0u,
+                   (unsigned)TONE_FOUND_WORD);
+        rxd_init(&r, MODE_NORMAL);
+        rc = rxd_receive(&r, g_samples, 700 + n, &h, g_bits, &start, &cfo);
+        check("carrier excised: frame under a CW carrier decodes, start bit-exact",
+              rc == 0 && start == TONE_START
+              && memcmp(g_bits, TONE_PKT, (size_t)pkt_n) == 0);
+        if (rc != 0 || start != TONE_START)
+            printf("  tone rx: rc=%d start=%d want %d\n", rc, start, (int)TONE_START);
+    }
+
     {
         static int64_t llrs[1024];
         rxd_t r;

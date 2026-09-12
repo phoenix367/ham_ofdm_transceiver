@@ -11,6 +11,7 @@
 #include "../src/rom_modes.h"
 #include "../src/tx.h"
 #include "../src/rx_stream.h"
+#include "../src/rom_tables.h"
 #include "../src/broadcast.h"
 #include "test_vectors.h"
 
@@ -303,6 +304,192 @@ int main(void)
               "(soak seed 20264)", frames == 20);
         printf("  %d of 20 frames decoded\n", frames);
         #undef SOAK_RND
+    }
+
+    /* PREEMPTION (rx_stream.c): a weak stranger's frame whose header
+     * decodes used to own the receiver for its whole data block, and a
+     * stronger frame starting inside that block was lost -- its preamble
+     * consumed by the decode in progress and never revisited. The
+     * challenger tracker now abandons the decode for a later peak at
+     * RXS_PREEMPT_LOG2_Q4 (3 dB) more tone-bin energy than the locked
+     * one. Two NORMAL frames 20 dB apart under noise ~26 dB below the
+     * strong one, so the weak one sits at ~+6 dB SNR -- above the 64x
+     * strong-commit gate (a 0 dB NORMAL preamble scores ~1.6e8 against
+     * the 1.7e8 gate and only commits by stability, too late to capture
+     * anything) and with a header that decodes -- the second starting
+     * 8000 samples into the first's data block:
+     *   (a) stranger first: the strong frame must decode, 1 preempt;
+     *   (b) strong first: the frame in hand must NOT be abandoned for a
+     *       stranger 20 dB down -- 0 preempts, the strong frame decodes.
+     * Noise is what makes the metrics differ: on a noise-free wire both
+     * tone contrasts saturate at the regularizer and no ratio exists. */
+    {
+        static int16_t weak[60000], strong[60000];
+        uint8_t pw[512], ps[512];   /* 27-byte packets: 252 bit-bytes */
+        int nw, ns, pw_n, ps_n, k, which;
+        uint32_t lcg = 987654321u;
+        pw_n = data_encode(11, (const uint8_t *)"STRANGER 27-BYTE PAYLOAD XX",
+                           27, pw);
+        ps_n = data_encode(22, (const uint8_t *)"WANTED   27-BYTE PAYLOAD YY",
+                           27, ps);
+        nw = tx_build_frame(MODE_NORMAL, pw, pw_n, PKT_TYP_DATA, MOD_BPSK,
+                            CC_R12, weak);
+        ns = tx_build_frame(MODE_NORMAL, ps, ps_n, PKT_TYP_DATA, MOD_BPSK,
+                            CC_R12, strong);
+        for (which = 0; which < 2; which++) {
+            int lead = 700, off2 = lead + 8000;
+            int n = off2 + (which == 0 ? ns : nw) + 1536;
+            int decoded = 0, other = 0, pos, got;
+            rxs_event_t ev;
+            rxs_t *r;
+            for (k = 0; k < n; k++) {   /* uniform noise, rms ~700 */
+                lcg = lcg * 1103515245u + 12345u;
+                g_samples[k] = (int16_t)((int)((lcg >> 16) % 2400u) - 1200);
+            }
+            for (k = 0; k < (which == 0 ? nw : ns); k++)
+                g_samples[lead + k] += which == 0 ? (int16_t)(weak[k] / 10)
+                                                  : strong[k];
+            for (k = 0; k < (which == 0 ? ns : nw); k++)
+                g_samples[off2 + k] += which == 0 ? strong[k]
+                                                  : (int16_t)(weak[k] / 10);
+            r = rxs_open(MODE_NORMAL, 0);
+            for (pos = 0; pos < n; pos += 256) {
+                int c = n - pos < 256 ? n - pos : 256;
+                got = rxs_push(r, g_samples + pos, c, &ev);
+                if (got && ev.type == 1) {
+                    if (ev.pkt_bits_n == ps_n
+                        && memcmp(ev.bits, ps, (size_t)ps_n) == 0)
+                        decoded++;
+                    else
+                        other++;
+                }
+            }
+            if (rxs_flush(r, &ev) && ev.type == 1) {
+                if (ev.pkt_bits_n == ps_n
+                    && memcmp(ev.bits, ps, (size_t)ps_n) == 0)
+                    decoded++;
+                else
+                    other++;
+            }
+            printf("  preempt case %d: strong %d other %d preempts %ld\n",
+                   which, decoded, other, (long)rxs_preempts(r));
+            if (which == 0)
+                check("preempt: strong frame inside a weak stranger's data "
+                      "block decodes (1 preempt)",
+                      decoded == 1 && rxs_preempts(r) == 1);
+            else
+                check("preempt: a weak stranger inside our data block does "
+                      "not preempt (0 preempts)",
+                      decoded == 1 && rxs_preempts(r) == 0);
+        }
+    }
+
+    /* STATIONARY-CARRIER EXCISION (rx_stream.c carrier_track + the global
+     * notch bank): a CW carrier from the NCO ROM, amplitude 12000 (~-4 dB
+     * against the frame), keyed 1.5 s before a NORMAL frame and through
+     * it, then 2 s of silence. The rolling finder needs one EXTREME tone
+     * field (61440 samples, 5.1 s) of history whatever the mode, so the
+     * carrier is notched before the frame arrives; the frame must decode,
+     * the bank must hold the notch while the carrier is on and release it
+     * in the silence. */
+    {
+        uint8_t pkt[512];
+        int pkt_n = data_encode(33, (const uint8_t *)"CARRIER  27-BYTE PAYLOAD ZZ",
+                                27, pkt);
+        int lead = 72000, n_fr, n, k, pos, got, decoded = 0, held = 0;
+        uint32_t ph = 0, word = 537944654u, lcg = 4242u;   /* ~1503 Hz */
+        rxs_event_t ev;
+        rxs_t *r;
+        n_fr = tx_build_frame(MODE_NORMAL, pkt, pkt_n, PKT_TYP_DATA, MOD_BPSK,
+                              CC_R12, g_samples + lead);
+        n = lead + n_fr + 24000;
+        memset(g_samples, 0, (size_t)lead * sizeof(int16_t));
+        memset(g_samples + lead + n_fr, 0, 24000 * sizeof(int16_t));
+        for (k = 0; k < n; k++) {   /* a small noise floor (rms ~37): the
+                                     * ROM tone's phase-truncation spurs at
+                                     * +-288 Hz are -60 dBc and, on a truly
+                                     * silent channel, become the next
+                                     * stationary lines once the carrier is
+                                     * notched -- legitimate, but not what
+                                     * this case is about */
+            int32_t v = g_samples[k];
+            lcg = lcg * 1103515245u + 12345u;
+            v += (int32_t)((lcg >> 16) % 128u) - 64;
+            if (k < lead + n_fr) {
+                v += (int32_t)(((int64_t)12000 * NCO_COS[ph >> 20]) >> 15);
+                ph += word;
+            }
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            g_samples[k] = (int16_t)v;
+        }
+        r = rxs_open(MODE_NORMAL, 0);
+        for (pos = 0; pos < n; pos += 256) {
+            int c = n - pos < 256 ? n - pos : 256;
+            got = rxs_push(r, g_samples + pos, c, &ev);
+            if (pos <= lead && pos + c > lead) {
+                held = rxs_notches();   /* engaged before the frame */
+#ifdef STREAM_DEBUG
+                { void rxs_dump_bank(void); rxs_dump_bank(); }
+#endif
+            }
+            if (got && ev.type == 1 && ev.pkt_bits_n == pkt_n
+                && memcmp(ev.bits, pkt, (size_t)pkt_n) == 0)
+                decoded++;
+        }
+        printf("  carrier: notches at frame start %d, decoded %d, notches at end %d\n",
+               held, decoded, rxs_notches());
+#ifdef STREAM_DEBUG
+        { void rxs_dump_bank(void); rxs_dump_bank(); }
+#endif
+        check("carrier: notched before the frame, frame decodes, released after",
+              held >= 1 && decoded == 1 && rxs_notches() == 0);
+    }
+
+    /* The excision bank is global and the ring is shared: a NORMAL
+     * instance listening beside an EXTREME one must NOT read the peer's
+     * EXTREME tone comb (3.4 s of the same four tones) as a stationary
+     * carrier and notch it out from under the EXTREME instance. Both
+     * open, an EXTREME frame under a small noise floor: the EXTREME
+     * instance decodes, the bank stays empty. */
+    {
+        uint8_t pkt[512];
+        int pkt_n = data_encode(44, (const uint8_t *)"EXTREME  27-BYTE PAYLOAD QQ",
+                                27, pkt);
+        int lead = 3000, n_fr, n, k, pos, decoded = 0, max_notch = 0;
+        uint32_t lcg = 777u;
+        rxs_event_t ev;
+        rxs_t *rn, *rx;
+        n_fr = tx_build_frame(MODE_EXTREME, pkt, pkt_n, PKT_TYP_DATA, MOD_BPSK,
+                              CC_R13, g_samples + lead);
+        n = lead + n_fr + 12000;
+        memset(g_samples, 0, (size_t)lead * sizeof(int16_t));
+        memset(g_samples + lead + n_fr, 0, 12000 * sizeof(int16_t));
+        for (k = 0; k < n; k++) {
+            int32_t v = g_samples[k];
+            lcg = lcg * 1103515245u + 12345u;
+            v += (int32_t)((lcg >> 16) % 128u) - 64;
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            g_samples[k] = (int16_t)v;
+        }
+        rn = rxs_open(MODE_NORMAL, 0);
+        rx = rxs_open(MODE_EXTREME, 0);
+        for (pos = 0; pos < n; pos += 512) {
+            int c = n - pos < 512 ? n - pos : 512;
+            (void)rxs_push(rn, g_samples + pos, c, &ev);   /* the bystander */
+            if (rxs_push(rx, g_samples + pos, c, &ev) && ev.type == 1
+                && ev.pkt_bits_n == pkt_n && memcmp(ev.bits, pkt, (size_t)pkt_n) == 0)
+                decoded++;
+            if (rxs_notches() > max_notch)
+                max_notch = rxs_notches();
+        }
+        if (rxs_flush(rx, &ev) && ev.type == 1 && ev.pkt_bits_n == pkt_n
+            && memcmp(ev.bits, pkt, (size_t)pkt_n) == 0)
+            decoded++;
+        printf("  shared ring: EXTREME decoded %d, max notches %d\n", decoded, max_notch);
+        check("shared ring: a NORMAL instance never notches the EXTREME peer's comb",
+              decoded == 1 && max_notch == 0);
     }
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

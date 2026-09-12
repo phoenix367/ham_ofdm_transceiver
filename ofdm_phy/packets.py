@@ -13,7 +13,7 @@ from enum import Enum
 import numpy as np
 import numpy.typing as npt
 
-from .crc import crc8_lte, crc16_ccitt
+from .crc import crc8_lte, crc16_ccitt, crc, POLY_ITU_LTE
 
 
 class PacketCRCMissmatch(Exception):
@@ -188,7 +188,27 @@ class Header(PacketCRC8):
     spd: CCSpeed
     len: int
 
-    def encode(self) -> npt.NDArray[np.uint8]:
+    # NET KEY. The link-control word carries no station or net identity
+    # (20 bits: seq, ack, rung request, SNR, frequency correction, flags),
+    # so a stranger's CRC-valid frame on the same frequency used to be
+    # taken for the peer's: its sequence numbers, acks and rung requests
+    # went straight into our ARQ and ladder (measured: 25 stranger frames
+    # per minute accepted, experiments/interference.py). A net key seeds
+    # the HEADER CRC-8 (seed 0xFF ^ key, so key 0 is the article's
+    # unchanged CRC and the worked examples still verify): a foreign link
+    # frame fails at the header, 0.27 s in at NORMAL, before its data
+    # block costs the receiver anything and before its link-control word
+    # reaches the station. Beacons and broadcasts are for everyone: those
+    # PUBLIC types are still accepted under key 0 by a keyed receiver. A
+    # foreign frame passes the keyed check with probability 1/256 per
+    # attempt, the same as noise always did.
+    PUBLIC_TYPES = (PacketType.BEACON.value, PacketType.BCAST.value)
+
+    @staticmethod
+    def _crc_keyed(data: npt.NDArray[np.uint8], net_key: int) -> int:
+        return crc(data, POLY_ITU_LTE, 0xFF ^ (int(net_key) & 0xFF), 8)
+
+    def encode(self, net_key: int = 0) -> npt.NDArray[np.uint8]:
         ver = self._to_bits(self.ver, 2)
         typ = self._to_bits(self.typ.value, 3)
         mod = self._to_bits(self.mod.value, 2)
@@ -197,17 +217,24 @@ class Header(PacketCRC8):
 
         data = np.concatenate([ver, typ, mod, spd, length])
 
-        packet = self._append_crc(data)
-        return packet
+        return np.concatenate([data, self._to_bits(self._crc_keyed(data, net_key), self.CRC_SIZE)])
 
     @classmethod
-    def decode(cls, bits: npt.NDArray[np.uint8], check_crc: bool = True) -> 'Header':
+    def decode(cls, bits: npt.NDArray[np.uint8], check_crc: bool = True,
+               net_key: int = 0) -> 'Header':
         assert bits.shape == (cls.PACKET_SIZE,)
 
-        data = cls._extract_data(bits, check_crc)
+        data = bits[:17]
+        typ = cls._from_bits(data[2:5])
+        if check_crc:
+            their = cls._from_bits(bits[17:17 + cls.CRC_SIZE])
+            ok = cls._crc_keyed(data, net_key) == their
+            if not ok and net_key != 0 and typ in cls.PUBLIC_TYPES:
+                ok = cls._crc_keyed(data, 0) == their
+            if not ok:
+                raise PacketCRCMissmatch("Packet CRC missmatch")
 
         ver = cls._from_bits(data[0:2])
-        typ = cls._from_bits(data[2:5])
         mod = cls._from_bits(data[5:7])
         spd = cls._from_bits(data[7:9])
         length = cls._from_bits(data[9:17])

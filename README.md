@@ -581,6 +581,99 @@ coherent gain collapses at any power and ROBUST mode (0.17 s symbols,
 −11.5 dB, 31 bit/s) is the better choice — one more reason for adaptive mode
 selection.
 
+## Co-channel interference (measured)
+
+`experiments/interference.py` keys a third party over the channel while
+one frame is received and sweeps the interference-to-signal ratio (ISR:
+interferer mean power over the recording against the frame's power at
+the channel output). Interferers: the same mode's preamble train (a
+station stuck in its sync loop), another mode's preamble train, a second
+link's data frames, SSB voice (synthesised pitch harmonics through
+formant resonators, or a recording via `--voice-wav`), and a CW carrier.
+The interferer is on for at least 5.1 s before the frame (one EXTREME
+tone field, the streaming receiver's carrier-finder history), so the
+streaming excision is measured in steady state. Two receivers see
+byte-identical recordings: the float frame-at-once model and the C
+streaming receiver the boards run, which is the product. 60 frames per
+point.
+
+ISR at which PER crosses 10 % (dB; a lower figure means a weaker
+stranger already breaks the link), with the three interference
+mechanisms below in place:
+
+| interferer | NORMAL BPSK ½ @ −3 dB<br>float / C stream | NORMAL BPSK ½ @ +10 dB<br>float / C stream | EXTREME BPSK ⅓ @ −15 dB<br>float / C stream |
+|---|---|---|---|
+| same-mode preamble train | −5.4 / −2.9 | −10.0 / −2.7 | −2.8 / −2.7 |
+| other-mode preamble train | −4.0 / −2.6 | −9.5 / −2.9 | −1.0 / −2.1 |
+| same-mode data frames | −5.4 / −2.6 | −9.8 / −2.4 | −2.7 / −2.7 |
+| SSB voice | −8.9 / −5.8 | −10.0 / −8.2 | −2.2 / −2.1 |
+| CW carrier | never / never | never / never | −2.7 / −2.5 |
+
+"never" = PER stays under 10 % up to ISR +10 dB. Before the mechanisms
+the C receiver read −8.8 dB and "never" (an 18–28 % floor from −20 dB
+up) on same-mode frames, −4.8 / −4.2 dB on the carrier, and both
+receivers −7 to −9 dB on the carrier. At EXTREME the carrier column is
+partial: the float receiver is back under 15 % PER from ISR +3 dB up
+and the C receiver at 38–63 %, because a −15 dB frame leaves the
+carrier's frequency estimate noisier (the float estimates over the
+whole recording, the streaming receiver over one tone window).
+
+What the numbers say:
+
+- **Against a stranger's preamble or frames there is still no margin
+  beyond being the stronger signal**: every such interferer breaks the
+  link within 3–5 dB of the wanted frame, at EXTREME within ~2.5 dB where
+  it is 15 dB below the noise, because its tone comb integrates over the
+  tone field exactly like ours and steals the lock. The float model's
+  figures at +10 dB are worse than the C receiver's on these rows only
+  because it takes the global argmax over a recording that now holds
+  three times as many stranger preambles.
+- **A CW carrier no longer breaks the link at NORMAL, at any ratio
+  measured.** *Stationary-carrier excision* finds a bin above 4× the
+  block's mean power in ≥85 % of blocks, takes its frequency from the
+  phase advance between blocks (sub-Hz), and notches it 30 Hz wide out of
+  the samples before the Hilbert; all three implementations, one
+  definition, the streaming one with a global bank in front of the shared
+  ring sized so that it never notches a peer's EXTREME tone comb. Under a
+  carrier alone the streaming receiver now commits once a minute instead
+  of being blind.
+- **A stranger's frames no longer capture the receiver or poison the
+  link.** The *net key* seeds the header CRC-8, so a foreign link frame
+  fails 0.27 s in and its link-control word never reaches the station
+  (25 stranger frames per minute were being accepted). With preemption
+  (a stronger later preamble aborts the decode in hand) the same-mode
+  frames column for the C receiver went from −8.8 / never to −2.6 / −2.4
+  dB, i.e. the lock-stealing limit and nothing else.
+- **Voice is unchanged (−6 to −10 dB).** Its harmonics fall on most
+  carriers and its syllables on half the symbols, so the
+  *interference weighting* (every LLR scaled by min(1, (median/residual)²)
+  of its carrier and its symbol) has no clean reference to lean on; the
+  detector's lock also goes at ISR 0. The weighting is kept for what it
+  does to single-carrier hits below the excision threshold and costs
+  nothing measurable elsewhere (EXTREME knee identical within one frame).
+- ARQ hides all of this as retransmissions; broadcast does not.
+
+On the two-board stand with this firmware (same net key on both, capability
+primer, 6000-byte file): byte-identical in 7 frames each way, 0 timeouts,
+0 retransmissions, rung 12, beacons clean (no capture overruns, no short
+transmissions). With the receiver on key 0 and the sender on key 90 a chat
+frame was refused for 72 s (4 timeouts, 4 retransmissions) and delivered
+the moment the receiver switched to key 90. The quiet wire's occasional
+header attempts (about one per 8 s at EXTREME) predate the campaign: the
+same 33 s of captured idle audio replayed through the pre-change and the
+current host receivers commits identically (12 at NORMAL, 4 at EXTREME,
+no notches). The firmware's RAM budget is now D2 with 0.6 kB and AXI with
+22 kB to spare; the radio build caps the per-symbol arrays at 280 symbols
+(`MAX_SYMS`, its largest EXT frame is 276) and places the weighting
+accumulators in DTCM.
+
+Open thread: a frequency-tracking loop on the notch's rejected component
+would give the streaming receiver the float model's carrier precision at
+EXTREME. Results: `results/interference.json` / `.png`. The sweep runs
+its workers one BLAS thread each (`--workers`, default cores minus two):
+the first version let every worker open its own thread pool and put a
+load of 10 on an 8-core host.
+
 ## Known deviations from the article
 
 The article omits some implementation details; where guessing was required the

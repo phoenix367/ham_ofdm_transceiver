@@ -20,6 +20,11 @@ uint32_t crc8_lte(const uint8_t *bits, int n)
     return crc_bits(bits, n, 0x07, 0xff, 8);
 }
 
+uint32_t crc8_lte_seed(const uint8_t *bits, int n, uint32_t seed)
+{
+    return crc_bits(bits, n, 0x07, seed, 8);
+}
+
 uint32_t crc16_ccitt(const uint8_t *bits, int n)
 {
     return crc_bits(bits, n, 0x1021, 0xffff, 16);

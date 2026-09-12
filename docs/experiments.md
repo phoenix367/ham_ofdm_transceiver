@@ -33,6 +33,7 @@ flowchart TD
 | `fixed_qam16_sweep.py [--trials N]` | QAM16 rung sensitivities, fixed vs float RX A/B | ~2 min |
 | `coarse_search_ab.py [--trials N]` | gated two-stage freq search vs full grid: PER waterfalls, float+fixed, parity-asserted | ~20 min |
 | `stream_mode.py [--trials N] [--blocks N] [--resync N]` | streamed bursts vs per-frame preambles: delivery + goodput, fitted dB cost | ~5 min |
+| `interference.py [--trials N] [--quick] [--no-c] [--voice-wav F]` | resistance to a third party's continuous signal (same/other-mode preamble train, its data frames, SSB voice, CW carrier): PER vs interference-to-signal ratio for the float frame-at-once receiver AND the C streaming receiver the boards run (`make -C cport interfrx`), plus receiver capture (commits per minute on the interferer alone); `--workers N` (default cores−2, one BLAS thread each) | ~30 min |
 | `cfo_unwrap.py [--trials N] [--replot]` | what the coarse-CFO unwrap is worth: timing outliers and frame delivery swept across one detection bin | ~6 min |
 | `broadcast_demo.py [--trials N]` | non-ARQ delivery vs SNR for speech and telemetry rungs, plus a late-joining receiver | ~6 min |
 | `broadcast_fading.py [--trials N]` | broadcast group size under fading: preamble amortization vs whole-group loss | ~6 min |

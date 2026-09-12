@@ -61,6 +61,24 @@ combinations are spent on the C stack's extensions: two on the burst
 acknowledgment and burst data frames (\S\ref{sec:cport_proto}) and the
 third, flags~7, on the capability record (\S\ref{sec:cport_caps}).
 
+\paragraph{The net key.}
+\label{sec:net_key}
+The word carries no station or net identity, so a stranger's CRC-valid
+frame on the same frequency was taken for the peer's: its sequence
+numbers, acknowledgments and rung requests went straight into the ARQ
+and the ladder (measured, \S\ref{sec:interference}: 25 stranger frames
+per minute accepted).  Rather than spend bits in the word, the link's
+\emph{net key} seeds the header CRC-8 with $\mathrm{0xFF} \oplus
+\mathit{key}$: a foreign link frame fails at the header, 0.27\,s in at
+NORMAL, before its data block costs the receiver anything and before
+its word reaches the station.  Key 0 is the article's unchanged CRC,
+beacons and broadcasts are public (a keyed receiver re-checks those two
+types under key 0), a foreign frame passes the keyed check with the
+probability noise always had ($1/256$ per attempt), and the key is an
+operator setting on the boards (configuration key 10) that both ends
+of a link must share -- there is no negotiation, by design: the
+capability handshake runs over link frames.
+
 \subsection{Rate Adaptation: Three Feedback Paths}
 
 Figure~\ref{fig:adaptation} shows the controller.  On the receive

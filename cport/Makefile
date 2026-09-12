@@ -373,6 +373,16 @@ bcsoak: $(GEN) | $(BUILD)
 	    src/packets.c src/link.c src/station.c src/arena.c -lm
 	./$(BUILD)/bc_soak -t 20 -g 18 -q | tail -2
 
+# Third-party interference harness: pushes a raw int16 recording through
+# the streaming receiver(s) and prints every event, so
+# experiments/interference.py can measure the boards' receiver against a
+# stranger's preamble train, its data frames, SSB voice and a CW carrier.
+interfrx: $(GEN) | $(BUILD)
+	gcc -std=c99 -O2 -Isrc -DMAX_LLRS=4416 -o $(BUILD)/interf_rx \
+	    bench/interf_rx.c src/rx_stream.c src/rx_detect.c src/rx_demod.c \
+	    src/tx.c src/fft.c src/dsp.c src/bits.c src/conv.c src/ldpc.c \
+	    src/packets.c src/link.c src/arena.c -lm
+
 burstrepro: $(GEN) | $(BUILD)
 	gcc -std=c99 -O2 -Isrc -DMAX_LLRS=4416 -o $(BUILD)/burst_repro \
 	    bench/burst_repro.c src/rx_stream.c src/rx_detect.c src/rx_demod.c \
@@ -495,7 +505,7 @@ USBRADIO_SRC = $(subst usb/usb_flash_main.c,usb/usb_radio_main.c,$(USBFLASH_SRC)
 
 radiofw: $(GEN) check-deps | $(BUILD)
 	$(FLASHCC) $(FLASHFLAGS) -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \
-	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx -DMAX_LLRS=4416 \
+	    -I$(CMSIS5)/CMSIS/Core/Include -DSTM32H743xx -DMAX_SYMS=280 -DMAX_LLRS=4416 \
 	    -DST_MSG_MAX=3328 -DBURST_STREAM_MAX=16 \
 	    -DOFDM_RX_MODES=$(RXMODES) -DBURST_STREAM_RESYNC=$(RESYNC) \
 	    $(USBRADIO_SRC) -lm -o $(BUILD)/usb_radio.elf

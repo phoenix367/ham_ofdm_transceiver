@@ -76,6 +76,17 @@ int64_t rxs_ring_hwm(const rxs_t *r);
  * ring contents, and the ring wants sizing up for this workload. */
 int64_t rxs_ring_miss(const rxs_t *r);
 
+/* Decodes abandoned because a LATER tone peak committed at RXS_PREEMPT_X
+ * times the metric the frame in hand was committed on (rx_stream.c,
+ * "PREEMPTION"). Diagnostic: on a clean link this stays 0; it counts
+ * the near-far captures the receiver escaped. */
+int64_t rxs_preempts(const rxs_t *r);
+
+/* Stationary carriers currently notched out of the shared ring (the
+ * global bank in front of it, rx_stream.c "STATIONARY-CARRIER
+ * EXCISION"). Diagnostic; 0 on a clean channel. */
+int rxs_notches(void);
+
 rxs_t *rxs_open(link_mode_t mode, int calibrate);
 
 /* Mute a receiver without closing it.

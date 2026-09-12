@@ -15,6 +15,8 @@ typedef int32_t llr_t;
 #define SCRAMBLER_SEED 0x5A
 
 uint32_t crc8_lte(const uint8_t *bits, int n);
+/* the same CRC from an arbitrary 8-bit seed (the header's net key) */
+uint32_t crc8_lte_seed(const uint8_t *bits, int n, uint32_t seed);
 uint32_t crc16_ccitt(const uint8_t *bits, int n);
 
 /* XOR hard bits with the 15-bit LFSR PRBS (taps 7 and 4), in place ok */

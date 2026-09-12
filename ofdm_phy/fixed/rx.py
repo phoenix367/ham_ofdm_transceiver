@@ -30,7 +30,8 @@ from ..ldpc import LDPCCodec, ldpc_decode_int
 from ..transceiver import CODECS, MAPPERS, HEADER_CODEC, HEADER_MAPPER, DemodError
 from .fxp import Q15, rshift_round, isqrt_i64
 from .fft import fft_bfp
-from .dsp import HilbertFIR, NCO, cordic_atan2, hz_to_phase_word, phase_word_to_hz, PHASE_ONE
+from .dsp import (HilbertFIR, NCO, cordic_atan2, hz_to_phase_word, phase_word_to_hz, PHASE_ONE,
+                  notch_words, NOTCH_MAX)
 from .viterbi import viterbi_decode_int, quantize_llr
 
 Q15_MAX = (1 << Q15) - 1
@@ -49,6 +50,97 @@ def _div_round(a: int, b: int) -> int:
     if a >= 0:
         return (a + b // 2) // b
     return -((-a + b // 2) // b)
+
+
+# EXCESS BINS of one detection block (the float model's FullOFDMModem.EXC_X):
+# integer twin of the float definition and of cport det_block_excess. The
+# clamp is EXC_X times the in-band mean (floor division by B/2-1 bins), and
+# the top N_EXC bins above the clamp are kept by an ascending scan with
+# strict replacement, so ties resolve to the lower bin. The
+# stationary-carrier finder (_find_tones) counts how often a bin is in
+# excess.
+EXC_X = 4
+N_EXC = 4
+MIN_TONE_BLOCKS = 8
+
+
+def block_excess(pow_row, B):
+    """(bins, excess) of the top N_EXC in-band bins of one block's power
+    spectrum above EXC_X x median; both lists may be empty."""
+    band = np.asarray(pow_row[1:B // 2], dtype=np.int64)
+    thr = EXC_X * (int(band.sum()) // len(band))
+    top = []  # (value, bin), descending by value, earlier bin first on ties
+    for k in range(1, B // 2):
+        v = int(pow_row[k])
+        if v <= thr:
+            continue
+        pos = len(top)
+        while pos > 0 and v > top[pos - 1][0]:
+            pos -= 1
+        if pos < N_EXC:
+            top.insert(pos, (v, k))
+            del top[N_EXC:]
+    return [k for _, k in top], [v - thr for v, _ in top]
+
+
+
+class WeightAcc:
+    """Interference weighting of a block's LLRs (Transceiver.block_weights
+    in the float model), integer twin of cport rxd_wacc_t -- bit-exact.
+
+    Residuals arrive one symbol at a time at that symbol's BFP exponent
+    (scale 2^exp) and are accumulated per carrier on a running exponent
+    (re-aligned whenever a louder symbol arrives) and per symbol with the
+    symbol's own exponent; the weights are formed once the block is
+    complete: w = min(1, (median / sum)^2) in Q15, floored at 1/64, and
+    each LLR is scaled by its symbol's and its carrier's weight."""
+    W_ONE = 1 << 15
+    W_FLOOR = 512  # 1/64
+
+    def __init__(self):
+        self.acc = None
+        self.acc_e = 0
+        self.sym = []  # (sum, exp)
+
+    def add(self, rho, exp):
+        rho = np.asarray(rho, dtype=np.int64)
+        self.sym.append((int(rho.sum()), int(exp)))
+        if self.acc is None:
+            self.acc = rho.copy()
+            self.acc_e = int(exp)
+        elif exp < self.acc_e:
+            self.acc = (self.acc >> (self.acc_e - exp)) + rho
+            self.acc_e = int(exp)
+        else:
+            self.acc = self.acc + (rho >> (exp - self.acc_e))
+
+    @classmethod
+    def _w(cls, med, v):
+        if v <= 0:
+            return cls.W_ONE
+        q = (med << 15) // v
+        if q >= cls.W_ONE:
+            return cls.W_ONE
+        w = (q * q) >> 15
+        return w if w >= cls.W_FLOOR else cls.W_FLOOR
+
+    def weights(self):
+        e_min = min(e for _, e in self.sym)
+        m_s = [s >> (e - e_min) for s, e in self.sym]
+        acc = [int(v) for v in self.acc]
+        med_k = sorted(acc)[len(acc) // 2]
+        med_s = sorted(m_s)[len(m_s) // 2]
+        return [self._w(med_s, v) for v in m_s], [self._w(med_k, v) for v in acc]
+
+    def apply(self, arr, mu):
+        w_s, w_k = self.weights()
+        n_car = len(w_k)
+        cap = n_car * mu
+        for s, ws in enumerate(w_s):
+            for k in range(n_car):
+                w = (ws * w_k[k]) >> 15
+                sl = slice(s * cap + k * mu, s * cap + (k + 1) * mu)
+                arr[sl] = rshift_round(arr[sl] * w, 15)
 
 
 @dataclasses.dataclass
@@ -74,7 +166,11 @@ class FixedReceiver:
                           10, 11, 11, 12, 12, 13, 13, 13, 14, 14, 14, 15,
                           15, 15, 15, 15], dtype=np.int64)
 
-    def __init__(self, mode: LinkMode = LinkMode.NORMAL, calibrate: bool = False):
+    def __init__(self, mode: LinkMode = LinkMode.NORMAL, calibrate: bool = False,
+                 excise: bool = True, net_key: int = 0):
+        self.excise = excise
+        self.net_key = net_key   # header CRC seed (packets.Header)
+        self.last_notch_words = []
         # calibrate=True: header-based integer temperature fit brings LLRs to
         # a stable calibrated scale (one divider), then the reliability ROM
         # reshapes them -- mirrors the float system chain (llr_recal="auto").
@@ -155,6 +251,68 @@ class FixedReceiver:
         self.hilbert = HilbertFIR()
 
     # ------------------------------------------------------------------ tone
+    # --- stationary-carrier excision --------------------------------------
+    # Twin of cport rx_find_tones (bit-exact) and of the float model's
+    # FullOFDMModem.find_stationary_tones; reasoning in ofdm.py (EXC_X).
+    # Runs on the REAL samples: the positive-frequency bins of a real
+    # block's FFT are what the analytic signal's would be.
+
+    def _find_tones(self, samples):
+        """Phase words of up to NOTCH_MAX carriers present through the
+        whole recording."""
+        B = self.B
+        x = np.asarray(samples, dtype=np.int64)
+        nb = len(x) // B
+        if nb < MIN_TONE_BLOCKS:
+            return []
+        hits = np.zeros(B // 2, dtype=np.int64)
+        energy = np.zeros(B // 2, dtype=np.int64)
+        per_block = []  # {bin: (re, im)}
+        for b in range(nb):
+            re, im, _e = fft_bfp(x[b * B:(b + 1) * B], np.zeros(B, dtype=np.int64), 13)
+            pw = re[:B // 2] * re[:B // 2] + im[:B // 2] * im[:B // 2]
+            bins, _exc = block_excess(pw, B)
+            d = {}
+            for k in bins:
+                d[k] = (int(re[k]), int(im[k]))
+                hits[k] += 1
+                energy[k] += int(pw[k])
+            per_block.append(d)
+        words = []
+        k = 1
+        while k < B // 2 and len(words) < NOTCH_MAX:
+            if hits[k] * 20 < 17 * nb:
+                k += 1
+                continue
+            j = k
+            while j + 1 < B // 2 and hits[j + 1] * 20 >= 17 * nb:
+                j += 1
+            best = k
+            for q in range(k, j + 1):
+                if energy[q] > energy[best]:
+                    best = q
+            sr = si = 0
+            for b in range(nb - 1):
+                a = per_block[b].get(best)
+                c = per_block[b + 1].get(best)
+                if a is None or c is None:
+                    continue
+                sr += a[0] * c[0] + a[1] * c[1]      # conj(X_b) * X_{b+1}
+                si += a[0] * c[1] - a[1] * c[0]
+            if sr != 0 or si != 0:
+                ang, _mag = cordic_atan2(si, sr)
+                words.append(((best << 32) + ang + B // 2) // B & 0xFFFFFFFF)
+            k = j + 1
+        return words
+
+    def _excise(self, samples):
+        """(samples with their stationary carriers notched, the words)."""
+        words = self._find_tones(samples) if self.excise else []
+        self.last_notch_words = words
+        if not words:
+            return np.asarray(samples, dtype=np.int64), []
+        return notch_words(samples, words), words
+
     def _detect_newman(self, i_arr, q_arr):
         B, T, N, s = self.B, self.T, self.N, self.s
         num_blocks = len(i_arr) // B
@@ -417,10 +575,29 @@ class FixedReceiver:
 
         # matched-filter LLRs: Re/Im(Y * conj(H)); scale ~ 2^(2*exp)
         llr_i = y_re * hd_re + y_im * hd_im
+        llr_q0 = y_im * hd_re - y_re * hd_im
+        h2 = hd_re * hd_re + hd_im * hd_im
+        # interference residual per carrier (Transceiver.block_weights in
+        # the float model): decision-directed error of Y*conj(H), divided
+        # by |H| so it is the noise-plus-interference amplitude in
+        # received units, scale 2^exp. Integer twin of rxd_demod_symbol.
+        isq = np.maximum(np.array([isqrt_i64(int(v)) for v in h2], dtype=np.int64), 1)
+        abs_i = np.abs(llr_i)
+        abs_q = np.abs(llr_q0)
+        if mu == 1:
+            res = abs_q
+        elif mu == 2:
+            ssum = int(abs_i.sum() + abs_q.sum())
+            h2sum = max(int(h2.sum()), 1)
+            a_q8 = (ssum << 8) // (2 * h2sum)
+            ref = (h2 * a_q8) >> 8
+            res = np.abs(abs_i - ref) + np.abs(abs_q - ref)
+        else:
+            res = None  # below, once t is known
         if mu == 1:
             llr = llr_i
         elif mu == 2:
-            llr_q = y_im * hd_re - y_re * hd_im
+            llr_q = llr_q0
             llr = np.empty(2 * len(llr_i), dtype=np.int64)
             llr[0::2] = llr_i
             llr[1::2] = llr_q
@@ -431,8 +608,6 @@ class FixedReceiver:
             # per-symbol amplitude reference estimated from the mean
             # matched-filter magnitude (E|x_I| = 2a for 16-QAM). One integer
             # division per symbol; Q8 ratio keeps products inside int64.
-            llr_q0 = y_im * hd_re - y_re * hd_im
-            h2 = hd_re * hd_re + hd_im * hd_im
             ssum = int(np.sum(np.abs(llr_i)) + np.sum(np.abs(llr_q0)))
             h2sum = max(int(np.sum(h2)), 1)
             ratio_q8 = (ssum << 8) // (2 * h2sum)
@@ -442,12 +617,17 @@ class FixedReceiver:
             llr[1::4] = t - np.abs(llr_i)
             llr[2::4] = llr_q0
             llr[3::4] = t - np.abs(llr_q0)
-        return llr, exp
+            half = t >> 1   # nearest 16-QAM level: a|H|^2 (= t/2) or 3a|H|^2
+            res = (np.minimum(np.abs(abs_i - half), np.abs(abs_i - (t + half)))
+                   + np.minimum(np.abs(abs_q - half), np.abs(abs_q - (t + half))))
+        rho = res // isq
+        return llr, exp, rho
 
     def _demod_block(self, i_arr, q_arr, start, cfo_word, n_syms, mapper):
         mu = mapper.MU
         raw = []
         exps = []
+        wacc = WeightAcc()
         for k in range(n_syms):
             # slew-limited residual-frequency tracker: full grid on the first
             # symbol of the frame, then +-2 grid steps around the previous
@@ -458,13 +638,15 @@ class FixedReceiver:
                 lo = max(0, self._last_hyp - 2)
                 hi = min(len(self.search_words) - 1, self._last_hyp + 2)
                 window = range(lo, hi + 1)
-            llr, exp = self._demod_symbol(i_arr, q_arr, start + k * self.symbol_len,
-                                          cfo_word, mu, hyp_window=window)
+            llr, exp, rho = self._demod_symbol(i_arr, q_arr, start + k * self.symbol_len,
+                                               cfo_word, mu, hyp_window=window)
             raw.append(llr)
             exps.append(exp)
+            wacc.add(rho, exp)
         # align block exponents (scale ~ 2^(2*exp)); the caller quantizes
         e_min = min(exps)
         arr = np.concatenate([v >> (2 * (e - e_min)) for v, e in zip(raw, exps)])
+        wacc.apply(arr, mu)
         return arr, 2 * e_min  # arr ~ L_raw << scale_log2
 
     @staticmethod
@@ -682,6 +864,7 @@ class FixedReceiver:
         that failed CRC and info carries start, cfo, the resync log and the
         per-block LLRs (kept on failure, for chase combining).
         """
+        samples, _notches = self._excise(samples)
         i_arr, q_arr = self.hilbert.analytic(np.asarray(samples, dtype=np.int64))
 
         det = self._detect(i_arr, q_arr)
@@ -701,7 +884,7 @@ class FixedReceiver:
                                              n_hdr, HEADER_MAPPER)
             hdr_bits = self._decode_block(self._quantize6(h64), HEADER_CODEC,
                                           Header.PACKET_SIZE)
-            header = Header.decode(hdr_bits, check_crc=True)
+            header = Header.decode(hdr_bits, check_crc=True, net_key=self.net_key)
         except DemodError:
             raise
         except Exception as exc:
@@ -780,6 +963,7 @@ class FixedReceiver:
         prev_data_llrs: stored integer LLRs of a previously failed frame
         (chase-combining HARQ); on data-stage failure the raised DemodError
         carries this frame's LLRs in .data_llrs."""
+        samples, _notches = self._excise(samples)
         i_arr, q_arr = self.hilbert.analytic(np.asarray(samples, dtype=np.int64))
 
         det = self._detect(i_arr, q_arr)
@@ -800,7 +984,7 @@ class FixedReceiver:
                                              n_hdr, HEADER_MAPPER)
             hdr_bits = self._decode_block(self._quantize6(h64), HEADER_CODEC,
                                           Header.PACKET_SIZE)
-            header = Header.decode(hdr_bits, check_crc=True)
+            header = Header.decode(hdr_bits, check_crc=True, net_key=self.net_key)
         except DemodError:
             raise
         except Exception as exc:

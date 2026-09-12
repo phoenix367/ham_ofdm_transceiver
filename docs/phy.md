@@ -29,6 +29,14 @@ Header (25 bits): `ver(2) | typ(3) | mod(2) | spd(2) | len(8) | CRC-8`.
 (≤255). Preamble tone and ZC bins carry gain (×√5.75 and ×2) so the whole
 frame has uniform per-sample power — detection sensitivity depends on it.
 
+The header CRC-8 is seeded with `0xFF ^ net_key` (`packets.Header`,
+`Transceiver(net_key=)`, C `packets_set_net_key`, board config key 10).
+Key 0 is the article's CRC. A link frame from another net fails at the
+header, 0.27 s in at NORMAL, before its data block costs the receiver
+anything and before its link-control word (which carries no identity)
+reaches the station; BEACON and BCAST frames are public and a keyed
+receiver still accepts them under key 0.
+
 ## Streaming bursts
 
 `Transceiver.build_stream` / `demod_stream` pay the fixed cost once for a
@@ -225,7 +233,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    IN["audio"] --> HB["Hilbert → analytic signal"]
+    IN["audio"] --> EX["stationary-carrier excision:<br/>bins in excess (>4× block mean)<br/>in ≥85% of blocks → 30 Hz notch"]
+    EX --> HB["Hilbert → analytic signal"]
     HB --> NM["tone detection:<br/>block spectrogram, in-mask vs<br/>out-of-mask power contrast,<br/>CFO shift grid ±4 bins"]
     NM --> RC["residual CFO:<br/>full-block FFT peak +<br/>lag-N phase (unambiguous)"]
     RC --> ZC["ZC matched filter, m=0 locked:<br/>normalized correlation argmax<br/>→ sample-exact timing"]
@@ -237,7 +246,8 @@ flowchart TD
         T2["FFT → pilots → ZF estimate<br/>→ Wiener refine → MMSE eq"] -->
         T3["LLRs = f(Re/Im, EsN0/carrier)<br/>clip ±20"]
     end
-    SY --> CAL["optional: header-fitted α ×<br/>reliability map (llr_recal)"]
+    SY --> IW["interference weighting:<br/>per-carrier × per-symbol<br/>min(1, (median/residual)²)"]
+    IW --> CAL["optional: header-fitted α ×<br/>reliability map (llr_recal)"]
     CAL --> DEC["descramble → deinterleave →<br/>Viterbi / LDPC min-sum"]
     DEC --> CRC{"CRC ok?"}
     CRC -->|yes| PKT["packet"]
@@ -259,6 +269,38 @@ flowchart TD
 - **The `STFOFDMModem` variant** places tones every 8 bins (period-16 comb),
   replacing the FFT-peak residual estimator with 802.11-style
   delay-and-correlate (lag-16 → lag-128), equal performance over ±300 Hz.
+
+### Interference handling
+
+Measured in `experiments/interference.py` (README "Co-channel
+interference"); three mechanisms, each in the float model, the fixed
+model and the C port (the integer twins bit-exact with each other):
+
+- **Stationary-carrier excision** (`FullOFDMModem.excise`, fixed
+  `_find_tones`/`dsp.Notch`, C `rx_find_tones`/`notch_bank_t`, streaming
+  `carrier_track` + one global bank in front of the shared ring). Per
+  detection block the in-band bins above 4× the block's MEAN power are
+  its excess bins (at most 4; the mean, not the median, because a
+  carrier alone on a quiet channel has a median of zero). A bin in
+  excess in ≥85 % of the blocks (the whole recording frame-at-once; the
+  last two tone windows streaming) is a carrier: our own comb is on for
+  one tone field, a stranger's preamble train lights each bin 2/3 of
+  the time, noise never repeats. Its frequency inside the bin is the
+  phase advance of that bin between consecutive blocks (unambiguous
+  over ±half a bin; the strongest bin of an adjacent group is the
+  closest), and a second-order IIR notch 30 Hz wide (r = 0.9921, Q14)
+  removes it from the samples before the Hilbert. The streaming bank
+  releases a notch once its rejected power stays under 1/32 of the
+  input (or under 4 LSB rms) for four 4096-sample ticks.
+- **Interference weighting** (`Transceiver.block_weights`, fixed
+  `WeightAcc`, C `rxd_wacc_t`). Each symbol's decision-directed residual
+  per data carrier, divided by |H| (the noise-plus-interference
+  amplitude in received units; for BPSK the imaginary part is pure
+  noise), is summed per carrier and per symbol over the block; every
+  LLR is scaled by min(1, (median/sum)²) of its carrier and of its
+  symbol, floored at 1/64. Only ever down-weights: the LLR scale already
+  carries the channel gain. The header goes through it too.
+- **Net key** on the header CRC (above).
 
 ## Link modes
 

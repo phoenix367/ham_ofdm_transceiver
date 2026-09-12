@@ -418,7 +418,8 @@ config: rung_ceiling N  win_max N  burst_window N  burst_stream N  anchor N  dia
 
 The settings live on the board and survive a host reattach, so a host
 cache of them lies after one; the reference consoles query instead of
-remembering. (`codecs`, key 9, is not included in the query line.)
+remembering. (`codecs`, key 9, and `net_key`, key 10, are not included in
+the query line.)
 
 **Set** -- payload `key:u8, value:i32le` (`len` ≥ 5):
 
@@ -622,6 +623,7 @@ The meaning of `a..d` depends on `ev` (Appendix B).
 | 6 | `anchor` | 0/1 | AFC frequency reference |
 | 7 | `diag_stream` | 0/1 | default **0**; enables `EVT_DIAG` |
 | 8 | `win_max` | streamed-window ceiling accepted **and** sent | 1..16; declared to the peer; refreshes the caps record when set |
+| 10 | `net_key` | header CRC-8 seed (`0xFF ^ key`) | 0..255; 0 = open (the article's CRC). Frames of other nets fail at the header; beacons and broadcasts stay public. Both stations of a link MUST hold the same key. Not in the query line. |
 | 9 | `codecs` | `CODEC_*` bitmap the **host** can decode | low 8 bits; declared to the peer (§12); default 0 = never said |
 
 Keys 0 and 10–255 are unassigned and MUST be ignored by the device.

@@ -221,6 +221,30 @@ int main(void)
               after == 0 && txs_faulted() && total > 512);
     }
 
+    /* NET KEY (packets.c): a keyed DATA header fails under another key
+     * and under key 0; a public (BEACON) header built under key 0 is
+     * still accepted by a keyed receiver; key 0 is the unchanged CRC */
+    {
+        uint8_t hb[HEADER_BITS], hb0[HEADER_BITS], bb[HEADER_BITS];
+        int ver, typ, mod, spd, len, ok = 1;
+        packets_set_net_key(0);
+        header_encode(1, PKT_TYP_DATA, 0, 0, 252, hb0);
+        header_encode(1, PKT_TYP_BEACON, 0, 0, 90, bb);
+        packets_set_net_key(0x5A);
+        header_encode(1, PKT_TYP_DATA, 0, 0, 252, hb);
+        ok &= memcmp(hb, hb0, 17) == 0 && memcmp(hb + 17, hb0 + 17, 8) != 0;
+        ok &= header_decode(hb, &ver, &typ, &mod, &spd, &len) == 0 && len == 252;
+        ok &= header_decode(hb0, &ver, &typ, &mod, &spd, &len) != 0; /* foreign */
+        ok &= header_decode(bb, &ver, &typ, &mod, &spd, &len) == 0
+              && typ == PKT_TYP_BEACON;                              /* public */
+        packets_set_net_key(0x3C);
+        ok &= header_decode(hb, &ver, &typ, &mod, &spd, &len) != 0;   /* other net */
+        packets_set_net_key(0);
+        ok &= header_decode(hb, &ver, &typ, &mod, &spd, &len) != 0;   /* open rx */
+        ok &= header_decode(hb0, &ver, &typ, &mod, &spd, &len) == 0;
+        check("net key: keyed header round-trips, foreign/other-net fail, beacon public", ok);
+    }
+
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

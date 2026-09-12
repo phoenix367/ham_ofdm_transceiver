@@ -220,7 +220,7 @@ static int coarse_window(rxd_t *r, const samp_t *si, const samp_t *sq,
  * llr receives capacity = N_DATA_CARRIERS * mu values; returns the BFP exp */
 int rxd_demod_symbol(rxd_t *r, const samp_t *seg_i, const samp_t *seg_q,
                      int pos, int64_t cfo_word, int mu,
-                     const int *window, int win_n, llr_t *llr)
+                     const int *window, int win_n, llr_t *llr, int64_t *rho)
 {
     static int win_buf[MAX_WINDOW];
     int64_t spec_re[FFT_BINS], spec_im[FFT_BINS];
@@ -266,27 +266,42 @@ int rxd_demod_symbol(rxd_t *r, const samp_t *seg_i, const samp_t *seg_q,
 
     {
         int64_t li[N_DATA_CARRIERS], lq[N_DATA_CARRIERS];
+        int64_t h2[N_DATA_CARRIERS], res[N_DATA_CARRIERS];
         for (k = 0; k < N_DATA_CARRIERS; k++) {
             int ci = CHANNEL_IDX[DATA_LOCAL_IDX[k]];
             int64_t yr = spec_re[ci], yi = spec_im[ci];
             int64_t hr = h_re[DATA_LOCAL_IDX[k]], hi2 = h_im[DATA_LOCAL_IDX[k]];
             li[k] = yr * hr + yi * hi2;
             lq[k] = yi * hr - yr * hi2;
+            h2[k] = hr * hr + hi2 * hi2;
         }
         if (mu == 1) {
-            for (k = 0; k < N_DATA_CARRIERS; k++)
-                llr[k] = li[k];
-        } else if (mu == 2) {
             for (k = 0; k < N_DATA_CARRIERS; k++) {
+                llr[k] = li[k];
+                res[k] = lq[k] < 0 ? -lq[k] : lq[k];   /* Im is pure noise */
+            }
+        } else if (mu == 2) {
+            int64_t ssum = 0, h2sum = 0, a_q8;
+            for (k = 0; k < N_DATA_CARRIERS; k++) {
+                ssum += (li[k] < 0 ? -li[k] : li[k]) +
+                        (lq[k] < 0 ? -lq[k] : lq[k]);
+                h2sum += h2[k];
+            }
+            if (h2sum < 1)
+                h2sum = 1;
+            a_q8 = (ssum << 8) / (2 * h2sum);   /* expected |li| = a*|H|^2 */
+            for (k = 0; k < N_DATA_CARRIERS; k++) {
+                int64_t ref = (h2[k] * a_q8) >> 8;
+                int64_t ai = li[k] < 0 ? -li[k] : li[k];
+                int64_t aq = lq[k] < 0 ? -lq[k] : lq[k];
+                int64_t di = ai - ref, dq = aq - ref;
                 llr[2 * k] = li[k];
                 llr[2 * k + 1] = lq[k];
+                res[k] = (di < 0 ? -di : di) + (dq < 0 ? -dq : dq);
             }
         } else { /* 16-QAM: sign bits + inner bits vs per-symbol amp ref */
             int64_t ssum = 0, h2sum = 0, ratio_q8;
-            int64_t h2[N_DATA_CARRIERS];
             for (k = 0; k < N_DATA_CARRIERS; k++) {
-                int64_t hr = h_re[DATA_LOCAL_IDX[k]], hi2 = h_im[DATA_LOCAL_IDX[k]];
-                h2[k] = hr * hr + hi2 * hi2;
                 ssum += (li[k] < 0 ? -li[k] : li[k]) +
                         (lq[k] < 0 ? -lq[k] : lq[k]);
                 h2sum += h2[k];
@@ -298,14 +313,119 @@ int rxd_demod_symbol(rxd_t *r, const samp_t *seg_i, const samp_t *seg_q,
                 int64_t t = (h2[k] * ratio_q8) >> 8;
                 int64_t ai = li[k] < 0 ? -li[k] : li[k];
                 int64_t aq = lq[k] < 0 ? -lq[k] : lq[k];
+                int64_t half = t >> 1, d1, d2, ri, rq;
                 llr[4 * k] = li[k];
                 llr[4 * k + 1] = t - ai;
                 llr[4 * k + 2] = lq[k];
                 llr[4 * k + 3] = t - aq;
+                /* nearest 16-QAM level: a|H|^2 (= t/2) or 3a|H|^2 */
+                d1 = ai - half; d1 = d1 < 0 ? -d1 : d1;
+                d2 = ai - (t + half); d2 = d2 < 0 ? -d2 : d2;
+                ri = d1 < d2 ? d1 : d2;
+                d1 = aq - half; d1 = d1 < 0 ? -d1 : d1;
+                d2 = aq - (t + half); d2 = d2 < 0 ? -d2 : d2;
+                rq = d1 < d2 ? d1 : d2;
+                res[k] = ri + rq;
+            }
+        }
+        if (rho) {
+            for (k = 0; k < N_DATA_CARRIERS; k++) {
+                int64_t isq = isqrt_i64(h2[k]);
+                rho[k] = res[k] / (isq < 1 ? 1 : isq);
             }
         }
     }
     return exp;
+}
+
+/* --- interference weighting (rx_internal.h rxd_wacc_t) ----------------- */
+
+void rxd_wacc_reset(rxd_wacc_t *w)
+{
+    w->n = 0;
+    w->acc_e = 0;
+}
+
+void rxd_wacc_add(rxd_wacc_t *w, const int64_t *rho, int exp)
+{
+    int64_t s = 0;
+    int k;
+    for (k = 0; k < N_DATA_CARRIERS; k++)
+        s += rho[k];
+    if (w->n < MAX_SYMS) {
+        w->sym[w->n] = s;
+        w->sym_e[w->n] = exp;
+    }
+    if (w->n == 0) {
+        for (k = 0; k < N_DATA_CARRIERS; k++)
+            w->acc[k] = rho[k];
+        w->acc_e = exp;
+    } else if (exp < w->acc_e) {
+        int d = w->acc_e - exp;
+        for (k = 0; k < N_DATA_CARRIERS; k++)
+            w->acc[k] = (w->acc[k] >> d) + rho[k];
+        w->acc_e = exp;
+    } else {
+        int d = exp - w->acc_e;
+        for (k = 0; k < N_DATA_CARRIERS; k++)
+            w->acc[k] += rho[k] >> d;
+    }
+    w->n++;
+}
+
+static int64_t wacc_median(const int64_t *v, int n)
+{
+    static int64_t buf[MAX_SYMS];
+    int i, j;
+    for (i = 0; i < n; i++) {   /* insertion sort: n <= MAX_SYMS, rare */
+        int64_t x = v[i];
+        for (j = i; j > 0 && buf[j - 1] > x; j--)
+            buf[j] = buf[j - 1];
+        buf[j] = x;
+    }
+    return buf[n / 2];
+}
+
+static int64_t wacc_w(int64_t med, int64_t v)
+{
+    int64_t q, w;
+    if (v <= 0)
+        return 1 << 15;
+    q = (med << 15) / v;
+    if (q >= (1 << 15))
+        return 1 << 15;
+    w = (q * q) >> 15;
+    return w < 512 ? 512 : w;
+}
+
+void rxd_wacc_apply(const rxd_wacc_t *w, llr_t *arr, int mu)
+{
+    static int64_t m_s[MAX_SYMS];
+    int64_t w_k[N_DATA_CARRIERS], med_k, med_s;
+    int n = w->n < MAX_SYMS ? w->n : MAX_SYMS, s, k, j, e_min;
+    int cap = N_DATA_CARRIERS * mu;
+    if (n == 0)
+        return;
+    e_min = w->sym_e[0];
+    for (s = 1; s < n; s++)
+        if (w->sym_e[s] < e_min)
+            e_min = w->sym_e[s];
+    for (s = 0; s < n; s++)
+        m_s[s] = w->sym[s] >> (w->sym_e[s] - e_min);
+    med_k = wacc_median(w->acc, N_DATA_CARRIERS);
+    med_s = wacc_median(m_s, n);
+    for (k = 0; k < N_DATA_CARRIERS; k++)
+        w_k[k] = wacc_w(med_k, w->acc[k]);
+    for (s = 0; s < n; s++) {
+        int64_t ws = wacc_w(med_s, m_s[s]);
+        for (k = 0; k < N_DATA_CARRIERS; k++) {
+            int64_t wk = (ws * w_k[k]) >> 15;
+            for (j = 0; j < mu; j++) {
+                llr_t *p = &arr[s * cap + k * mu + j];
+                *p = (llr_t)rshift_round((int64_t)*p * wk, 15);
+            }
+        }
+    }
 }
 
 /* n_syms symbols with the slew-limited tracker; exponent-aligned stream */
@@ -316,7 +436,10 @@ static int demod_block(rxd_t *r, int start, int64_t cfo_word, int n_syms,
     int cap = N_DATA_CARRIERS * mu;
     int win_buf[5];
     int s, k, e_min;
+    static rxd_wacc_t wacc;
+    int64_t rho[N_DATA_CARRIERS];
 
+    rxd_wacc_reset(&wacc);
     for (s = 0; s < n_syms; s++) {
         const int *window = 0;
         int win_n = 0;
@@ -331,7 +454,8 @@ static int demod_block(rxd_t *r, int start, int64_t cfo_word, int n_syms,
         {
             int p = start + s * r->symbol_len;
             exps[s] = rxd_demod_symbol(r, g_i + p, g_q + p, p, cfo_word, mu,
-                                       window, win_n, arr + s * cap);
+                                       window, win_n, arr + s * cap, rho);
+            rxd_wacc_add(&wacc, rho, exps[s]);
         }
     }
     e_min = exps[0];
@@ -349,6 +473,7 @@ static int demod_block(rxd_t *r, int start, int64_t cfo_word, int n_syms,
         for (k = 0; k < cap; k++)
             arr[s * cap + k] >>= sh;
     }
+    rxd_wacc_apply(&wacc, arr, mu);
     return 2 * e_min; /* scale_log2, for the calibrate path later */
 }
 
@@ -677,7 +802,7 @@ static llr_t *const comb = (llr_t *)(rx_arena + 3 * MAX_LLRS * sizeof(llr_t));
 
 static void fill_analytic(rxd_t *r, const int16_t *samples, int n_samples)
 {
-    hilbert_analytic(samples, n_samples, g_i, g_q);
+    rx_excise_analytic(r->mode, samples, n_samples, g_i, g_q);
     /* tail pad tolerates a small positive timing slip, as the model */
     memset(g_i + n_samples, 0, sizeof(int64_t) * (size_t)r->symbol_len);
     memset(g_q + n_samples, 0, sizeof(int64_t) * (size_t)r->symbol_len);
@@ -773,7 +898,7 @@ int rxd_receive_burst(rxd_t *r, const int16_t *samples, int n_samples,
 
     if (n_blocks < 1)
         return -1;
-    hilbert_analytic(samples, n_samples, g_i, g_q);
+    rx_excise_analytic(r->mode, samples, n_samples, g_i, g_q);
     if (rx_detect(r->mode, g_i, g_q, n_samples, &start, &cfo_word) != 0)
         return -4;
     n_total = n_samples + r->symbol_len;
@@ -853,7 +978,7 @@ int rxd_receive(rxd_t *r, const int16_t *samples, int n_samples,
     int64_t cfo_word;
     arena_claim(ARENA_RX); /* half-duplex arena: see arena.h */
 
-    hilbert_analytic(samples, n_samples, g_i, g_q);
+    rx_excise_analytic(r->mode, samples, n_samples, g_i, g_q);
     if (rx_detect(r->mode, g_i, g_q, n_samples, &start, &cfo_word) != 0)
         return -4;
     memset(g_i + n_samples, 0, sizeof(int64_t) * (size_t)r->symbol_len);
