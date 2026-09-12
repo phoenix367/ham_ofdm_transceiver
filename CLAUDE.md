@@ -30,6 +30,18 @@ Everything runs through the local venv (`./venv/bin/python`); install deps with
   SSB voice / CW carrier vs ISR) on the float receiver and on the C
   streaming receiver (`make -C cport interfrx` builds its harness);
   ~22 min at 60 frames/point, `--quick` is a 1-minute regression check.
+- `./venv/bin/python host/board_bench.py [--quick] [--voice-start]
+  [--scenarios a,b,...]` — the two-board INTEGRATION BENCHMARK: drives
+  both boards of the stand through warm-up, messages (each way and
+  bidirectional), bulk, files (each way, both at once, with chat during
+  the transfer), text and file broadcasts (with a reply queued during
+  one), push-to-talk speech each way over the webvoice server, and a
+  stale-link recovery; ~17 min for the reference record
+  (`results/board_bench.json` / `.md`), ~5 min with `--quick`. Needs both
+  boards and no other console holding them; speech needs
+  `--voice-start` (spawns the server from the lscodec venv) or a
+  running server (`--voice-url`, in which case speech runs last and
+  keeps the boards). `--merge` re-runs a subset into the record.
 - `./venv/bin/python experiments/fec_comparison.py`,
   `experiments/viterbi_recal.py`, `experiments/ldpc_recal.py`,
   `experiments/llr_shape.py`, `experiments/extreme_recal.py`,

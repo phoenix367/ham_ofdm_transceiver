@@ -70,6 +70,43 @@ Configuration and diagnostics:
 - Socket mode adds channel-side knobs (`stream on|off`, `window <n>`,
   `compress on|off`, `tune <hz>`) — see `help` in the console.
 
+## Scripted: the two-board benchmark
+
+`host/board_bench.py` is two `board_console.py` consoles driven by a
+script instead of a keyboard (the `Console` class, subclassed to record
+instead of print, one thread per board owning its USB handle), plus the
+webvoice server for speech. It runs the traffic an operator generates,
+in both directions and in combination, and records what each cost:
+
+| scenario | what is measured |
+|---|---|
+| `attach` | INFO, initial rung / SNR / peer state / die temperature |
+| `warmup` | a bulk primer each way: seconds to delivery and to the capability handshake, rung and SNR after |
+| `message` | interactive messages A→B then B→A, latency each |
+| `chat` | messages queued on both boards at once: arrival times |
+| `bulk` | bulk-queue test patterns each way: latency, B/s |
+| `file` | a file each way: byte-exact, B/s, tx frames, timeouts, retransmissions |
+| `file_bidir` | a file each way at the same time |
+| `file_chat` | a file one way while the receiver chats back |
+| `bcast` / `bcastfile` | text / file broadcast each way: frames ok / lost, bytes stored |
+| `bcast_msg` | a reply queued at the receiver during a broadcast: when it arrives |
+| `speech` | push-to-talk each way: warm-up, first audio out, bytes lost, frames ok / lost |
+| `speech_file` | a file right after the speech |
+| `stale` | idle past `RX_STALE_S`, then one message: rung decay and recovery |
+
+Every scenario records ok/failed and its metrics; a failure does not
+stop the run. Output: `results/board_bench.json` (metrics plus both
+consoles' logs) and `results/board_bench.md` (one line per scenario);
+`--quick` for small sizes, `--scenarios` for a subset, `--merge` to
+re-run a subset into the existing record. Received files, logs and the
+speech source live in `results/board_bench_work/` (ignored by git).
+
+Two things the numbers mean: a message queued during a broadcast
+arrives ~18 s after the broadcast ends (the receiver's transmitter is
+held for `BC_RX_HOLD_S` past the last group), and a cold link (both
+boards decayed to rung 0) takes ~55 s to warm because the primer and
+its acknowledgement go out as EXTREME frames.
+
 ## Files produced
 
 | file | source |

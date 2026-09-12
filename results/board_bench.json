@@ -1,0 +1,1531 @@
+{
+ "date": "2026-09-13 01:51",
+ "boards": {
+  "A": "240041000551333438363436",
+  "B": "320047000851333438363436"
+ },
+ "quick": false,
+ "args": {
+  "a": "240041000551333438363436",
+  "b": "320047000851333438363436",
+  "scenarios": "attach,warmup,message,chat,bulk,file,file_bidir,file_chat,bcast,bcastfile,bcast_msg,speech,speech_file,stale",
+  "quick": false,
+  "file_bytes": 6000,
+  "bcast_bytes": 4096,
+  "bulk_bytes": 200,
+  "n_msgs": 3,
+  "n_bulk": 2,
+  "chat_gap": 8.0,
+  "stale_secs": 120.0,
+  "t_msg": 180.0,
+  "t_bcast": 240.0,
+  "t_file_base": 120.0,
+  "t_file_rate": 15.0,
+  "voice_url": "http://127.0.0.1:8080",
+  "voice_start": true,
+  "voice_python": "/mnt/data/lscodec/adapter/venv/bin/python",
+  "voice_src": "/home/ivan/projects/ofdm_transceiver_proto/results/board_bench_work/speech_src.wav",
+  "voice_secs": 40.0,
+  "workdir": "/home/ivan/projects/ofdm_transceiver_proto/results/board_bench_work",
+  "out": null,
+  "merge": false,
+  "verbose": false
+ },
+ "total_seconds": 887.1,
+ "scenarios": {
+  "attach": {
+   "ok": true,
+   "seconds": 1.5,
+   "result": {
+    "A": {
+     "serial": "240041000551333438363436",
+     "fw": "2.0",
+     "msg_max": 3328,
+     "tx": 140,
+     "rx": 290,
+     "timeouts": 3,
+     "retransmissions": 0,
+     "rung": 11,
+     "rung_now": 10,
+     "snr_db": -99.0,
+     "peer_state": 3,
+     "peer_win_max": 16,
+     "temp_c": 46.1
+    },
+    "B": {
+     "serial": "320047000851333438363436",
+     "fw": "2.0",
+     "msg_max": 3328,
+     "tx": 142,
+     "rx": 341,
+     "timeouts": 8,
+     "retransmissions": 5,
+     "rung": 11,
+     "rung_now": 10,
+     "snr_db": -99.0,
+     "peer_state": 3,
+     "peer_win_max": 16,
+     "temp_c": 44.3
+    }
+   },
+   "error": null,
+   "summary": "A: rung 10 SNR -- (none in 60 s) peer_state 3 die 46.1 C; B: rung 10 SNR -- (none in 60 s) peer_state 3 die 44.3 C"
+  },
+  "warmup": {
+   "ok": true,
+   "seconds": 10.2,
+   "result": {
+    "A->B": {
+     "rung_before": 10,
+     "peer_state_before": 3,
+     "deliver_s": 3.2,
+     "handshake_s": 5.2,
+     "rung_after": 12,
+     "snr_db": 24.7,
+     "peer_win": 16,
+     "counters": {
+      "A": {
+       "tx": 1,
+       "rx": 1,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 9,
+       "rung_now": 12,
+       "snr_db": 24.69921875,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.9
+      },
+      "B": {
+       "tx": 1,
+       "rx": 1,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 5,
+       "rung_now": 6,
+       "snr_db": 22.8984375,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.4
+      }
+     }
+    },
+    "B->A": {
+     "rung_before": 6,
+     "peer_state_before": 3,
+     "deliver_s": 1.4,
+     "handshake_s": 3.4,
+     "rung_after": 12,
+     "snr_db": 22.5,
+     "peer_win": 16,
+     "counters": {
+      "A": {
+       "tx": 1,
+       "rx": 1,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.8984375,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.8
+      },
+      "B": {
+       "tx": 1,
+       "rx": 1,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 6,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.6
+      }
+     }
+    }
+   },
+   "error": null,
+   "summary": "A->B: 3.2 s, handshake 5.2 s, rung 12, SNR 24.7 dB; B->A: 1.4 s, handshake 3.4 s, rung 12, SNR 22.5 dB"
+  },
+  "message": {
+   "ok": true,
+   "seconds": 23.8,
+   "result": {
+    "A->B": {
+     "latency_s": [
+      1.0,
+      1.1,
+      1.0
+     ],
+     "mean_s": 1.0,
+     "counters": {
+      "A": {
+       "tx": 3,
+       "rx": 3,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.6
+      },
+      "B": {
+       "tx": 3,
+       "rx": 3,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.1
+      }
+     }
+    },
+    "B->A": {
+     "latency_s": [
+      1.1,
+      1.1,
+      1.0
+     ],
+     "mean_s": 1.1,
+     "counters": {
+      "A": {
+       "tx": 3,
+       "rx": 3,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.8
+      },
+      "B": {
+       "tx": 3,
+       "rx": 3,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.3
+      }
+     }
+    }
+   },
+   "error": null,
+   "summary": "A->B: [1.0, 1.1, 1.0] s; B->A: [1.1, 1.1, 1.0] s"
+  },
+  "chat": {
+   "ok": true,
+   "seconds": 10.0,
+   "result": {
+    "all_delivered_s": 5.2,
+    "arrival_s": {
+     "A->B": [
+      0.9,
+      2.7,
+      4.5
+     ],
+     "B->A": [
+      1.8,
+      3.6,
+      5.5
+     ]
+    },
+    "counters": {
+     "A": {
+      "tx": 4,
+      "rx": 3,
+      "timeouts": 0,
+      "retransmissions": 0,
+      "rung": 11,
+      "rung_now": 12,
+      "snr_db": 20.5078125,
+      "peer_state": 3,
+      "peer_win_max": 16,
+      "temp_c": 45.7
+     },
+     "B": {
+      "tx": 3,
+      "rx": 4,
+      "timeouts": 0,
+      "retransmissions": 0,
+      "rung": 11,
+      "rung_now": 12,
+      "snr_db": 20.65234375,
+      "peer_state": 3,
+      "peer_win_max": 16,
+      "temp_c": 44.2
+     }
+    }
+   },
+   "error": null,
+   "summary": "all 5.2 s, arrivals {'A->B': [0.9, 2.7, 4.5], 'B->A': [1.8, 3.6, 5.5]}"
+  },
+  "bulk": {
+   "ok": true,
+   "seconds": 17.4,
+   "result": {
+    "A->B": {
+     "bytes": 200,
+     "latency_s": [
+      2.4,
+      2.5
+     ],
+     "bytes_per_s": 81.6,
+     "counters": {
+      "A": {
+       "tx": 2,
+       "rx": 2,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 12,
+       "rung_now": 12,
+       "snr_db": 20.5078125,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.5
+      },
+      "B": {
+       "tx": 2,
+       "rx": 2,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 21.078125,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.3
+      }
+     }
+    },
+    "B->A": {
+     "bytes": 200,
+     "latency_s": [
+      2.5,
+      2.5
+     ],
+     "bytes_per_s": 80.0,
+     "counters": {
+      "A": {
+       "tx": 2,
+       "rx": 2,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.6
+      },
+      "B": {
+       "tx": 2,
+       "rx": 2,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 12,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.3
+      }
+     }
+    }
+   },
+   "error": null,
+   "summary": "A->B: [2.4, 2.5] s; B->A: [2.5, 2.5] s"
+  },
+  "file": {
+   "ok": true,
+   "seconds": 111.5,
+   "result": {
+    "A->B": {
+     "seconds": 53.4,
+     "bytes": 6000,
+     "on_air": 6000,
+     "exact": true,
+     "bytes_per_s": 112.4,
+     "counters": {
+      "A": {
+       "tx": 3,
+       "rx": 3,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 12,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.7
+      },
+      "B": {
+       "tx": 3,
+       "rx": 31,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.4
+      }
+     },
+     "rung": 12
+    },
+    "B->A": {
+     "seconds": 52.6,
+     "bytes": 6000,
+     "on_air": 6000,
+     "exact": true,
+     "bytes_per_s": 114.0,
+     "counters": {
+      "A": {
+       "tx": 3,
+       "rx": 31,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.8
+      },
+      "B": {
+       "tx": 3,
+       "rx": 3,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 12,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.5
+      }
+     },
+     "rung": 12
+    }
+   },
+   "error": null,
+   "summary": "A->B: 6000 B in 53.4 s (112.4 B/s), exact True, tx 3 to 0 retx 0; B->A: 6000 B in 52.6 s (114.0 B/s), exact True, tx 3 to 0 retx 0"
+  },
+  "file_bidir": {
+   "ok": true,
+   "seconds": 91.1,
+   "result": {
+    "bytes_each": 3000,
+    "both_done_s": 87.5,
+    "aggregate_bytes_per_s": 68.6,
+    "A->B": {
+     "seconds": 87.5,
+     "exact": true
+    },
+    "B->A": {
+     "seconds": 60.2,
+     "exact": true
+    },
+    "counters": {
+     "A": {
+      "tx": 5,
+      "rx": 18,
+      "timeouts": 1,
+      "retransmissions": 0,
+      "rung": 12,
+      "rung_now": 12,
+      "snr_db": 22.5,
+      "peer_state": 3,
+      "peer_win_max": 16,
+      "temp_c": 45.7
+     },
+     "B": {
+      "tx": 5,
+      "rx": 18,
+      "timeouts": 1,
+      "retransmissions": 0,
+      "rung": 11,
+      "rung_now": 12,
+      "snr_db": 22.5,
+      "peer_state": 3,
+      "peer_win_max": 16,
+      "temp_c": 44.3
+     }
+    }
+   },
+   "error": null,
+   "summary": "3000 B each way, both in 87.5 s (68.6 B/s aggregate)"
+  },
+  "file_chat": {
+   "ok": true,
+   "seconds": 73.1,
+   "result": {
+    "file A->B, chat B->A": {
+     "file_s": 26.4,
+     "bytes": 3000,
+     "exact": true,
+     "bytes_per_s": 113.5,
+     "chat_sent": 3,
+     "chat_latency_s": [
+      25.1,
+      18.7,
+      12.6
+     ],
+     "chat_all_delivered": true,
+     "counters": {
+      "A": {
+       "tx": 5,
+       "rx": 5,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.5
+      },
+      "B": {
+       "tx": 5,
+       "rx": 19,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.4
+      }
+     }
+    },
+    "file B->A, chat A->B": {
+     "file_s": 28.4,
+     "bytes": 3000,
+     "exact": true,
+     "bytes_per_s": 105.7,
+     "chat_sent": 3,
+     "chat_latency_s": [
+      26.9,
+      20.6,
+      14.5
+     ],
+     "chat_all_delivered": true,
+     "counters": {
+      "A": {
+       "tx": 6,
+       "rx": 20,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.7
+      },
+      "B": {
+       "tx": 6,
+       "rx": 6,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.3
+      }
+     }
+    }
+   },
+   "error": null,
+   "summary": "file A->B, chat B->A: file 26.4 s (113.5 B/s), chat latency [25.1, 18.7, 12.6]; file B->A, chat A->B: file 28.4 s (105.7 B/s), chat latency [26.9, 20.6, 14.5]"
+  },
+  "bcast": {
+   "ok": true,
+   "seconds": 19.2,
+   "result": {
+    "A->B": {
+     "seconds": 1.8,
+     "first_group_s": 1.0,
+     "frames_ok": 4,
+     "frames_lost": 0,
+     "ptype": 0,
+     "exact": true,
+     "rung_logged": [
+      "board: broadcast: 86 B at rung 12 (NORMAL), 4 frame(s) per group, 1.7 s each, ~2 s total"
+     ],
+     "counters": {
+      "A": {
+       "tx": 0,
+       "rx": 0,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.9
+      },
+      "B": {
+       "tx": 0,
+       "rx": 0,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.2
+      }
+     }
+    },
+    "B->A": {
+     "seconds": 11.7,
+     "first_group_s": 10.9,
+     "frames_ok": 4,
+     "frames_lost": 0,
+     "ptype": 0,
+     "exact": true,
+     "rung_logged": [
+      "board: broadcast: 86 B at rung 12 (NORMAL), 4 frame(s) per group, 1.7 s each, ~2 s total"
+     ],
+     "counters": {
+      "A": {
+       "tx": 0,
+       "rx": 0,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.6
+      },
+      "B": {
+       "tx": 0,
+       "rx": 0,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.4
+      }
+     }
+    }
+   },
+   "error": null,
+   "summary": "A->B: 1.8 s, 4 ok / 0 lost, exact True; B->A: 11.7 s, 4 ok / 0 lost, exact True"
+  },
+  "bcastfile": {
+   "ok": true,
+   "seconds": 191.7,
+   "result": {
+    "A->B": {
+     "seconds": 92.1,
+     "first_group_s": 10.5,
+     "frames_ok": 175,
+     "frames_lost": 0,
+     "ptype": 15,
+     "bytes_sent": 4096,
+     "bytes_stored": 4096,
+     "exact": true,
+     "bytes_per_s": 44.5,
+     "counters": {
+      "A": {
+       "tx": 0,
+       "rx": 0,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 11,
+       "snr_db": -99.0,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.9
+      },
+      "B": {
+       "tx": 0,
+       "rx": 0,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 11,
+       "snr_db": -99.0,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.6
+      }
+     }
+    },
+    "B->A": {
+     "seconds": 94.1,
+     "first_group_s": 12.5,
+     "frames_ok": 175,
+     "frames_lost": 0,
+     "ptype": 15,
+     "bytes_sent": 4096,
+     "bytes_stored": 4096,
+     "exact": true,
+     "bytes_per_s": 43.5,
+     "counters": {
+      "A": {
+       "tx": 1,
+       "rx": 1,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 9,
+       "rung_now": 10,
+       "snr_db": -99.0,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.8
+      },
+      "B": {
+       "tx": 1,
+       "rx": 1,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 10,
+       "rung_now": 12,
+       "snr_db": -99.0,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.0
+      }
+     }
+    }
+   },
+   "error": null,
+   "summary": "A->B: 4096/4096 B in 92.1 s, 175 ok / 0 lost; B->A: 4096/4096 B in 94.1 s, 175 ok / 0 lost"
+  },
+  "bcast_msg": {
+   "ok": true,
+   "seconds": 211.2,
+   "result": {
+    "bcast A->B, msg B->A": {
+     "bcast_s": 92.8,
+     "frames_ok": 174,
+     "frames_lost": 0,
+     "exact": true,
+     "msg_queued_at_s": 9.5,
+     "msg_latency_s": 101.4,
+     "msg_after_bcast_end_s": 18.1,
+     "counters": {
+      "A": {
+       "tx": 2,
+       "rx": 2,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.3
+      },
+      "B": {
+       "tx": 2,
+       "rx": 2,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.4
+      }
+     }
+    },
+    "bcast B->A, msg A->B": {
+     "bcast_s": 80.5,
+     "frames_ok": 175,
+     "frames_lost": 0,
+     "exact": true,
+     "msg_queued_at_s": 1.0,
+     "msg_latency_s": 97.8,
+     "msg_after_bcast_end_s": 18.3,
+     "counters": {
+      "A": {
+       "tx": 2,
+       "rx": 2,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.8
+      },
+      "B": {
+       "tx": 2,
+       "rx": 2,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 44.4
+      }
+     }
+    }
+   },
+   "error": null,
+   "summary": "bcast A->B, msg B->A: bcast 92.8 s (0 lost), reply queued at 9.5 s arrived 18.1 s after the end; bcast B->A, msg A->B: bcast 80.5 s (0 lost), reply queued at 1.0 s arrived 18.3 s after the end"
+  },
+  "speech": {
+   "ok": true,
+   "seconds": 129.3,
+   "result": {
+    "source": "speech_src.wav",
+    "seconds": 40.0,
+    "A->B": {
+     "ok": true,
+     "warm_s": 0.99,
+     "rung": 12,
+     "talk_s": 43.9,
+     "t_first_tx": 0.79,
+     "t_first_rx": 1.71,
+     "t_first_out": 3.04,
+     "rx_seconds": 41.12,
+     "tx_bytes": 1285,
+     "rx_bytes": 1285,
+     "loss_pct": 0.0,
+     "frames_ok": 70,
+     "frames_lost": 0,
+     "groups": 1,
+     "file": "/home/ivan/voice_rx/rx_20260913_015337.wav",
+     "reason": null
+    },
+    "B->A": {
+     "ok": true,
+     "warm_s": 6.74,
+     "rung": 12,
+     "talk_s": 45.9,
+     "t_first_tx": 0.76,
+     "t_first_rx": 1.9,
+     "t_first_out": 3.02,
+     "rx_seconds": 40.16,
+     "tx_bytes": 1285,
+     "rx_bytes": 1255,
+     "loss_pct": 2.3,
+     "frames_ok": 65,
+     "frames_lost": 2,
+     "groups": 1,
+     "file": "/home/ivan/voice_rx/rx_20260913_015436.wav",
+     "reason": null
+    }
+   },
+   "error": null,
+   "summary": "A->B: warm 0.99 s, first audio out 3.04 s, 41.12 s received, 0.0 % lost, 70 ok / 0 lost; B->A: warm 6.74 s, first audio out 3.02 s, 40.16 s received, 2.3 % lost, 65 ok / 2 lost",
+   "date": "2026-09-13 01:58"
+  },
+  "speech_file": {
+   "ok": true,
+   "seconds": 108.6,
+   "result": {
+    "A->B": {
+     "seconds": 105.1,
+     "bytes": 6000,
+     "on_air": 6000,
+     "exact": true,
+     "bytes_per_s": 57.1,
+     "counters": {
+      "A": {
+       "tx": 7,
+       "rx": 5,
+       "timeouts": 2,
+       "retransmissions": 0,
+       "rung": 12,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 45.3
+      },
+      "B": {
+       "tx": 5,
+       "rx": 31,
+       "timeouts": 0,
+       "retransmissions": 0,
+       "rung": 11,
+       "rung_now": 12,
+       "snr_db": 22.5,
+       "peer_state": 3,
+       "peer_win_max": 16,
+       "temp_c": 43.8
+      }
+     },
+     "rung": 12
+    }
+   },
+   "error": null,
+   "summary": "A->B: 105.1 s (57.1 B/s)",
+   "date": "2026-09-13 01:58"
+  },
+  "stale": {
+   "ok": true,
+   "seconds": 126.0,
+   "result": {
+    "idle_s": 120.0,
+    "rung_before_idle": {
+     "A": 12,
+     "B": 12
+    },
+    "rung_after_idle": {
+     "A": 11,
+     "B": 11
+    },
+    "message_latency_s": 1.0,
+    "rung_after_message": {
+     "A": 12,
+     "B": 10
+    },
+    "counters": {
+     "A": {
+      "tx": 1,
+      "rx": 1,
+      "timeouts": 0,
+      "retransmissions": 0,
+      "rung": 10,
+      "rung_now": 12,
+      "snr_db": 22.8984375,
+      "peer_state": 3,
+      "peer_win_max": 16,
+      "temp_c": 45.2
+     },
+     "B": {
+      "tx": 1,
+      "rx": 1,
+      "timeouts": 0,
+      "retransmissions": 0,
+      "rung": 9,
+      "rung_now": 10,
+      "snr_db": 22.5,
+      "peer_state": 3,
+      "peer_win_max": 16,
+      "temp_c": 44.2
+     }
+    }
+   },
+   "error": null,
+   "summary": "idle 120.0 s, rung {'A': 12, 'B': 12} -> {'A': 11, 'B': 11}, message 1.0 s, rung after {'A': 12, 'B': 10}",
+   "date": "2026-09-13 01:58"
+  }
+ },
+ "console_logs": {
+  "A": [
+   [
+    130.8,
+    ">> file 'sfAB.bin' (6000 bytes), 2 part(s) of <= 3181 B, pacing against the board's queue"
+   ],
+   [
+    130.8,
+    "file 'sfAB.bin': all 2 part(s) handed to the board"
+   ],
+   [
+    134.5,
+    ". burst window 16 of 16 (ceiling), 16 frag(s), 29 s air"
+   ],
+   [
+    134.5,
+    ". burst engage: 16 frag(s) x 200 B, transfer 1"
+   ],
+   [
+    134.5,
+    ". burst frag 0 +ack-request, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 1, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 2, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 3, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 4, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 5, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 6, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 7, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 8, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 9, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 10, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 11, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 12, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 13, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 14, window left 16"
+   ],
+   [
+    134.5,
+    ". burst frag 15 +ack-request, window left 16"
+   ],
+   [
+    134.5,
+    ". rung 10 -> 11 (losses 0, cap -1)"
+   ],
+   [
+    134.5,
+    ". STREAMED 16 block(s) behind one preamble, 357440 samples (29.8 s air), resync 4"
+   ],
+   [
+    134.5,
+    ". tx: rung 11, ext-data frame, flags burst-data, 203 B payload"
+   ],
+   [
+    164.3,
+    ". reply timer: srtt 153 ms, var 157 ms -> budget 6556 ms (air term 773 ms)"
+   ],
+   [
+    170.8,
+    ". TIMEOUT at rung 11 -> 0 consecutive loss(es) (first burst-ack miss, forgiven)"
+   ],
+   [
+    170.8,
+    ". burst timeout -> 1-frame probe (transfer 1)"
+   ],
+   [
+    172.2,
+    ". rung 11 -> 10 (losses 0, cap -1)"
+   ],
+   [
+    172.2,
+    ". burst frag 0 +ack-request, window left 1"
+   ],
+   [
+    172.2,
+    ". tx: rung 10, ext-data frame, flags burst-data, 203 B payload"
+   ],
+   [
+    175.2,
+    ". reply timer: srtt 153 ms, var 157 ms -> budget 2340 ms (air term 773 ms)"
+   ],
+   [
+    176.1,
+    ". rx: flags burst-ack, seq 2, ack 1, snr +22.9 dB"
+   ],
+   [
+    176.1,
+    ". bitmap ack: 1/16 frag(s) delivered"
+   ],
+   [
+    176.2,
+    ". burst frag 1 +ack-request, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 2, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 3, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 4, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 5, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 6, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 7, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 8, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 9, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 10, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 11, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 12, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 13, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 14, window left 16"
+   ],
+   [
+    176.2,
+    ". burst frag 15 +ack-request, window left 16"
+   ],
+   [
+    176.2,
+    ". rung 10 -> 12 (losses 0, cap 12)"
+   ],
+   [
+    176.2,
+    ". STREAMED 15 block(s) behind one preamble, 294880 samples (24.6 s air), resync 4"
+   ],
+   [
+    176.2,
+    ". tx: rung 12, ext-data frame, flags burst-data, 203 B payload"
+   ],
+   [
+    200.8,
+    ". reply timer: srtt 153 ms, var 157 ms -> budget 7294 ms (air term 728 ms)"
+   ],
+   [
+    202.9,
+    ". rx: flags burst-ack, seq 2, ack 1, snr +21.8 dB"
+   ],
+   [
+    202.9,
+    ". bitmap ack: 15/16 frag(s) delivered"
+   ],
+   [
+    202.9,
+    ". burst frag 9 +ack-request, window left 16"
+   ],
+   [
+    202.9,
+    ". tx: rung 12, ext-data frame, flags burst-data, 203 B payload"
+   ],
+   [
+    205.1,
+    ". reply timer: srtt 153 ms, var 157 ms -> budget 1511 ms (air term 728 ms)"
+   ],
+   [
+    206.6,
+    ". TIMEOUT at rung 12 -> 0 consecutive loss(es) (first burst-ack miss, forgiven)"
+   ],
+   [
+    206.6,
+    ". burst timeout -> 1-frame probe (transfer 1)"
+   ],
+   [
+    207.8,
+    ". burst frag 9 +ack-request, window left 1"
+   ],
+   [
+    207.8,
+    ". tx: rung 12, ext-data frame, flags burst-data, 203 B payload"
+   ],
+   [
+    210.1,
+    ". reply timer: srtt 153 ms, var 157 ms -> budget 2294 ms (air term 728 ms)"
+   ],
+   [
+    210.9,
+    ". rx: flags burst-ack, seq 2, ack 1, snr +22.5 dB"
+   ],
+   [
+    210.9,
+    ". bitmap ack: 16/16 frag(s) delivered"
+   ],
+   [
+    210.9,
+    ". burst transfer fully acked"
+   ],
+   [
+    211.0,
+    ". burst window 15 of 16 (ceiling), 15 frag(s), 24 s air"
+   ],
+   [
+    211.0,
+    ". burst engage: 15 frag(s) x 200 B, transfer 2"
+   ],
+   [
+    211.0,
+    ". burst frag 0 +ack-request, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 1, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 2, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 3, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 4, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 5, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 6, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 7, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 8, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 9, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 10, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 11, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 12, window left 15"
+   ],
+   [
+    211.0,
+    ". burst frag 13 +ack-request, window left 15"
+   ],
+   [
+    211.0,
+    ". STREAMED 14 block(s) behind one preamble, 275840 samples (23.0 s air), resync 4"
+   ],
+   [
+    211.0,
+    ". tx: rung 12, ext-data frame, flags burst-data, 203 B payload"
+   ],
+   [
+    234.0,
+    ". reply timer: srtt 153 ms, var 157 ms -> budget 7294 ms (air term 728 ms)"
+   ],
+   [
+    234.7,
+    ". rx: flags burst-ack, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    234.7,
+    ". bitmap ack: 14/15 frag(s) delivered"
+   ],
+   [
+    234.8,
+    ". burst frag 14 +ack-request, window left 15"
+   ],
+   [
+    234.8,
+    ". tx: rung 12, ext-data frame, flags burst-data, 41 B payload"
+   ],
+   [
+    235.8,
+    ". reply timer: srtt 153 ms, var 157 ms -> budget 1511 ms (air term 728 ms)"
+   ],
+   [
+    236.6,
+    ". rx: flags burst-ack, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    236.6,
+    ". bitmap ack: 15/15 frag(s) delivered"
+   ],
+   [
+    236.6,
+    ". burst transfer fully acked"
+   ],
+   [
+    359.5,
+    ">> queued 19 bytes (interactive)"
+   ],
+   [
+    359.5,
+    ". rung 12 -> 10 (losses 0, cap 12)"
+   ],
+   [
+    359.5,
+    ". tx: rung 10, data frame, flags stream+last, 19 B payload"
+   ],
+   [
+    360.4,
+    ". reply timer: srtt 143 ms, var 138 ms -> budget 1423 ms (air term 728 ms)"
+   ],
+   [
+    361.2,
+    ". rx: flags no-data, seq 2, ack 3, snr +22.9 dB"
+   ]
+  ],
+  "B": [
+   [
+    175.3,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    175.3,
+    ". bitmap ack sent (transfer 1, 2 B)"
+   ],
+   [
+    175.3,
+    ". tx: rung 9, data frame, flags burst-ack, 2 B payload"
+   ],
+   [
+    178.4,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    180.0,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    181.6,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    183.2,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    184.8,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    186.4,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    189.0,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    189.6,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    192.8,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    195.8,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    196.1,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    197.6,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    199.2,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    202.1,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    202.1,
+    ". rung 9 -> 11 (losses 0, cap 12)"
+   ],
+   [
+    202.1,
+    ". bitmap ack sent (transfer 1, 2 B)"
+   ],
+   [
+    202.1,
+    ". tx: rung 11, data frame, flags burst-ack, 2 B payload"
+   ],
+   [
+    210.1,
+    ". rx: flags burst-data, seq 1, ack 2, snr +22.5 dB"
+   ],
+   [
+    210.1,
+    ". burst transfer received whole"
+   ],
+   [
+    210.1,
+    "<< file 'sfAB.bin' incoming, 2 part(s)"
+   ],
+   [
+    210.1,
+    ". bitmap ack sent (transfer 1, 2 B)"
+   ],
+   [
+    210.1,
+    ". tx: rung 11, data frame, flags burst-ack, 2 B payload"
+   ],
+   [
+    213.2,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    214.8,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    216.4,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    218.0,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    219.6,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    221.2,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    224.1,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    224.4,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    226.0,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    227.6,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    229.2,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    230.8,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    232.4,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    234.0,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    234.0,
+    ". bitmap ack sent (transfer 2, 2 B)"
+   ],
+   [
+    234.0,
+    ". tx: rung 11, data frame, flags burst-ack, 2 B payload"
+   ],
+   [
+    235.8,
+    ". rx: flags burst-data, seq 2, ack 2, snr +22.5 dB"
+   ],
+   [
+    235.8,
+    ". burst transfer received whole"
+   ],
+   [
+    235.8,
+    "<< file complete: rx_sfAB.bin (6000 bytes, 6000 on air, 1.00x)"
+   ],
+   [
+    235.8,
+    ". bitmap ack sent (transfer 2, 2 B)"
+   ],
+   [
+    235.8,
+    ". tx: rung 11, data frame, flags burst-ack, 2 B payload"
+   ],
+   [
+    360.4,
+    ". rx: flags stream+last, seq 3, ack 2, snr +22.5 dB"
+   ],
+   [
+    360.4,
+    "<< [bulk] after-idle 0.326912"
+   ],
+   [
+    360.5,
+    ". rung 11 -> 9 (losses 0, cap -1)"
+   ],
+   [
+    360.5,
+    ". tx: rung 9, data frame, flags no-data, 1 B payload"
+   ]
+  ]
+ },
+ "merged": "2026-09-13 01:58"
+}

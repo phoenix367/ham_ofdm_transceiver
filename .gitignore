@@ -18,3 +18,6 @@ demoapp/rx_*
 
 # machine-local Claude Code permissions (absolute paths, not portable)
 .claude/settings.local.json
+
+# two-board benchmark scratch (received files, logs, speech source)
+results/board_bench_work/

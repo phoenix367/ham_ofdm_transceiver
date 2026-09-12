@@ -98,3 +98,12 @@ for byte-exactness, and the board beacons for anything the consoles
 cannot see (`test-radio`). Time-scale traps do not apply here -- the
 boards run in real time; that is `test-demoapp`'s problem, not this
 stand's.
+
+## The scripted benchmark
+
+`host/board_bench.py` does all of the above as a program: two consoles
+driven from one process, every scenario timed and recorded
+(`results/board_bench.json` / `.md`). Use it before hand-scripting a
+run -- `--scenarios file` is the 6000-byte transfer above, `--quick`
+the smoke version, `--voice-start` adds speech through the webvoice
+server. It refuses to start while another console holds a board.

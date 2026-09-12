@@ -677,6 +677,29 @@ no notches). The firmware's RAM budget is now D2 with 0.6 kB and AXI with
 (`MAX_SYMS`, its largest EXT frame is 276) and places the weighting
 accumulators in DTCM.
 
+The whole stand is now benchmarked by one script,
+`host/board_bench.py` (`results/board_bench.md` is the record, 14
+scenarios in 17 min, `--quick` in 5): warm-up, messages each way and
+both ways at once, bulk, files each way / both at once / with chat
+during the transfer, text and file broadcasts with a reply queued
+mid-broadcast, push-to-talk speech each way through the webvoice server,
+a file straight after the speech, and a stale-link recovery. Reference
+figures on the cross-wire at rung 12: a message 1.0-1.1 s; a 6000-byte
+file 52-55 s each way (110-115 B/s, 3 frames, 0 timeouts, 0
+retransmissions), 67 B/s aggregate when both boards send at once, and a
+chat message queued during a file arrives in 13-26 s; a 4096-byte
+broadcast file 89-92 s (175 frames, 0 lost) each way, and a reply
+queued during a broadcast lands 18 s after the broadcast's end (the
+receiver's transmitter is held `BC_RX_HOLD_S` past the last group);
+41 s of speech each way, first audio out 3.0 s after the key-down,
+warm-up 1-7 s, 0 % of bytes lost in five of six transmissions and one
+that lost 2 frames of 67 (2.3 %); a file straight after the speech took
+59 s in one run and 105 s with 2 timeouts in another (the receiver's
+transmitter is still held after the broadcast); a cold link (both
+boards decayed to rung 0) warms in 55 s because the primer and its
+acknowledgement go out as EXTREME frames, and 120 s of idle costs one
+rung, recovered by the next exchange.
+
 Open thread: none on the carrier; the stranger-preamble lock-stealing
 limit and voice remain as measured.
 Results: `results/interference.json` / `.png`. The sweep runs
