@@ -112,7 +112,7 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
              * newlib's syscall stubs behind it (the link broke on
              * _isatty; station_diag_format's snprintf never linked
              * because only consoles call it). */
-            char msg[160], *q = msg;
+            char msg[224], *q = msg;
             q = um_str(q, "config: rung_ceiling ");
             q = um_num(q, m->st->my_max_rung);
             q = um_str(q, "  win_max ");
@@ -127,6 +127,14 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
             q = um_num(q, m->diag_on);
             q = um_str(q, "  freq_trim_hz ");
             q = um_num(q, (int)station_freq_trim_total(m->st));
+            if (m->chan) {
+                q = um_str(q, "  chan_snr ");
+                q = um_num(q, m->chan->snr_db);
+                q = um_str(q, "  chan_fade ");
+                q = um_num(q, m->chan->fade_chz);
+                q = um_str(q, "  chan_delay ");
+                q = um_num(q, m->chan->delay_100us);
+            }
             emit(m, UP_EVT_LOG, msg, (int)(q - msg));
         } else if (len >= 5) {
             int32_t v = get_i32(p + 1);
@@ -156,6 +164,15 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
             case UP_CFG_DIAG_STREAM: m->diag_on = v ? 1 : 0; break;
             case UP_CFG_CODECS: m->st->my_codecs = (int)(v & 0xFF); break;
             case UP_CFG_NET_KEY: packets_set_net_key((uint8_t)(v & 0xFF)); break;
+            case UP_CFG_CHAN_SNR:
+                if (m->chan) chanimp_set_snr(m->chan, (int)v);
+                break;
+            case UP_CFG_CHAN_FADE:
+                if (m->chan) chanimp_set_fade(m->chan, (int)v);
+                break;
+            case UP_CFG_CHAN_DELAY:
+                if (m->chan) chanimp_set_delay(m->chan, (int)v);
+                break;
             default: break;
             }
         }

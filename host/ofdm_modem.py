@@ -60,7 +60,11 @@ RSP_INFO, EVT_MESSAGE, EVT_STATUS, EVT_DIAG, RSP_PONG, EVT_LOG, EVT_AUDIO = (
 
 CFG = {"rung_ceiling": 1, "burst_window": 2, "burst_stream": 3,
        "freq_trim_mhz": 4, "audio_tap": 5, "anchor": 6,
-       "diag_stream": 7, "win_max": 8, "codecs": 9, "net_key": 10}
+       "diag_stream": 7, "win_max": 8, "codecs": 9, "net_key": 10,
+       # channel debug mode: impair the board's own transmit output
+       # (chanimp.h): AWGN in dB (999 = off), Rayleigh Doppler spread in
+       # centi-Hz (0 = off), second-path delay in 0.1 ms (0 = one tap)
+       "chan_snr": 12, "chan_fade": 13, "chan_delay": 14}
 
 # Voice codecs, as declared in the capability record (station.h CODEC_*).
 # The board has no codec of its own -- it moves bytes -- so the program

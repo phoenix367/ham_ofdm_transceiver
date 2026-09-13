@@ -63,6 +63,7 @@
 #include "rx_stream.h"
 #include "dcblock.h"
 #include "csense.h"
+#include "chanimp.h"
 #include "broadcast.h"
 #include "packets.h"
 #include "led.h"
@@ -126,6 +127,9 @@ typedef struct {
     uint32_t ev_ring[8][3];   /* ms | mode<<28|(type&0xf)<<24|typ<<16|cap_ovr16 | start_abs */
     uint32_t led;             /* 0 dark, 1 host, 2 receiving, 3 transmitting */
     uint32_t host_disconnects;/* CMD_DISCONNECT frames honoured */
+    uint32_t chan_samples;    /* channel debug mode: samples impaired */
+    uint32_t chan_sat;        /* ... and output clamps */
+    uint32_t chan_snr;        /* the setting (999 = off), for the record */
 } beacon_t;
 volatile beacon_t g_beacon __attribute__((section(".results"), used));
 enum { ST_ENTER = 1, ST_SUPPLY, ST_ANALOG, ST_RXS, ST_TUSB, ST_LOOP,
@@ -231,6 +235,11 @@ static void beacon_flush(void)
 static int16_t g_cap[CAP_N];
 static volatile uint32_t g_cap_w, g_cap_r;
 static int16_t g_txf[TXF_N];
+/* CHANNEL DEBUG MODE: AWGN and Rayleigh fading applied to the samples
+ * on their way into the DAC FIFO (chanimp.h), so the peer sees a
+ * channel on the cross-wire. Configured over USB (UP_CFG_CHAN_*), off
+ * by default, integer and saturating. */
+static chanimp_t g_chan;
 static volatile uint32_t g_txf_w, g_txf_r;
 static volatile int g_tx_on;      /* ISR: 1 = drive DAC, 0 = sample ADC */
 
@@ -428,9 +437,20 @@ static void tx_fill(uint32_t slack)
             break;
         got = txs_pull(g_txs, g_txf + wi, room);
         if (got <= 0) {
-            g_txs = 0;                  /* generator exhausted */
+            /* generator exhausted. Fading runs the output behind the
+             * input by the Hilbert delay plus the path delay: emit
+             * that tail (noise included) or the last symbol loses its
+             * end. Not counted in g_tx_pulled -- tx_short compares
+             * the GENERATOR's samples against its promise. */
+            int fl = chanimp_flush(&g_chan, g_txf + wi, room);
+            if (fl > 0) {
+                g_txf_w += (uint32_t)fl;
+                continue;
+            }
+            g_txs = 0;
             break;
         }
+        chanimp_apply(&g_chan, g_txf + wi, got);
         g_txf_w += (uint32_t)got;
         g_tx_pulled += got;
     }
@@ -1460,6 +1480,8 @@ int main(void)
     g_st.burst_stream = 1;
     usb_modem_init(&g_modem, &g_st, UID, 0x0200,
                    UP_CAP_LDPC | UP_CAP_EXT_FRAMES | UP_CAP_BCAST);
+    chanimp_init(&g_chan, ((uint32_t)UID[0] << 24) ^ ((uint32_t)UID[5] << 8) ^ UID[11]);
+    g_modem.chan = &g_chan;
     g_st.diag_cb = usb_modem_diag;
     g_st.diag_ctx = &g_modem;
     g_modem.bcast_cb = bc_cmd;
@@ -1735,6 +1757,9 @@ int main(void)
                 g_host_last_ms = 0;
                 g_beacon.host_disconnects++;
             }
+            g_beacon.chan_samples = g_chan.samples;
+            g_beacon.chan_sat = g_chan.sat;
+            g_beacon.chan_snr = (uint32_t)g_chan.snr_db;
             g_host_seen = tud_mounted() && g_host_last_ms
                           && (uint32_t)(g_ms - g_host_last_ms) < HOST_ALIVE_MS;
             led_tick();
@@ -1837,6 +1862,7 @@ int main(void)
                                                   BURST_MIN_RUNG, 0);
                         if (n2 > 0 && g_txs) {
                             g_txf_r = g_txf_w = 0;
+                        chanimp_start(&g_chan);   /* channel debug mode */
                             tx_fill(0);
                             g_cap_r = g_cap_w;
                             g_tx_on = 1;
@@ -1906,6 +1932,7 @@ int main(void)
                     if (bc_open_group() > 0 && g_txs) {
                         uint32_t ki = g_beacon.keyups & 3u;
                         g_txf_r = g_txf_w = 0;
+                        chanimp_start(&g_chan);   /* channel debug mode */
                         tx_fill(0);
                         g_cap_r = g_cap_w;
                         /* the same key-up record the station path
@@ -1942,6 +1969,7 @@ int main(void)
                      * rather than a throughput problem. Each underrun
                      * puts a mid-rail sample on the air. */
                     g_txf_r = g_txf_w = 0;
+                        chanimp_start(&g_chan);   /* channel debug mode */
                     tx_fill(0);
                     /* build() opened the generator; start the carrier.
                      * Drop what was captured before now: those samples

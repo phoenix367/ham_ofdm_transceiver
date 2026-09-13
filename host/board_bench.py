@@ -867,6 +867,8 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--merge", action="store_true",
                     help="update only the scenarios run into an existing results file")
+    ap.add_argument("--config", default="", help="comma list of key=value applied to BOTH boards at "
+                    "attach, e.g. chan_snr=3,chan_fade=50,chan_delay=10 (channel debug mode)")
     ap.add_argument("-v", "--verbose", action="store_true", help="echo both consoles")
     a = ap.parse_args()
 
@@ -933,6 +935,11 @@ def main():
     stand.final_detach = False
     print(f"{ts()} attaching A={a.a[:6]} B={a.b[:6]}", flush=True)
     stand.attach()
+    for kv in (x for x in a.config.split(",") if x.strip()):
+        k, _, v = kv.partition("=")
+        for n_ in ("A", "B"):
+            stand.pump[n_].call(lambda n_=n_, k=k.strip(), v=int(v): stand.st[n_].m.config(k, v))
+        print(f"{ts()} config {k.strip()} = {v} on both boards", flush=True)
     results, t_all = {}, now()
     try:
         for name in names:

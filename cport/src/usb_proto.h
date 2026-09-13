@@ -107,10 +107,21 @@ enum {
                               * "never said", which is not "none". */
     UP_CFG_NET_KEY      = 10, /* header CRC-8 seed (packets.h): frames of
                                * other nets fail at the header; 0 = open */
-    UP_CFG_WIN_MAX      = 8  /* streamed-window ceiling we accept AND
+    UP_CFG_WIN_MAX      = 8, /* streamed-window ceiling we accept AND
                               * send (1..BURST_STREAM_MAX); declared to
                               * the peer in the capability record, as
                               * RUNG_CEILING now also is */
+    /* CHANNEL DEBUG MODE (chanimp.h): impair this board's OWN transmit
+     * output so the peer sees a channel instead of a cross-wire. Not
+     * station state; a test aid. Off by default. */
+    UP_CFG_CHAN_SNR     = 12, /* AWGN, dB re the clean signal's mean
+                               * power; 999 (CHANIMP_OFF) = no noise */
+    UP_CFG_CHAN_FADE    = 13, /* Rayleigh Doppler spread, centi-Hz;
+                               * 0 = no fading (CCIR 520: 10 good,
+                               * 50 moderate, 100 poor) */
+    UP_CFG_CHAN_DELAY   = 14  /* second path delay, 0.1 ms units;
+                               * 0 = one flat tap (5 good, 10
+                               * moderate, 20 poor) */
 };
 
 /* --- payload layouts, all little-endian, all fixed size ------------- */

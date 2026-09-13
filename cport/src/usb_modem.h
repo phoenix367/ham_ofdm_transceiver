@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 
+#include "chanimp.h"
 #include "station.h"
 #include "usb_proto.h"
 
@@ -56,6 +57,10 @@ typedef struct {
     int16_t  temp_q8;       /* die temperature the board last read, Q8;
                              * UP_TEMP_NONE on anything without the
                              * sensor (host builds, demoapp) */
+    /* the transmit-output impairment (channel debug mode), owned by
+     * whoever owns the DAC path; NULL = the UP_CFG_CHAN_* keys are
+     * ignored (the emulator, a host build) */
+    chanimp_t *chan;
 } usb_modem_t;
 
 void usb_modem_init(usb_modem_t *m, station_t *st, const uint8_t uid[12],

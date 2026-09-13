@@ -422,7 +422,7 @@ Two forms.
 `EVT_LOG` line of the form
 
 ```
-config: rung_ceiling N  win_max N  burst_window N  burst_stream N  anchor N  diag_stream N  freq_trim_hz N
+config: rung_ceiling N  win_max N  burst_window N  burst_stream N  anchor N  diag_stream N  freq_trim_hz N  chan_snr N  chan_fade N  chan_delay N
 ```
 
 The settings live on the board and survive a host reattach, so a host
@@ -643,6 +643,9 @@ The meaning of `a..d` depends on `ev` (Appendix B).
 | 7 | `diag_stream` | 0/1 | default **0**; enables `EVT_DIAG` |
 | 8 | `win_max` | streamed-window ceiling accepted **and** sent | 1..16; declared to the peer; refreshes the caps record when set |
 | 10 | `net_key` | header CRC-8 seed (`0xFF ^ key`) | 0..255; 0 = open (the article's CRC). Frames of other nets fail at the header; beacons and broadcasts stay public. Both stations of a link MUST hold the same key. Not in the query line. |
+| 12 | `chan_snr` | **channel debug mode**: AWGN added to this board's own transmit output, dB re the clean signal's mean power | −60..60; 999 = off (default). Not station state; a test aid. |
+| 13 | `chan_fade` | channel debug mode: Rayleigh fading Doppler spread, centi-Hz | 0 = off (default) .. 800. One flat tap, or two equal taps with `chan_delay`. CCIR 520: 10 good, 50 moderate, 100 poor. Mean gain 1, so `chan_snr` stays the mean SNR. |
+| 14 | `chan_delay` | channel debug mode: second path delay, 0.1 ms units | 0 = one tap (default) .. 100. 5 good, 10 moderate, 20 poor. |
 | 9 | `codecs` | `CODEC_*` bitmap the **host** can decode | low 8 bits; declared to the peer (§12); default 0 = never said |
 
 Keys 0 and 10–255 are unassigned and MUST be ignored by the device.

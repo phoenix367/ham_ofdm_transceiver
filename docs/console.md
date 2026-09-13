@@ -107,6 +107,34 @@ held for `BC_RX_HOLD_S` past the last group), and a cold link (both
 boards decayed to rung 0) takes ~55 s to warm because the primer and
 its acknowledgement go out as EXTREME frames.
 
+## Channel debug mode (boards only)
+
+The board can impair its OWN transmit output so the peer sees a
+channel instead of a cross-wire: `config chan_snr <dB>` adds white
+Gaussian noise at that SNR relative to the clean signal's mean power
+(999 = off), `config chan_fade <centi-Hz>` adds Rayleigh fading with
+that Doppler spread (0 = off), and `config chan_delay <0.1 ms>` makes
+it two equal taps with that delay (0 = one flat tap). CCIR 520 HF
+presets: good 5/10, moderate 10/50, poor 20/100 (delay/fade). The
+impairment is integer and saturating (clamped to int16, never wrapped)
+and restarts at every key-up; fading's Hilbert delay is flushed at the
+end of each transmission. `config` alone shows the settings; the
+benchmark applies them to both boards with `--config`. `cport/src/chanimp.c`,
+tested by `make test` (`test_chan`).
+
+What it showed the first time it was switched on (2026-09-13, stand):
+with A impaired and B clean, a 46 s EXTREME frame and BPSK groups
+cross the CCIR "moderate" channel at 20 dB intact, while a QAM16 group
+at rung 12 is not even acquired -- and a file transfer with BOTH boards
+impaired never finishes, because the receiver's SNR estimate reads
+15-19 dB for a set 10-20 dB, the ladder therefore sits on QAM16 rungs
+that Rayleigh fades kill, and the acknowledgements die the same way
+until consecutive losses walk it down to rung 0. Two calibrations the
+mode exposes: the on-wire SNR estimate reads ~9 dB above the configured
+AWGN level (10 dB set -> 19 dB read, 3 -> 15), and the rate ladder has
+no notion of fading depth. Neither is the mode's business; both are now
+measurable without a real channel.
+
 ## Leaving
 
 Both consoles say goodbye to the board (`CMD_DISCONNECT`) on `quit`,

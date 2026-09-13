@@ -585,7 +585,8 @@ class Console:
             except (KeyError, ValueError) as e:            # noqa: BLE001
                 self.plain(f"config: {e}  (keys: rung_ceiling, burst_window,"
                            " burst_stream, freq_trim_mhz, audio_tap, anchor,"
-                           " diag_stream, win_max)")
+                           " diag_stream, win_max, net_key, chan_snr,"
+                           " chan_fade, chan_delay)")
         elif cmd == "debug":
             # the events come from the BOARD, whose diag stream is off
             # by default; this is `config diag_stream` with a memorable
@@ -665,6 +666,11 @@ def main():
         print("> ", end="", flush=True)
 
         last_ping, ping_misses = 0.0, 0
+        inbuf = b""     # raw stdin + our own line splitting: readline()
+                        # would buffer every line a pipe holds and
+                        # select() would then find the fd empty, so a
+                        # scripted run executed each command one line
+                        # late (measured: bcast commands 150 s behind)
         try:
             while True:
                 # one ping a second keeps the board's "host attached"
@@ -704,12 +710,19 @@ def main():
                     elif kind == "0x88":
                         con.on_bcast(payload)
                 if select.select([sys.stdin], [], [], 0)[0]:
-                    line = sys.stdin.readline()
-                    if not line:
+                    got = os.read(0, 4096)
+                    if not got:
                         break
-                    if not con.command(line):
+                    inbuf += got
+                    stop = False
+                    while b"\n" in inbuf:
+                        line, _, inbuf = inbuf.partition(b"\n")
+                        if not con.command(line.decode("utf-8", "replace")):
+                            stop = True
+                            break
+                        print("> ", end="", flush=True)
+                    if stop:
                         break
-                    print("> ", end="", flush=True)
         except KeyboardInterrupt:
             print()
         except USBTimeoutError:

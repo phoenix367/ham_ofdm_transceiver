@@ -54,19 +54,25 @@ $(BUILD)/test_usb: tests/test_usb.c src/usb_proto.c | $(BUILD)
 USB_EMU_SRC = bench/usb_modem_emu.c src/usb_proto.c src/usb_modem.c \
               src/arena.c src/station.c src/link.c src/packets.c \
               src/bits.c src/conv.c src/ldpc.c src/tx.c src/fft.c \
-              src/dsp.c src/rx_demod.c src/rx_detect.c
+              src/dsp.c src/rx_demod.c src/rx_detect.c src/chanimp.c
 
 $(BUILD)/usb_modem_emu: $(USB_EMU_SRC) $(GEN) | $(BUILD)
 	$(CC) $(CFLAGS) -Isrc -o $@ $(USB_EMU_SRC) -lm
 
 usbemu: $(BUILD)/usb_modem_emu
 
+# channel debug mode: AWGN + Rayleigh on the transmit output
+$(BUILD)/test_chan: tests/test_chan.c $(SRC) $(GEN) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tests/test_chan.c src/chanimp.c src/arena.c src/rx_demod.c \
+	    src/rx_detect.c src/rx_stream.c src/ldpc.c src/link.c src/station.c \
+	    src/tx.c src/packets.c src/bits.c src/conv.c src/fft.c src/dsp.c -lm
+
 $(BUILD)/test_rx: tests/test_rx.c $(SRC) $(GEN) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tests/test_rx.c src/arena.c src/rx_demod.c src/rx_detect.c src/rx_stream.c src/ldpc.c \
           src/link.c src/station.c \
 	    src/tx.c src/packets.c src/bits.c src/conv.c src/fft.c src/dsp.c
 
-test: $(BUILD)/test_primitives $(BUILD)/test_bits $(BUILD)/test_tx $(BUILD)/test_rx $(BUILD)/test_stream $(BUILD)/test_link $(BUILD)/test_broadcast $(BUILD)/test_usb
+test: $(BUILD)/test_primitives $(BUILD)/test_bits $(BUILD)/test_tx $(BUILD)/test_rx $(BUILD)/test_stream $(BUILD)/test_link $(BUILD)/test_broadcast $(BUILD)/test_usb $(BUILD)/test_chan
 	./$(BUILD)/test_primitives
 	./$(BUILD)/test_bits
 	./$(BUILD)/test_tx
@@ -75,6 +81,7 @@ test: $(BUILD)/test_primitives $(BUILD)/test_bits $(BUILD)/test_tx $(BUILD)/test
 	./$(BUILD)/test_link
 	./$(BUILD)/test_broadcast
 	./$(BUILD)/test_usb
+	./$(BUILD)/test_chan
 
 clean:
 	rm -rf $(BUILD)
@@ -421,9 +428,9 @@ SAN_CFLAGS = -std=c99 -g -O1 -fsanitize=address,undefined \
 SAN_ALL = src/arena.c src/fft.c src/dsp.c src/bits.c src/conv.c \
           src/packets.c src/tx.c src/broadcast.c src/rx_demod.c \
           src/rx_detect.c src/rx_stream.c src/ldpc.c src/link.c \
-          src/station.c
+          src/station.c src/chanimp.c
 SAN_SUITES = test_primitives test_bits test_tx test_rx test_stream \
-             test_link test_broadcast test_usb
+             test_link test_broadcast test_usb test_chan
 
 sanitize: $(GEN) | $(BUILD)
 	@for s in $(SAN_SUITES); do \
@@ -501,7 +508,8 @@ RXMODES ?= 7
 RESYNC ?= 4
 
 USBRADIO_SRC = $(subst usb/usb_flash_main.c,usb/usb_radio_main.c,$(USBFLASH_SRC)) \
-               src/rx_stream.c src/rx_detect.c src/rx_demod.c src/csense.c src/broadcast.c
+               src/rx_stream.c src/rx_detect.c src/rx_demod.c src/csense.c src/broadcast.c \
+               src/chanimp.c
 
 radiofw: $(GEN) check-deps | $(BUILD)
 	$(FLASHCC) $(FLASHFLAGS) -Iusb -I$(TINYUSB)/src -I$(CMSIS_H7)/Include \

@@ -1134,6 +1134,26 @@ Cross-module invariants that are easy to break:
   arithmetic. `test_usb.c` now pins the exact fit, the one-byte-short
   refusal, and that a 40-byte status still decodes with the
   temperature ABSENT rather than 0 C.
+- CHANNEL DEBUG MODE (`cport/src/chanimp.c`, keys `chan_snr` /
+  `chan_fade` / `chan_delay`, UP_CFG 12-14): the board impairs its OWN
+  transmit samples on the way into the DAC FIFO -- AWGN at a set SNR
+  re the clean signal's EWMA power, Rayleigh via one or two complex
+  AR(1) taps (one-pole Doppler, updated at 100 Hz and interpolated,
+  mean gain 1) on the analytic signal. Integer and SATURATING: int64
+  intermediates, int16 clamp at the output, `sat` counts the clamps.
+  Fading costs the Hilbert group delay plus the path delay, so tx_fill
+  FLUSHES that tail after the generator runs dry (not counted in
+  g_tx_pulled: tx_short judges the generator). `chanimp_start` at
+  every key-up (three sites). Off by default; not station state; the
+  emulator has `chan == NULL` and ignores the keys. Verified on the
+  stand: A's counters count and clamp, B's loudest-heard power doubles
+  at chan_snr 0, a 46 s EXTREME frame crosses CCIR "moderate" fading at
+  20 dB; a QAM16 group does not, and with both boards impaired the ARQ
+  ladder (driven by an SNR estimate that reads ~9 dB high on the wire)
+  sits on QAM16 rungs until consecutive losses drop it. Drive the
+  scripted console runs with the C console or the fixed Python one:
+  `board_console.py` used to readline() a buffered stdin and ran every
+  scripted command one line late.
 - `CMD_DISCONNECT` (0x07, no payload) is the host's goodbye: the board
   drops its "host attached" indication at once instead of `HOST_ALIVE_MS`
   (3 s) after the last ping, and changes NOTHING else. Both consoles

@@ -42,7 +42,7 @@ FIELDS = [
     "ev_n", "ev_neg", "ev_last", "ev_last_ms", "ev_cap_ovr",
     "cs_peak", "cs_peak_ms",
 ] + ["ev%d_%s" % (i, k) for i in range(8) for k in ("ms", "what", "start")] \
-  + ["led", "host_disconnects"]
+  + ["led", "host_disconnects", "chan_samples", "chan_sat", "chan_snr"]
 N_WORDS = len(FIELDS)   # the struct is append-only: read what the list names
 STAGES = {1: "entered", 2: "supply", 3: "analog", 4: "receivers",
           5: "tusb", 6: "loop (not mounted)", 7: "MOUNTED"}
@@ -113,6 +113,9 @@ def show(label, d, raw):
           % (d["cs_peak"], d["cs_peak_ms"] / 1000.0))
     print("  LED (PA1): %s   (host goodbyes honoured: %d)"
           % (LED_STATES.get(d["led"], d["led"]), d.get("host_disconnects", 0)))
+    if d.get("chan_samples") or d.get("chan_snr", 999) != 999:
+        print("  channel debug mode: chan_snr %d, %d samples impaired, %d clamped"
+              % (d.get("chan_snr", 999), d.get("chan_samples", 0), d.get("chan_sat", 0)))
     if d["ev_n"]:
         print("  last events (newest last):")
         order = sorted(range(8), key=lambda i: d["ev%d_ms" % i])
