@@ -45,6 +45,10 @@ typedef struct {
      * attached, which is more than the cable being plugged in: the
      * console announces itself with UP_CMD_INFO. Clear it on unmount. */
     uint32_t host_cmds;
+    /* UP_CMD_DISCONNECT frames received: the host said goodbye. The
+     * firmware compares it against what it last saw and takes the
+     * indication down without waiting for the ping timeout. */
+    uint32_t host_disconnects;
     /* free bytes in the firmware's broadcast source buffer, published
      * by the owner of that buffer; reported in the status frame so a
      * host can pace a chunked broadcastfile against it */

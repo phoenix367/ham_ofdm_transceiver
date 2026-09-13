@@ -107,6 +107,16 @@ held for `BC_RX_HOLD_S` past the last group), and a cold link (both
 boards decayed to rung 0) takes ~55 s to warm because the primer and
 its acknowledgement go out as EXTREME frames.
 
+## Leaving
+
+Both consoles say goodbye to the board (`CMD_DISCONNECT`) on `quit`,
+on end of input and on Ctrl-C, so the board's "host attached" LED state
+drops at once instead of 3 s after the last keepalive. A crash or a
+pulled cable still relies on the timeout. The Python driver sends it
+from `OfdmModem.close()`, so every Python host program that closes
+cleanly (`board_console.py`, `board_bench.py`, the webvoice server, the
+KISS bridge) gets it for free.
+
 ## Files produced
 
 | file | source |

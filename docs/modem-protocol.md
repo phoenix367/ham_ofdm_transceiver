@@ -227,6 +227,14 @@ behaviour. A host that wants the indication MAY send `CMD_PING` at any
 period under 3 s; the reference hosts use 1 s. Merely holding the USB
 handle open does not count: closing a program unmounts nothing.
 
+A host that exits normally SHOULD send `CMD_DISCONNECT` (§6.7) last:
+the device takes the indication down at once instead of after the
+timeout. The timeout remains for the crash and the pulled cable. The
+reference hosts send it on `quit`, on end of input and on Ctrl-C, and
+the Python driver sends it from `OfdmModem.close()` unless its last
+write already timed out (a device that is not reading would only make
+the goodbye wait out another timeout).
+
 ## 4. Framing
 
 ### 4.1 Frame format
@@ -352,6 +360,7 @@ which is well-formed but declined, and is logged.
 | `0x04` | H→D | `CMD_PING` | `token:u32le` |
 | `0x05` | H→D | `CMD_RESET` | none |
 | `0x06` | H→D | `CMD_BCAST` | `ptype:u8, rung:u8, data[]` |
+| `0x07` | H→D | `CMD_DISCONNECT` | none |
 | `0x81` | D→H | `RSP_INFO` | `up_info_t` (§8.1) |
 | `0x82` | D→H | `EVT_MESSAGE` | `qos:u8, data[]` |
 | `0x83` | D→H | `EVT_STATUS` | `up_status_t` (§8.2) |
@@ -459,6 +468,16 @@ that recovers and one that re-enumerates.
 ```
 
 Start, or continue, a non-ARQ broadcast. Full semantics in §10.
+
+### 6.7 `CMD_DISCONNECT` (0x07)
+
+Payload: none. No response. The host program is closing: the device
+drops its "host attached" indication (§3.6) immediately instead of
+`HOST_ALIVE_MS` after the last command. Nothing else changes -- queues,
+the station, the configuration and the delivered-message log are all
+untouched -- so a host that reconnects finds the modem exactly as it
+left it. A device that does not know the command (an older firmware)
+ignores it, as it ignores every unknown type.
 
 ## 7. Device-to-host responses and events
 
@@ -1219,6 +1238,16 @@ image reports 3328 here.
 H→D  a5 5a 04 04 00 | ef be ad de          token 0xDEADBEEF
 D→H  a5 5a 85 04 00 | ef be ad de          echoed verbatim
 ```
+
+### C.2a Goodbye: `CMD_DISCONNECT`
+
+```
+H→D  a5 5a 07 00 00                           no payload, no response
+```
+
+The next status frame shows nothing different -- attachment is
+indication only -- but the board's LED leaves its "host attached"
+state at once rather than 3 s later.
 
 ### C.3 Submit an interactive message
 

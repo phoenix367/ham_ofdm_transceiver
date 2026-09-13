@@ -1134,6 +1134,14 @@ Cross-module invariants that are easy to break:
   arithmetic. `test_usb.c` now pins the exact fit, the one-byte-short
   refusal, and that a 40-byte status still decodes with the
   temperature ABSENT rather than 0 C.
+- `CMD_DISCONNECT` (0x07, no payload) is the host's goodbye: the board
+  drops its "host attached" indication at once instead of `HOST_ALIVE_MS`
+  (3 s) after the last ping, and changes NOTHING else. Both consoles
+  send it on quit / EOF / Ctrl-C (`app.c` catches SIGINT in USB mode so
+  the normal teardown runs) and `OfdmModem.close()` sends it unless the
+  last write timed out. It is counted as a command AND then overrides
+  the liveness that implies -- the firmware checks disconnects after
+  commands, in that order. `host_disconnects` in the beacon counts them.
 - The USB protocol's sizes live in TWO languages and both must move
   together: `UP_MAX_PAYLOAD` (`cport/src/usb_proto.h`, 3336) and
   `MAX_PAYLOAD` (`host/ofdm_modem.py`). The Python copy was left at the

@@ -277,6 +277,17 @@ int main(void)
               up_decode_status(short_, 8, &s) == -1);
     }
 
+    /* ---- the host's goodbye: a payload-less command ---- */
+    {
+        n = up_encode(UP_CMD_DISCONNECT, "", 0, buf, sizeof(buf));
+        reset();
+        up_parser_init(&par);
+        up_parser_push(&par, buf, n, sink, 0);
+        check("DISCONNECT (0x07, empty) frames in 5 bytes and parses",
+              n == UP_HDR_LEN && g_n == 1 &&
+              g_f[0].type == UP_CMD_DISCONNECT && g_f[0].len == 0);
+    }
+
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

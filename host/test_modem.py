@@ -12,7 +12,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ofdm_modem import _read_serial, Parser, encode, MAX_PAYLOAD  # noqa: E402
+from ofdm_modem import (_read_serial, Parser, encode, MAX_PAYLOAD,  # noqa: E402
+                        OfdmModem, CMD_DISCONNECT)
 
 PASS = FAIL = 0
 
@@ -96,9 +97,48 @@ def test_framing():
           frames == [(0x82, big)] and p.resyncs == 0)
 
 
+class RecordingTransport:
+    def __init__(self, fail=False):
+        self.writes, self.closed, self.write_failed = [], False, fail
+
+    def write(self, data):
+        self.writes.append(bytes(data))
+
+    def read(self, timeout):
+        return b""
+
+    def close(self):
+        self.closed = True
+
+
+def test_disconnect():
+    """A clean close tells the board goodbye (CMD_DISCONNECT, 0x07,
+    empty) exactly once; a close after a failed write does not, since
+    the board is not reading and the frame would only wait out another
+    timeout."""
+    m = OfdmModem.__new__(OfdmModem)
+    m.t = RecordingTransport()
+    m.close()
+    m.close()
+    check("close() sends one CMD_DISCONNECT and releases the device",
+          m.t.writes == [encode(CMD_DISCONNECT)] and m.t.closed)
+    check("the goodbye frame is the 5-byte empty 0x07",
+          encode(CMD_DISCONNECT) == b"\xa5\x5a\x07\x00\x00")
+    m = OfdmModem.__new__(OfdmModem)
+    m.t = RecordingTransport(fail=True)
+    m.close()
+    check("a board that stopped taking writes gets no goodbye",
+          m.t.writes == [] and m.t.closed)
+    m = OfdmModem.__new__(OfdmModem)
+    m.t = RecordingTransport()
+    m.close(notify=False)
+    check("close(notify=False) is silent", m.t.writes == [] and m.t.closed)
+
+
 def main():
     test_serial_read()
     test_framing()
+    test_disconnect()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

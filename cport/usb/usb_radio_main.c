@@ -125,6 +125,7 @@ typedef struct {
      * and that distinction is the whole diagnosis. */
     uint32_t ev_ring[8][3];   /* ms | mode<<28|(type&0xf)<<24|typ<<16|cap_ovr16 | start_abs */
     uint32_t led;             /* 0 dark, 1 host, 2 receiving, 3 transmitting */
+    uint32_t host_disconnects;/* CMD_DISCONNECT frames honoured */
 } beacon_t;
 volatile beacon_t g_beacon __attribute__((section(".results"), used));
 enum { ST_ENTER = 1, ST_SUPPLY, ST_ANALOG, ST_RXS, ST_TUSB, ST_LOOP,
@@ -1196,10 +1197,14 @@ static uint32_t g_led_rx_ms;   /* g_ms of the last decoded frame */
 static int g_host_seen;        /* a host program has talked to us */
 static uint32_t g_host_last_ms; /* g_ms of the last host command */
 static uint32_t g_host_cmds_seen;
+static uint32_t g_host_disc_seen;
 /* A console that closes does not unmount anything -- the cable is
  * still in and TinyUSB still says mounted -- so "attached" has to be
  * kept alive by traffic. Both consoles ping once a second; three
- * missed beats and the indication goes down. */
+ * missed beats and the indication goes down. A console that closes
+ * NORMALLY (quit, EOF, Ctrl-C) says so with UP_CMD_DISCONNECT and the
+ * indication goes down at once; the timeout remains for the crash and
+ * the pulled cable. */
 #define HOST_ALIVE_MS 3000u
 
 static void led_tick(void)
@@ -1722,6 +1727,13 @@ int main(void)
             if (g_modem.host_cmds != g_host_cmds_seen) {
                 g_host_cmds_seen = g_modem.host_cmds;
                 g_host_last_ms = g_ms ? g_ms : 1;
+            }
+            /* after the command check on purpose: the goodbye is itself
+             * a command, and it must win over the liveness it implies */
+            if (g_modem.host_disconnects != g_host_disc_seen) {
+                g_host_disc_seen = g_modem.host_disconnects;
+                g_host_last_ms = 0;
+                g_beacon.host_disconnects++;
             }
             g_host_seen = tud_mounted() && g_host_last_ms
                           && (uint32_t)(g_ms - g_host_last_ms) < HOST_ALIVE_MS;

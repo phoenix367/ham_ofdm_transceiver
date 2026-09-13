@@ -82,6 +82,12 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
             emit(m, UP_RSP_PONG, p, 4);
         break;
 
+    case UP_CMD_DISCONNECT:
+        /* counted as a command above (it IS host traffic), and then
+         * overrides it: the firmware checks disconnects after commands */
+        m->host_disconnects++;
+        break;
+
     case UP_CMD_SUBMIT:
         /* payload: qos, then the message. A refusal is reported rather
          * than silently dropped -- the host queues on our behalf and has

@@ -22,6 +22,7 @@
 #define _POSIX_C_SOURCE 200809L /* strnlen, localtime_r */
 
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -1307,15 +1308,39 @@ static int usb_command(char *line)
     return 1;
 }
 
+/* Ctrl-C in USB mode is a NORMAL exit: the loop sees the flag, says
+ * goodbye to the board and closes the handle, instead of the process
+ * dying with the board none the wiser until its ping timeout. */
+static volatile sig_atomic_t g_sigint;
+static void on_sigint(int sig) { (void)sig; g_sigint = 1; }
+
+/* The board keeps a "host attached" indication alive on our pings and
+ * would otherwise drop it only HOST_ALIVE_MS after the last one.
+ * Sending the goodbye costs nothing when the board is gone (the write
+ * just fails), so every exit path but the read failure sends it. */
+static void usb_goodbye(void)
+{
+    if (!g_usb)
+        return;
+    usb_send_frame(UP_CMD_DISCONNECT, 0, 0);
+    usbh_close(g_usb);
+    g_usb = 0;
+}
+
 static int usb_console(const char *serial)
 {
     uint8_t buf[512];
     char inbuf[512];
     int inlen = 0;
+    struct sigaction sa;
 
     g_usb = usbh_open(serial);
     if (!g_usb)
         return 1;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_sigint;          /* no SA_RESTART: read() returns */
+    sigaction(SIGINT, &sa, 0);
+    sigaction(SIGTERM, &sa, 0);
     up_parser_init(&g_up);
     if (usbh_stale(g_usb))
         printf("[%s] drained %d stale bytes from a previous session\n",
@@ -1333,6 +1358,11 @@ static int usb_console(const char *serial)
         struct timeval tv = { 0, 0 };
         time_t now = time(0);
         int n;
+        if (g_sigint) {
+            printf("\n[%s] interrupted -- detaching\n", g_name);
+            usb_goodbye();
+            return 0;
+        }
         /* one ping a second keeps the board's "host attached" state
          * (and its LED) alive: closing this program does not unmount
          * the device, so the board would otherwise never notice */
@@ -1344,7 +1374,9 @@ static int usb_console(const char *serial)
         n = usbh_read(g_usb, buf, (int)sizeof(buf), 50);
         if (n < 0) {
             printf("\n[%s] usb read failed -- board unplugged?\n", g_name);
-            break;
+            usbh_close(g_usb);       /* no goodbye: nobody to say it to */
+            g_usb = 0;
+            return 0;
         }
         if (n > 0)
             up_parser_push(&g_up, buf, n, usb_on_frame, 0);
@@ -1355,14 +1387,17 @@ static int usb_console(const char *serial)
             ssize_t got = read(0, inbuf + inlen,
                                sizeof(inbuf) - (size_t)inlen - 1);
             char *nl;
-            if (got <= 0)
-                break;
+            if (got <= 0) {
+                if (got < 0 && errno == EINTR)
+                    continue;       /* the flag is checked at the top */
+                break;              /* EOF on stdin: a normal exit */
+            }
             inlen += (int)got;
             inbuf[inlen] = 0;
             while ((nl = strchr(inbuf, '\n')) != 0) {
                 *nl = 0;
                 if (!usb_command(inbuf)) {
-                    usbh_close(g_usb);
+                    usb_goodbye();
                     return 0;
                 }
                 printf("> ");
@@ -1372,7 +1407,7 @@ static int usb_console(const char *serial)
             }
         }
     }
-    usbh_close(g_usb);
+    usb_goodbye();
     return 0;
 }
 

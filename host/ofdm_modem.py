@@ -54,6 +54,7 @@ HDR = 5
 MAX_PAYLOAD = 3336
 
 CMD_INFO, CMD_SUBMIT, CMD_CONFIG, CMD_PING, CMD_RESET = 1, 2, 3, 4, 5
+CMD_DISCONNECT = 7     # the host program is closing; no payload
 RSP_INFO, EVT_MESSAGE, EVT_STATUS, EVT_DIAG, RSP_PONG, EVT_LOG, EVT_AUDIO = (
     0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87)
 
@@ -376,7 +377,12 @@ class _UsbTransport:
         return n
 
     def write(self, data):
-        self.dev.write(EP_OUT, data, timeout=WRITE_TIMEOUT_MS)
+        try:
+            self.dev.write(EP_OUT, data, timeout=WRITE_TIMEOUT_MS)
+            self.write_failed = False
+        except Exception:
+            self.write_failed = True   # close() then skips the goodbye
+            raise
 
     def read(self, timeout):
         import usb.core
@@ -419,7 +425,25 @@ class OfdmModem:
     def __exit__(self, *a):
         self.close()
 
-    def close(self):
+    def disconnect(self):
+        """Tell the board this program is going away, so its "host
+        attached" indication drops now rather than HOST_ALIVE_MS after
+        the last ping."""
+        self.t.write(encode(CMD_DISCONNECT))
+
+    def close(self, notify=True):
+        """Release the device. `notify` sends CMD_DISCONNECT first --
+        the default, because every clean exit should -- unless the last
+        write already timed out: a board that is not reading its OUT
+        endpoint would only make the goodbye wait out another timeout."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        if notify and not getattr(self.t, "write_failed", False):
+            try:
+                self.disconnect()
+            except Exception:          # noqa: BLE001 -- best effort
+                pass
         self.t.close()
 
     # --- plumbing ---

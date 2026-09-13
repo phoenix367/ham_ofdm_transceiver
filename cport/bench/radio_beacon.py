@@ -22,7 +22,6 @@ import sys
 
 CFG = "../tools/esp32-probe/stm32h7-rbb-dual.cfg"
 MAGIC = 0x0AD10BEE
-N_WORDS = 88
 
 FIELDS = [
     "magic", "stage", "mounted", "ms", "rx_bytes", "tx_bytes", "isr_count",
@@ -43,7 +42,8 @@ FIELDS = [
     "ev_n", "ev_neg", "ev_last", "ev_last_ms", "ev_cap_ovr",
     "cs_peak", "cs_peak_ms",
 ] + ["ev%d_%s" % (i, k) for i in range(8) for k in ("ms", "what", "start")] \
-  + ["led"]
+  + ["led", "host_disconnects"]
+N_WORDS = len(FIELDS)   # the struct is append-only: read what the list names
 STAGES = {1: "entered", 2: "supply", 3: "analog", 4: "receivers",
           5: "tusb", 6: "loop (not mounted)", 7: "MOUNTED"}
 MODES = ["NORMAL", "ROBUST", "EXTREME"]
@@ -111,7 +111,8 @@ def show(label, d, raw):
                        d["bc_rx_frames"], d["bc_rx_lost"]))
     print("  loudest thing heard: cs %d at %.0f s (quiet ~2e4, carrier ~2e8)"
           % (d["cs_peak"], d["cs_peak_ms"] / 1000.0))
-    print("  LED (PA1): %s" % LED_STATES.get(d["led"], d["led"]))
+    print("  LED (PA1): %s   (host goodbyes honoured: %d)"
+          % (LED_STATES.get(d["led"], d["led"]), d.get("host_disconnects", 0)))
     if d["ev_n"]:
         print("  last events (newest last):")
         order = sorted(range(8), key=lambda i: d["ev%d_ms" % i])

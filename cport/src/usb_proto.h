@@ -60,10 +60,14 @@ enum {
     UP_CMD_CONFIG  = 0x03, /* key:u8, value:i32le */
     UP_CMD_PING    = 0x04, /* token:u32le */
     UP_CMD_RESET   = 0x05, /* -- : re-init the station, keep the link up */
-    UP_CMD_BCAST   = 0x06  /* ptype:u8, rung:u8 (0xFF = link's last rung),
+    UP_CMD_BCAST   = 0x06, /* ptype:u8, rung:u8 (0xFF = link's last rung),
                             * data[] -- start a NON-ARQ broadcast. One
                             * command is one broadcast; nothing is ever
                             * retransmitted. */
+    UP_CMD_DISCONNECT = 0x07 /* -- : the host program is closing. Drops
+                            * the "host attached" indication at once
+                            * instead of after HOST_ALIVE_MS of missed
+                            * pings; changes no station state. */
 };
 
 /* device -> host */
