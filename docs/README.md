@@ -13,6 +13,7 @@ fixed-point RTL reference.
 | [rf.md](rf.md) | RF layer: SSB chain, LO model, channel impairments |
 | [drivers.md](drivers.md) | Channel drivers: virtual channel, SDR, USB host transports |
 | [console.md](console.md) | `ofdm_console` and `board_console.py`: modes, commands, behaviors |
+| [stand.md](stand.md) | The test stand's connections and pinout: both boards' pin map (LQFP100), the audio wire, the JTAG chain, the Baofeng plug, mic network, RX front end, RF path, host side |
 | [radio.md](radio.md) | The radio stand: a Baofeng on a board, a HackRF as the far end — wiring, settings, tools, and the measured channel (linearity, limiter, noise floor) |
 | [usb-protocol.md](usb-protocol.md) | USB transport: enumeration, framing, frame types, payload layouts |
 | [modem-protocol.md](modem-protocol.md) | RFC-style specification of the host protocol: framing, every command/event, structure offsets, registries, compatibility rules |

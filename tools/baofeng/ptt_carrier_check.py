@@ -17,7 +17,7 @@ RX runs at minimum gain with the 14 dB amp OFF.
 
 Needs `make -C cport bridge` up and no other OpenOCD session.
 
-    ./venv/bin/python tools/baofeng/ptt_carrier_check.py --chip stmB
+    ./venv/bin/python tools/baofeng/ptt_carrier_check.py          # board1 = stmA
 """
 import argparse
 import subprocess
@@ -66,7 +66,8 @@ def emergency_unkey(chip):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--chip", default="stmB", choices=["stmA", "stmB"])
+    ap.add_argument("--chip", default="stmA", choices=["stmA", "stmB"],
+                    help="JTAG target wired to the radio: board1 = stmA (docs/stand.md)")
     ap.add_argument("--freq", type=float, default=479.975e6)
     ap.add_argument("--offset", type=float, default=200e3,
                     help="LO this far below the channel (keeps DC off it)")

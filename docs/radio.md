@@ -39,6 +39,9 @@ flowchart LR
 
 ## Wiring
 
+The whole stand's connections — both boards' pin maps, the JTAG
+chain, the Baofeng plug and the RF path — are in [stand.md](stand.md).
+
 | Board1 pin | Goes to | Role |
 |---|---|---|
 | **PB14** | the radio's PTT driver | keyed for every transmission, active-high |
