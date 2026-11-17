@@ -87,7 +87,8 @@ Board1 keys a Baofeng on 479.975 MHz NFM; a HackRF is the far end
 | Board's acknowledgement off the air, `mic_gain` −3..−18 dB | 6/6 decoded at 16.2 dB; at 0 dB 12.8 dB (limiter) |
 | Channel linearity (test chirp) | ±0.1 dB up to the limiter at ~4.2–4.3 kHz peak deviation; H2 ≤ −36 dBc, H3 ≤ −40 dBc above 700 Hz at full level |
 | Frequency response | 750 µs pre-emphasis ±0.5 dB, 500–2650 Hz; −10 dB extra at 300 Hz (sub-audio filter) |
-| Keyed-silent floor | 65 Hz rms deviation in band, 69 % a 244.14 Hz pickup comb; frame SNR 24.5 dB at `mic_gain` −6 |
+| Keyed-silent floor | 65 Hz rms deviation as recorded — mostly the HackRF's: a comb at its 8192-sample USB rhythm (244.14 Hz at 2 MS/s, 305.18 at 2.5) of ~50 Hz rms that RF gain does not reduce; the rest falls to 14 Hz rms at LNA 16 |
+| Frame SNR on the air at `mic_gain` −6 | ≥ 38 dB against that 14 Hz rms |
 | PTT | pin exact to the tick; the radio hangs ~0.35 s after release (STE on or off) |
 | EXTREME preamble truncation (host replay) | 0.4 s missing → 7.4 dB, 0.6 s → −5.7 dB, 0.8 s → no decode |
 

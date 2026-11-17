@@ -22,7 +22,10 @@ reports per frequency and level:
   * SNDR in 250-3000 Hz: the fundamental against everything that is not
     the fundamental or those two harmonics;
   * the keyed-but-silent floor from each sweep's PTT lead, and how much
-    of it sits in a harmonic comb (`--comb`, 244.14 Hz on the stand).
+    of it sits in the HackRF's OWN comb: 8192 of its samples per period
+    (244.14 Hz at the recorder's 2 MS/s), a fixed ~50 Hz rms deviation
+    that RF gain does not reduce. Read any floor here as the HackRF's
+    limit first (docs/radio.md).
 
 Run from the repository root. The board's other settings (rx_input,
 ptt_lead, mic_gain) are restored to `--restore-gain` / lead 0 at the
@@ -53,10 +56,14 @@ ap.add_argument("--ms", type=int, default=4000, help="sweep length")
 ap.add_argument("--lead", type=int, default=500,
                 help="ptt_lead during the run: the radio's attack time, and "
                      "the silent stretch the floor is measured on")
-ap.add_argument("--restore-gain", type=int, default=-9,
+ap.add_argument("--restore-gain", type=int, default=-6,
                 help="mic_gain to leave the board at")
 ap.add_argument("--comb", type=float, default=244.140625,
-                help="fundamental of the pickup comb to split out of the floor")
+                help="fundamental of the HackRF's comb to split out of the floor: "
+                     "RX rate / 8192 (244.14 Hz at the recorder's 2 MS/s)")
+ap.add_argument("--lna", type=float, default=16.0,
+                help="HackRF LNA gain while recording; at 0 the carrier spans "
+                     "+-3.6 codes of its 8-bit converter and that IS the floor")
 a = ap.parse_args()
 LEVELS = [int(v) for v in a.levels.split(",")]
 if not (a.out or a.analyze):
@@ -69,7 +76,7 @@ def record(path):
     gap = a.ms / 1000 + a.lead / 1000 + 1.6     # sweep + lead + release tail + margin
     listen = 3.5 + gap * len(LEVELS) + 2
     rx = subprocess.Popen([sys.executable, "-u", str(REPO / "tools/baofeng/ptt_carrier_check.py"),
-                           "--listen", f"{listen:.0f}", "--iq", path],
+                           "--listen", f"{listen:.0f}", "--lna", str(a.lna), "--iq", path],
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=REPO)
 
     def pump(m, secs):
@@ -179,7 +186,8 @@ def analyse(path):
             comb |= np.abs(f - k * a.comb) < 6
         share = P[band & comb].sum() / P[band].sum()
         print(f"\nkeyed-silent floor (PTT leads), 250-3000 Hz: {flo:.1f} Hz rms; "
-              f"{100 * share:.0f} % in {a.comb:.2f} Hz harmonics -> {flo * np.sqrt(1 - share):.1f} Hz rms without them")
+              f"{100 * share:.0f} % in the HackRF's {a.comb:.2f} Hz harmonics -> "
+              f"{flo * np.sqrt(1 - share):.1f} Hz rms without them")
 
 
 if a.out:

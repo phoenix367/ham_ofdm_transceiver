@@ -35,7 +35,9 @@ ap.add_argument("--serial", default="320047000851333438363436",
 ap.add_argument("--freq", default="479.975e6")
 ap.add_argument("--levels", default="0,-3,-6,-9,-12,-15,-18")
 ap.add_argument("--text", default="hello 73")
-ap.add_argument("--restore-gain", type=int, default=-9)
+ap.add_argument("--restore-gain", type=int, default=-6)
+ap.add_argument("--lna", type=float, default=16.0,
+                help="HackRF LNA gain while recording the replies")
 a = ap.parse_args()
 D = Path(a.dir)
 D.mkdir(parents=True, exist_ok=True)
@@ -71,7 +73,8 @@ with om.OfdmModem(serial=a.serial) as m:
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=REPO)
         poll(m, lambda: tx.poll() is not None)
         rx = subprocess.Popen([py, str(REPO / "tools/baofeng/ptt_carrier_check.py"),
-                               "--listen", "24", "--iq", str(D / f"reply_g{-g}.npy")],
+                               "--listen", "24", "--lna", str(a.lna),
+                               "--iq", str(D / f"reply_g{-g}.npy")],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=REPO)
         poll(m, lambda: rx.poll() is not None)
     m.config("mic_gain", a.restore_gain)

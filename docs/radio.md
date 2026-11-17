@@ -174,7 +174,7 @@ sweep, input steps removed — 0 dB is linear:
 | 2650 Hz | **−2.46** | −0.04 | +0.01 | +0.02 | +0.02 | +0.02 |
 
 (500 Hz and 2200 Hz scatter by a few tenths at every level: they sit
-on lines of the pickup comb below.) The path is linear to ±0.1 dB up
+on lines of the HackRF's own comb, below.) The path is linear to ±0.1 dB up
 to the radio's **deviation limiter at ~4.2–4.3 kHz peak**, which the
 sweep reaches only at 0 dB above 2 kHz — the fundamental there is
 4184/4247/4292 Hz at 2.2/2.5/2.65 kHz. A limiter that high says the
@@ -182,8 +182,8 @@ channel is set to **Wide**.
 
 **Harmonics** at 0 dB, for fundamentals of 700/1000/1400 Hz: H2
 −35.9/−38.7/−41.9 dBc, H3 −39.9/−43.8/−47.5 dBc. At lower levels the
-dBc figures rise instead of falling: that is the noise floor, not
-distortion.
+dBc figures rise instead of falling: that is the measurement floor,
+not distortion.
 
 **Response** at −18 dB, re 1 kHz, against a 750 µs pre-emphasis:
 
@@ -200,22 +200,50 @@ the FEC carry it.
 **SNDR** (fundamental against everything but it and its 2nd/3rd
 harmonics, 250–3000 Hz) rises 3 dB per 3 dB of level at every
 frequency, e.g. at 1 kHz 27.8/25.6/22.8/20.5/16.6/14.2/10.9 dB from 0
-to −18 dB: below the limiter the channel is **noise-limited**.
+to −18 dB: below the limiter what limits it is additive — and that
+floor turned out to be mostly the HackRF's (next section), so these
+SNDR figures are lower bounds for the radio path.
 
-### The noise floor and the 244 Hz comb
+### The noise floor, and the HackRF's 244 Hz comb
 
-Keyed and silent (each sweep's PTT lead), the in-band floor is
-**65 Hz rms** of deviation, and **69 %** of its power sits in harmonics
-of **244.14 Hz** (1 / 4.096 ms: lines at 489, 731, 977, 1220, 1466,
-1709, 1954, 2197 Hz). Without the comb it would be 36 Hz rms — 5 dB
-better. The comb was already there before the mic network was wired
-(its 7th harmonic, ~1.7 kHz at ~50 Hz deviation, showed in the first
-PTT runs), so it is picked up on the stand, not made by the network;
-its source is not yet found. A 4.096 ms period points at something
-digital.
+Keyed and silent (each sweep's PTT lead), the in-band floor as first
+recorded was **65 Hz rms** of deviation, **69 %** of it in harmonics of
+**244.14 Hz** (1 / 4.096 ms: lines at 489, 731, 977, 1220, 1466, 1709,
+1954, 2197 Hz). **The comb is the HackRF's, not the stand's.** 4.096 ms
+is exactly 8192 samples at its 2 MS/s receive rate — the 16 KB chunks
+it moves to USB — and the comb follows the rate (a silent keyed carrier
+from board1, 2 s of PTT lead, recorded twice):
 
-Against that floor a frame's in-band SNR is 30.0/27.4/24.5/21.6/18.6 dB
-at 0/−3/−6/−9/−12 dB.
+| HackRF RX rate | 8192 samples | Comb found | Share of the floor |
+|---|---|---|---|
+| 2.0 MS/s | 4.096 ms → 244.14 Hz | 732.6, 976.6, 1220.6, 1464.6 … Hz | 67 % |
+| 2.5 MS/s | 3.277 ms → 305.18 Hz | 305.1, 610.3, 915.4, 1220.6 … Hz | 88 % |
+
+And RF gain does not touch it, while it does lower the rest:
+
+| LNA (VGA 8) | Carrier, max\|iq\| | Comb, rms deviation | Rest of the floor |
+|---|---|---|---|
+| 0 dB | 0.013 | 52 Hz | 37 Hz rms |
+| 16 dB | 0.063 | 49 Hz | 14 Hz rms |
+| 24 dB | 0.149 | 49 Hz | 13 Hz rms |
+
+A comb ADDED at the converter would shrink against a carrier 21 dB
+stronger; this one is a fixed deviation, i.e. the HackRF's own
+oscillator or clock is phase-modulated in step with its USB transfers
+(the coupling path is inferred, not traced). The same comb sat in the
+very first PTT runs, before any audio was wired (its 7th harmonic,
+~1.7 kHz at ~50 Hz deviation). And at LNA 0 the carrier spans only
+±3.6 codes of the HackRF's 8-bit converter, which is what the rest of
+the floor at LNA 0 was.
+
+So the radio path's own floor is **at most ~14 Hz rms** (what is left at
+LNA 16–24 once the comb is excluded; part of that may still be the
+HackRF), and a frame's in-band SNR on the air is at least ~43/41/38/35/
+32 dB at 0/−3/−6/−9/−12 dB. Record with `--lna 16` or more, and read
+any floor or SNDR here as the HackRF's limit first. To measure below
+the comb, remove it in analysis: it is exactly periodic in the
+HackRF's samples (8192 of them), so a template folded at that period
+and averaged over the recording can be subtracted.
 
 ### The preamble trap
 
@@ -246,14 +274,15 @@ The EXTREME preamble, for reading such recordings: 3.41 s of a comb at
 ## Recommendations and open items
 
 - **`mic_gain −6`** on this Wide channel: frame peaks 3.1 kHz, ~3 dB
-  under the limiter, frame SNR 24.5 dB against the measured floor.
-  (−3 puts frame peaks on the limiter; a Narrow channel halves the
-  deviation per volt and wants ~−12.) Board1 was left at −9.
+  under the limiter, frame SNR ≥ 38 dB against the radio path's own
+  floor. (−3 puts frame peaks on the limiter; a Narrow channel halves
+  the deviation per volt and wants ~−12.) Board1 is set to −6 (not
+  persistent: a reset returns 0).
 - **`ptt_lead` ~400 ms on both stations** once two radios talk; measure
   the receiving radio's squelch opening before trusting it.
-- **Find the 244.14 Hz comb**: the cheapest 5 dB left. A chirp's PTT
-  lead measures the floor in seconds; unplug candidates one at a time
-  (the ESP32 JTAG probe, USB hubs, board power).
+- **Measure past the HackRF**: record at LNA 16+ and fold the comb out
+  (above) to get the radio path's real floor; the tools default to
+  LNA 16 now, the tables above were taken at LNA 0.
 - **Rank the clean levels with NORMAL replies**: the EXTREME estimate
   rails at 16.2 dB; a message asking for a NORMAL reply would read the
   real frame SNR.
