@@ -75,6 +75,22 @@ in the technical report, §12):
 | IP over the link (`host/ip_tun.py`, TUN, no AX.25) | 4/4 pings, 0 % loss, RTT 3.8–5.5 s at rung 12 (92-byte packets); the ladder climbs from cold in ~5 s once the tunnel probes |
 | TCP over that tunnel, 4 kB | 43.7 B/s byte-identical, smooth (948 B per 10 s), ping 3.8 s at rung 12 — with fq_codel tuned to the link. The defaults (5 ms target against 8.6 s packets) cost either 130-second stalls or 117-second round trips, depending on the queue length |
 
+## The radio stand (Baofeng FM handheld + HackRF)
+
+Board1 keys a Baofeng on 479.975 MHz NFM; a HackRF is the far end
+(details, wiring and method in [radio.md](radio.md)):
+
+| Result | Number |
+|---|---|
+| Receive: tone through radio and RC front end into PA0 | SINAD 35.9 dB at −3.7 dBFS |
+| EXTREME text message, HackRF → radio → board | 16/16 delivered and acknowledged, 16.2 dB (the estimate's ceiling) |
+| Board's acknowledgement off the air, `mic_gain` −3..−18 dB | 6/6 decoded at 16.2 dB; at 0 dB 12.8 dB (limiter) |
+| Channel linearity (test chirp) | ±0.1 dB up to the limiter at ~4.2–4.3 kHz peak deviation; H2 ≤ −36 dBc, H3 ≤ −40 dBc above 700 Hz at full level |
+| Frequency response | 750 µs pre-emphasis ±0.5 dB, 500–2650 Hz; −10 dB extra at 300 Hz (sub-audio filter) |
+| Keyed-silent floor | 65 Hz rms deviation in band, 69 % a 244.14 Hz pickup comb; frame SNR 24.5 dB at `mic_gain` −6 |
+| PTT | pin exact to the tick; the radio hangs ~0.35 s after release (STE on or off) |
+| EXTREME preamble truncation (host replay) | 0.4 s missing → 7.4 dB, 0.6 s → −5.7 dB, 0.8 s → no decode |
+
 ## Link budget context (EXTREME, −17.5 dB operating point)
 
 S/N₀ ≈ +20.3 dB-Hz ≈ −13.7 dB in the ham 2.5 kHz convention (≈7 dB shy of

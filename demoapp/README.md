@@ -256,7 +256,9 @@ Practical notes, in order of how much they bite:
 - **Clock**: a free-running HackRF is +-20 ppm (~140 Hz at 7 MHz), inside
   the modem's +-375 Hz range, but EXTREME integrates coherently over
   0.69 s symbols across a 44 s frame -- feed CLKIN from a 10 MHz
-  TCXO/GPSDO for the slow modes.
+  TCXO/GPSDO for the slow modes. The stand's HackRF already has one: an
+  internal 10 MHz reference module on CLKIN, which the firmware selects
+  by itself (see the calibration below).
 
 `./sdr_smoke_test.sh` runs the two console stations over the loopback path
 end to end, and `sdr_bringup.py` exercises a real radio:
@@ -466,10 +468,20 @@ the relative SNR everything else is quoted in:
 | 4 | NORMAL BPSK 1/3 | 117.6 bit/s | −103.1 dBm |
 | 12 | NORMAL QAM16 3/4 | 1059 bit/s | −90.8 dBm |
 
-Two readings follow. The free-running HackRF's frequency error is
-**negligible** for this waveform -- 3.3 ppm against a design range that
-tolerates 50 -- so the CLKIN reference matters for EXTREME's coherent
-integration, not for acquisition. And the 40 dB noise figure is bad
+Two readings follow. The frequency error is **negligible** for this
+waveform -- 3.3 ppm against a design range that tolerates 50 -- so a
+reference matters for EXTREME's coherent integration, not for
+acquisition. Note what the 3.3 ppm is, though: this HackRF is NOT
+free-running. It has an internal 10 MHz reference module on CLKIN
+(checked 2026-11-17: the Si5351C status register reads 0x01 -- CLKIN
+valid, PLL B locked -- with nothing on the SMA and no PortaPack), and
+the firmware switches to a valid CLKIN at every stream start. So unless
+the module was fitted after this measurement, the figure is the gap
+between that reference and the tinySA's, sign included: the CAL tone
+reads LOW, i.e. the HackRF is 3.31 ppm fast OR the tinySA 3.31 ppm
+slow, and with a TCXO in the HackRF the tinySA is the likelier owner.
+Do not pre-correct the HackRF by it (`--ppm`) without a third
+reference. And the 40 dB noise figure is bad
 enough to matter but not fatal: against ITU-R P.372 atmospheric noise in
 a 6 kHz band, external noise still dominates by +9 dB at a quiet rural
 site, +17 dB typical rural and +24 dB in residential QRM. So the link

@@ -171,8 +171,17 @@ void Reset_Handler(void)
         ;
 }
 
+/* An image that drives something dangerous to leave on -- the radio
+ * firmware keys a transmitter through PTT -- defines this to put it in a
+ * safe state. Weak and undefined everywhere else, so the call is skipped.
+ * Runs on every fault AND every enabled interrupt without a vector entry:
+ * both land here and both mean the firmware has stopped. */
+void fault_safe_state(void) __attribute__((weak));
+
 void Default_Handler(void)
 {
+    if (fault_safe_state)
+        fault_safe_state();
     for (;;)
         ;
 }

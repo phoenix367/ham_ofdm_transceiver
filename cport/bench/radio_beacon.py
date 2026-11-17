@@ -42,7 +42,11 @@ FIELDS = [
     "ev_n", "ev_neg", "ev_last", "ev_last_ms", "ev_cap_ovr",
     "cs_peak", "cs_peak_ms",
 ] + ["ev%d_%s" % (i, k) for i in range(8) for k in ("ms", "what", "start")] \
-  + ["led", "host_disconnects", "chan_samples", "chan_sat", "chan_snr"]
+  + ["led", "host_disconnects", "chan_samples", "chan_sat", "chan_snr"] \
+  + ["ptt_keyups", "ptt_cuts", "ptt_lead_ms", "ptt_tail_ms", "ptt_last_ticks"] \
+  + ["rx_input"]
+RX_INPUT_TAG = 0x52580000   # usb_radio_main.c: tells a real 0 from "not reported"
+RX_INPUTS = {0: "PA6 (wire)", 1: "PA0 (radio front end)"}
 N_WORDS = len(FIELDS)   # the struct is append-only: read what the list names
 STAGES = {1: "entered", 2: "supply", 3: "analog", 4: "receivers",
           5: "tusb", 6: "loop (not mounted)", 7: "MOUNTED"}
@@ -113,6 +117,16 @@ def show(label, d, raw):
           % (d["cs_peak"], d["cs_peak_ms"] / 1000.0))
     print("  LED (PA1): %s   (host goodbyes honoured: %d)"
           % (LED_STATES.get(d["led"], d["led"]), d.get("host_disconnects", 0)))
+    print("  PTT (PB14): %d key-up(s), lead %d ms, tail %d ms, %d watchdog cut(s);"
+          " last held %d ticks for a %d-sample frame"
+          % (d.get("ptt_keyups", 0), d.get("ptt_lead_ms", 0),
+             d.get("ptt_tail_ms", 0), d.get("ptt_cuts", 0),
+             d.get("ptt_last_ticks", 0), d["tx_last_total"]))
+    ri = d.get("rx_input", 0)
+    if ri & 0xFFFF0000 == RX_INPUT_TAG:
+        print("  receive input: %s" % RX_INPUTS.get(ri & 0xFFFF, ri & 0xFFFF))
+    else:
+        print("  receive input: not reported (image predates rx_input) -- PA6")
     if d.get("chan_samples") or d.get("chan_snr", 999) != 999:
         print("  channel debug mode: chan_snr %d, %d samples impaired, %d clamped"
               % (d.get("chan_snr", 999), d.get("chan_samples", 0), d.get("chan_sat", 0)))
@@ -167,6 +181,18 @@ def show(label, d, raw):
               "DEAD (a quiet wire reads ~2e4: the peer's DAC holds "
               "mid-rail). This exact signature was the uncalled "
               "note_busy_isr regression.")
+    if d.get("ptt_cuts"):
+        bad += 1
+        print("  !! ptt_cuts %d -- the stall watchdog dropped PTT: the DAC "
+              "FIFO sat empty for 1 s while keyed (the main loop stopped "
+              "feeding it), and the radio went off the air mid-frame"
+              % d["ptt_cuts"])
+    if d.get("ptt_keyups", d["tx_frames"]) != d["tx_frames"]:
+        bad += 1
+        print("  !! ptt_keyups %d != tx_frames %d -- a transmission went "
+              "out without keying PTT (a radio on PB14 would not have "
+              "carried it): some key-up site bypassed tx_key_up()"
+              % (d["ptt_keyups"], d["tx_frames"]))
     if d["burst_misses"]:
         hi, lo = d["miss_lead_hi"], d["miss_lead_lo"]
         b44 = (hi << 12) | (lo & 0xFFF)

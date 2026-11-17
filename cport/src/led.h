@@ -8,8 +8,8 @@
  * both taken by the 25 MHz crystal -- so anything on PH2..PH15 is a
  * pin that does not exist. PA1 is the LED (found by blinking it); PA0
  * is unconnected. Both are free of the firmware's other uses: PA4
- * (DAC out), PA6 (ADC in), PA11/PA12 (USB) and PA13-PA15 + PB3 (JTAG,
- * and driving those kills the probe).
+ * (DAC out), PA6 (ADC in), PA11/PA12 (USB), PB14 (PTT, ptt.h) and
+ * PA13-PA15 + PB3/PB4 (JTAG, and driving those kills the probe).
  *
  * Cost: one bit in one register per state change (BSRR is atomic, so
  * an ISR may drive it while the main loop drives another pin of the

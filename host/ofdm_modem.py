@@ -64,7 +64,20 @@ CFG = {"rung_ceiling": 1, "burst_window": 2, "burst_stream": 3,
        # channel debug mode: impair the board's own transmit output
        # (chanimp.h): AWGN in dB (999 = off), Rayleigh Doppler spread in
        # centi-Hz (0 = off), second-path delay in 0.1 ms (0 = one tap)
-       "chan_snr": 12, "chan_fade": 13, "chan_delay": 14}
+       "chan_snr": 12, "chan_fade": 13, "chan_delay": 14,
+       # PTT on PB14 (ptt.h): ms of mid-rail after keying, before the
+       # frame (the radio's TX attack) and after it; 0 by default
+       "ptt_lead": 15, "ptt_tail": 16,
+       # receive input: 0 = PA6 (the board-to-board wire, default),
+       # 1 = PA0 (a radio's audio through an RC front end)
+       "rx_input": 17,
+       # radio mic output (DAC1_OUT2, PA5): 0 = mic level (PA3 holds
+       # the attenuator in, default), 1 = line level
+       "mic_boost": 18,
+       # radio mic output digital gain, whole dB, -40..0 (PA5 only)
+       "mic_gain": 19,
+       # an ACTION: key one 280-2700 Hz test sweep lasting N ms
+       "chirp": 20}
 
 # Voice codecs, as declared in the capability record (station.h CODEC_*).
 # The board has no codec of its own -- it moves bytes -- so the program

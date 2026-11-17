@@ -135,6 +135,75 @@ AWGN level (10 dB set -> 19 dB read, 3 -> 15), and the rate ladder has
 no notion of fading depth. Neither is the mode's business; both are now
 measurable without a real channel.
 
+## PTT for a radio (boards only)
+
+The radio firmware keys **PB14** (active-high) for every transmission:
+from key-up until the last sample has left the DAC. Wire a radio's PTT
+driver to it and the radio transmits exactly when the board does. Two
+settings add time around the frame for the radio, both 0 by default
+(the cable stand has no radio, and its measured figures were taken
+without them): `config ptt_lead <ms>` holds the DAC at mid-rail for
+that long after keying, before the frame's first sample -- the radio's
+TX attack time; the frame starts later, it is never cut -- and
+`config ptt_tail <ms>` holds it after the last sample, before
+releasing. Both clamp to 0..2000 and show in `config`.
+
+Measured with a Baofeng on the pin (HackRF, 2026-11-15): the firmware
+holds PB14 for exactly lead + frame + tail (the beacon's
+`ptt_last_ticks`), and the radio stays on the air another 0.20-0.36 s
+after release. A station replies 150 ms after decoding and nobody hears
+while keyed, so a TAIL is only safe when the peer's lead covers it: tail
+200 against a peer with lead 0 lost every acknowledgement and walked the
+ladder down to EXTREME, while the same tail against a peer with lead 300
+delivered every message first time. With radios at both ends, set
+`ptt_lead` to ~400 ms on BOTH stations (it also has to cover the other
+radio's release time) and leave `ptt_tail` at 0. The lead must also
+cover the RECEIVING radio's squelch opening: the EXTREME receiver needs
+nearly its whole preamble -- host replay of a clean frame (interf_rx,
+2026-11-17) reads 16.2 dB whole, 7.4 dB with the first 0.4 s missing,
+-5.7 dB at 0.6 s, and fails to decode at 0.8 s. That is how a HackRF
+recording that started 0.6 s late read a clean Baofeng link as -7.5 dB.
+
+The pin is released if the firmware stops: after 1 s with the DAC
+starved while keyed (the beacon's `ptt_cuts`), and on any fault. The
+beacon also carries `ptt_last_ticks` (the last keyed time, in 12 kHz
+ticks) and `ptt_keyups`, which must equal `tx_frames` --
+`bench/radio_beacon.py` says so when it does not. `cport/src/ptt.h`,
+tested by `make test` (`test_ptt`).
+
+### Receive input
+
+The receiver samples **PA6** by default -- the board-to-board wire.
+`config rx_input 1` switches it to **PA0**, where a radio's audio
+arrives through an RC front end (`tools/baofeng/kicad/`: J2 pin 2 to
+PA0, pin 1 to 3.3 V, pin 3 to GND), and `config rx_input 0` switches
+back, so the wire can stay connected while a radio is tried. The switch
+happens between two converter samples; the DC blocker and carrier sense
+then settle (~0.1 s). It shows in `config`, and the beacon's
+`rx_input` reports the input the converter is actually set to.
+
+### Radio microphone output
+
+Every transmitted sample goes out on **two** DAC pins: **PA4** (the
+board-to-board wire) and **PA5** (DAC channel 2), for a radio's
+microphone through the AIOC rev 1.2 mic network (PA5 -> 4.7 k -> node,
+1.5 k node to GND, 4.7 uF node to MIC+; the 100 R || 100 nF attenuator
+leg from the node to **PA3**). PA3 is an open-drain output held LOW
+from boot -- mic level, ~24 mV peak at our frame peaks, the AIOC's own
+default for these radios. `config mic_boost 1` releases it for line
+level (~0.3 V peak, 22 dB hotter, which overdrives a Baofeng), and
+`config mic_boost 0` pulls it low again. `config mic_gain <dB>`
+(-40..0, default 0) scales PA5 alone, digitally, for finding the
+level the radio's limiter leaves alone. `config chirp <ms>` keys one
+linear 280-2700 Hz test sweep through the same path, at a modem
+frame's RMS, for measuring a radio channel. Separate pins, so the
+network never loads the wire. PA2, PA3 and PA5 were measured free on
+both boards (each follows the internal pull both ways).
+
+What these settings measured on a Baofeng -- linearity, the limiter,
+the response, the noise floor, the recommended `mic_gain` -- is in
+[radio.md](radio.md).
+
 ## Leaving
 
 Both consoles say goodbye to the board (`CMD_DISCONNECT`) on `quit`,

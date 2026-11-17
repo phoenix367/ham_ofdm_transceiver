@@ -1089,6 +1089,16 @@ static const struct { const char *name; int key; } USB_CFG[] = {
     { "diag_stream", 7 }, { "win_max", 8 }, { "net_key", 10 },
     /* channel debug mode: impair our own transmit output */
     { "chan_snr", 12 }, { "chan_fade", 13 }, { "chan_delay", 14 },
+    /* PTT on PB14: ms of mid-rail before / after the frame for a radio */
+    { "ptt_lead", 15 }, { "ptt_tail", 16 },
+    /* receive input: 0 = PA6 (the wire), 1 = PA0 (a radio) */
+    { "rx_input", 17 },
+    /* radio mic output on PA5: 0 = mic level (default), 1 = line level */
+    { "mic_boost", 18 },
+    /* radio mic output digital gain, whole dB -40..0 (PA5 only) */
+    { "mic_gain", 19 },
+    /* an action: one 280-2700 Hz test sweep of N ms (radio firmware) */
+    { "chirp", 20 },
 };
 
 static int usb_command(char *line)

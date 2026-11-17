@@ -422,7 +422,7 @@ Two forms.
 `EVT_LOG` line of the form
 
 ```
-config: rung_ceiling N  win_max N  burst_window N  burst_stream N  anchor N  diag_stream N  freq_trim_hz N  chan_snr N  chan_fade N  chan_delay N
+config: rung_ceiling N  win_max N  burst_window N  burst_stream N  anchor N  diag_stream N  freq_trim_hz N  chan_snr N  chan_fade N  chan_delay N  ptt_lead N  ptt_tail N  rx_input N  mic_boost N  mic_gain N
 ```
 
 The settings live on the board and survive a host reattach, so a host
@@ -646,9 +646,15 @@ The meaning of `a..d` depends on `ev` (Appendix B).
 | 12 | `chan_snr` | **channel debug mode**: AWGN added to this board's own transmit output, dB re the clean signal's mean power | −60..60; 999 = off (default). Not station state; a test aid. |
 | 13 | `chan_fade` | channel debug mode: Rayleigh fading Doppler spread, centi-Hz | 0 = off (default) .. 800. One flat tap, or two equal taps with `chan_delay`. CCIR 520: 10 good, 50 moderate, 100 poor. Mean gain 1, so `chan_snr` stays the mean SNR. |
 | 14 | `chan_delay` | channel debug mode: second path delay, 0.1 ms units | 0 = one tap (default) .. 100. 5 good, 10 moderate, 20 poor. |
+| 15 | `ptt_lead` | **PTT on PB14**: ms of mid-rail the DAC holds after keying, before the frame's first sample -- a radio's TX attack time | 0..2000; 0 = default. The frame is never cut, it starts later. PB14 is keyed for every transmission whatever this says. Not station state. |
+| 16 | `ptt_tail` | PTT on PB14: ms of mid-rail after the frame's last sample, before releasing | 0..2000; 0 = default. The station is deaf while keyed and a peer replies 150 ms after decoding, so a tail longer than that plus the **peer's** `ptt_lead` loses the start of every reply (measured: tail 200 vs peer lead 0 collapsed the ladder to EXTREME). |
+| 17 | `rx_input` | **receive input** (radio firmware): which pin the receiver samples | 0 = PA6, the board-to-board wire (default); 1 = PA0, a radio's audio through an RC front end. Switched between two ADC conversions; the DC blocker and carrier sense settle in ~0.1 s. The beacon's `rx_input` shows the input actually applied. Not station state. |
+| 18 | `mic_boost` | **radio mic output level** (radio firmware): DAC1_OUT2 (PA5) carries every transmitted sample into an AIOC-style mic network whose attenuator leg ends on PA3 | 0 = mic level (default: PA3 open-drain LOW, attenuator in, ~24 mV peak at our frame peaks); 1 = line level (PA3 released, ~0.3 V peak, 22 dB hotter -- overdrives a Baofeng). PA4 and the wire are unaffected. Not station state. |
+| 19 | `mic_gain` | radio mic output **digital gain** (radio firmware), whole dB | -40..0 (clamped), 0 = default. Scales DAC channel 2 (PA5) only, so a radio's level is set without touching the wire on PA4. Digital: -12 dB still spans ~+-385 of the 12-bit DAC's codes. Not station state. |
+| 20 | `chirp` | an **action**, not a setting (radio firmware): key ONE linear test sweep 280 -> 2700 Hz lasting N ms | N = 100..30000 (clamped; 0 = none). Starts when the transmitter is idle and goes the frames' way: PTT with `ptt_lead`/`ptt_tail`, both DAC channels, `mic_gain`/`mic_boost` on PA5, at the RMS of a modem frame (peak 18400). 10 ms raised-cosine ends. Phase law: inc[n] = (280 + n*2420/(N-1))/12000 cycles per sample. Announced by an `EVT_LOG` line; counted in `tx_frames`, never handed to the station. Not shown by the query. |
 | 9 | `codecs` | `CODEC_*` bitmap the **host** can decode | low 8 bits; declared to the peer (§12); default 0 = never said |
 
-Keys 0 and 10–255 are unassigned and MUST be ignored by the device.
+Keys 0, 11 and 17–255 are unassigned and MUST be ignored by the device.
 
 `codecs` exists because the board has no codec of its own -- it moves
 bytes -- so the only party that can answer "what voice can you play?" is

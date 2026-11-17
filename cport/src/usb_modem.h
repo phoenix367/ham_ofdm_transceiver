@@ -61,6 +61,27 @@ typedef struct {
      * whoever owns the DAC path; NULL = the UP_CFG_CHAN_* keys are
      * ignored (the emulator, a host build) */
     chanimp_t *chan;
+    /* PTT timing (ptt.h), owned by the firmware's transmit path; NULL =
+     * the UP_CFG_PTT_* keys are ignored (the emulator, a host build) */
+    struct ptt *ptt;
+    /* receive input select (UP_CFG_RX_INPUT), owned by the firmware's
+     * converter tick, which applies it between two conversions: 0 =
+     * the default input, 1 = the alternate. NULL = the key is ignored
+     * (the emulator, a host build) */
+    volatile int *rx_input;
+    /* radio mic output level (UP_CFG_MIC_BOOST), owned by the firmware's
+     * main loop, which drives the attenuator pin when it changes: 0 =
+     * mic level, 1 = line level. NULL = the key is ignored (the
+     * emulator, a host build) */
+    volatile int *mic_boost;
+    /* radio mic output gain (UP_CFG_MIC_GAIN), whole dB clamped to
+     * -40..0, applied by the firmware to DAC channel 2 only. NULL = the
+     * key is ignored (the emulator, a host build) */
+    volatile int *mic_gain;
+    /* test sweep request (UP_CFG_CHIRP), ms, consumed by the firmware's
+     * main loop when its transmitter is idle. NULL = the key is ignored
+     * (the emulator, a host build) */
+    volatile int *chirp_req;
 } usb_modem_t;
 
 void usb_modem_init(usb_modem_t *m, station_t *st, const uint8_t uid[12],

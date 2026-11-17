@@ -61,6 +61,10 @@ $(BUILD)/usb_modem_emu: $(USB_EMU_SRC) $(GEN) | $(BUILD)
 
 usbemu: $(BUILD)/usb_modem_emu
 
+# PTT keying on PB14 (src/ptt.h, header-only): lead, tail, stall watchdog
+$(BUILD)/test_ptt: tests/test_ptt.c src/ptt.h | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tests/test_ptt.c
+
 # channel debug mode: AWGN + Rayleigh on the transmit output
 $(BUILD)/test_chan: tests/test_chan.c $(SRC) $(GEN) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tests/test_chan.c src/chanimp.c src/arena.c src/rx_demod.c \
@@ -72,7 +76,7 @@ $(BUILD)/test_rx: tests/test_rx.c $(SRC) $(GEN) | $(BUILD)
           src/link.c src/station.c \
 	    src/tx.c src/packets.c src/bits.c src/conv.c src/fft.c src/dsp.c
 
-test: $(BUILD)/test_primitives $(BUILD)/test_bits $(BUILD)/test_tx $(BUILD)/test_rx $(BUILD)/test_stream $(BUILD)/test_link $(BUILD)/test_broadcast $(BUILD)/test_usb $(BUILD)/test_chan
+test: $(BUILD)/test_primitives $(BUILD)/test_bits $(BUILD)/test_tx $(BUILD)/test_rx $(BUILD)/test_stream $(BUILD)/test_link $(BUILD)/test_broadcast $(BUILD)/test_usb $(BUILD)/test_chan $(BUILD)/test_ptt
 	./$(BUILD)/test_primitives
 	./$(BUILD)/test_bits
 	./$(BUILD)/test_tx
@@ -82,6 +86,7 @@ test: $(BUILD)/test_primitives $(BUILD)/test_bits $(BUILD)/test_tx $(BUILD)/test
 	./$(BUILD)/test_broadcast
 	./$(BUILD)/test_usb
 	./$(BUILD)/test_chan
+	./$(BUILD)/test_ptt
 
 clean:
 	rm -rf $(BUILD)
@@ -430,11 +435,12 @@ SAN_ALL = src/arena.c src/fft.c src/dsp.c src/bits.c src/conv.c \
           src/rx_detect.c src/rx_stream.c src/ldpc.c src/link.c \
           src/station.c src/chanimp.c
 SAN_SUITES = test_primitives test_bits test_tx test_rx test_stream \
-             test_link test_broadcast test_usb test_chan
+             test_link test_broadcast test_usb test_chan test_ptt
 
 sanitize: $(GEN) | $(BUILD)
 	@for s in $(SAN_SUITES); do \
 	    if [ $$s = test_usb ]; then srcs=src/usb_proto.c; \
+	    elif [ $$s = test_ptt ]; then srcs=; \
 	    else srcs="$(SAN_ALL)"; fi; \
 	    $(CC) $(SAN_CFLAGS) -o $(BUILD)/san_$$s tests/$$s.c $$srcs -lm \
 	        || exit 1; \

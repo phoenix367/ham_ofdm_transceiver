@@ -2,6 +2,7 @@
 
 #include "usb_modem.h"
 #include "packets.h"
+#include "ptt.h"
 
 /* Staging ring. The host may be slow or absent; the modem must not
  * block on it and must not corrupt the queue when it fills. A dropped
@@ -112,7 +113,13 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
              * newlib's syscall stubs behind it (the link broke on
              * _isatty; station_diag_format's snprintf never linked
              * because only consoles call it). */
-            char msg[224], *q = msg;
+            /* sized by the WORST case, not the typical one: 191 bytes of
+             * labels + 15 ints of up to 11 chars ("-2147483648") = 356.
+             * It was 224 against a 245-byte worst case before the PTT
+             * fields -- unreachable only because nobody had yet set
+             * burst_window (unclamped) to an 11-char value. Add a field,
+             * grow this. */
+            char msg[364], *q = msg;
             q = um_str(q, "config: rung_ceiling ");
             q = um_num(q, m->st->my_max_rung);
             q = um_str(q, "  win_max ");
@@ -134,6 +141,24 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
                 q = um_num(q, m->chan->fade_chz);
                 q = um_str(q, "  chan_delay ");
                 q = um_num(q, m->chan->delay_100us);
+            }
+            if (m->ptt) {
+                q = um_str(q, "  ptt_lead ");
+                q = um_num(q, ptt_lead_ms(m->ptt));
+                q = um_str(q, "  ptt_tail ");
+                q = um_num(q, ptt_tail_ms(m->ptt));
+            }
+            if (m->rx_input) {
+                q = um_str(q, "  rx_input ");
+                q = um_num(q, *m->rx_input);
+            }
+            if (m->mic_boost) {
+                q = um_str(q, "  mic_boost ");
+                q = um_num(q, *m->mic_boost);
+            }
+            if (m->mic_gain) {
+                q = um_str(q, "  mic_gain ");
+                q = um_num(q, *m->mic_gain);
             }
             emit(m, UP_EVT_LOG, msg, (int)(q - msg));
         } else if (len >= 5) {
@@ -172,6 +197,26 @@ static void on_frame(void *ctx, uint8_t type, const uint8_t *p, int len)
                 break;
             case UP_CFG_CHAN_DELAY:
                 if (m->chan) chanimp_set_delay(m->chan, (int)v);
+                break;
+            case UP_CFG_PTT_LEAD:
+                if (m->ptt) ptt_config(m->ptt, (int)v, ptt_tail_ms(m->ptt));
+                break;
+            case UP_CFG_PTT_TAIL:
+                if (m->ptt) ptt_config(m->ptt, ptt_lead_ms(m->ptt), (int)v);
+                break;
+            case UP_CFG_RX_INPUT:
+                if (m->rx_input) *m->rx_input = v ? 1 : 0;
+                break;
+            case UP_CFG_MIC_BOOST:
+                if (m->mic_boost) *m->mic_boost = v ? 1 : 0;
+                break;
+            case UP_CFG_MIC_GAIN:
+                if (m->mic_gain)
+                    *m->mic_gain = v > 0 ? 0 : v < -40 ? -40 : (int)v;
+                break;
+            case UP_CFG_CHIRP:
+                if (m->chirp_req)
+                    *m->chirp_req = v <= 0 ? 0 : v > 30000 ? 30000 : (int)v;
                 break;
             default: break;
             }

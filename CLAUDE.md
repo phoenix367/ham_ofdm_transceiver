@@ -42,6 +42,12 @@ Everything runs through the local venv (`./venv/bin/python`); install deps with
   `--voice-start` (spawns the server from the lscodec venv) or a
   running server (`--voice-url`, in which case speech runs last and
   keeps the boards). `--merge` re-runs a subset into the record.
+- `./venv/bin/python tools/baofeng/chirp_measure.py -o FILE` /
+  `mic_sweep.py --dir DIR` / `reply_decode.py FILE` — the RADIO stand
+  (board1 keys a Baofeng, a HackRF is the far end; they transmit on
+  479.975 MHz): channel linearity from the board's test chirp, the
+  mic-level sweep with real frames, and off-air decoding with the
+  boards' C receiver. Wiring, settings and results: `docs/radio.md`.
 - `./venv/bin/python experiments/fec_comparison.py`,
   `experiments/viterbi_recal.py`, `experiments/ldpc_recal.py`,
   `experiments/llr_shape.py`, `experiments/extreme_recal.py`,
@@ -835,6 +841,73 @@ Cross-module invariants that are easy to break:
   (`g_cs_busy_seen`) -- do NOT add a second `cs_busy()` caller: that
   function carries the floor tracker, whose climb is defined per 40 ms
   window and per CALL SITE (see the 40x-too-fast climb above).
+- PTT is **PB14**, active-high (`src/ptt.h`), keyed for EVERY
+  transmission -- measured on the stand: board1 = JTAG `stmA` drives a
+  Baofeng's PTT driver, heard by the HackRF only while high
+  (`tools/baofeng/ptt_carrier_check.py`). PB14 is free only because USB
+  is OTG_FS (PA11/12); a `USB_RHPORT=1` build would hand it to OTG_HS.
+  Invariants: every key-up goes `tx_begin()` -> `tx_fill(0)` ->
+  `tx_key_up()` and the drain site calls `ptt_key_down()` -- a site
+  that sets `g_tx_on` by hand puts a frame into a radio that is not
+  transmitting, and the beacon's `ptt_keyups != tx_frames` verdict is
+  the check. `ptt_arm()` (the tail) lives in `tx_begin`, BEFORE the
+  pre-fill, because a short frame exhausts its generator inside it
+  (`test_ptt` pins this; arming at key-up drops the tail). The lead is
+  served by the ISR as mid-rail WITHOUT consuming the FIFO -- the frame
+  starts later, it is never cut -- and is not an underrun. `ptt_lead`/
+  `ptt_tail` (UP_CFG 15/16) default to 0 so cable-stand timing and the
+  bench record are unchanged; a radio needs a lead. Two releases if
+  the firmware stops: the ISR drops the pin after 1 s of starved DAC
+  while keyed (`ptt_cuts`), and `startup_flash.c`'s Default_Handler
+  calls the weak `fault_safe_state()`. Keep both: a keyed radio behind
+  a dead firmware is on the air until the radio's own time-out.
+  MEASURED on the Baofeng: the pin is held exactly lead + frame + tail
+  (beacon `ptt_last_ticks`, zero drain latency) and the radio stays on
+  the air 0.20-0.36 s past release. A TAIL is only safe if the PEER's
+  lead covers it -- a station replies `turnaround/2` = 150 ms after
+  decoding and we are deaf while keyed: tail 200 vs peer lead 0 lost
+  every ack and walked the ladder to EXTREME; vs peer lead 300, 7/7
+  first time. Two radios: ~400 ms lead on both, tail 0. The lead also
+  has to cover the RECEIVER's squelch opening, because EXTREME needs
+  nearly its whole preamble: a clean frame replayed through interf_rx
+  reads 16.2 dB whole, 7.4 dB missing its first 0.4 s, -5.7 dB at
+  0.6 s, no decode at 0.8 s. A late-starting recording looks exactly
+  like a bad channel (it cost an evening of radio-path suspects).
+- The receive input is SELECTABLE (`config rx_input`, UP_CFG 17): 0 =
+  PA6 (the board-to-board wire, default), 1 = PA0 (ADC1_INP16, a
+  radio's audio through `tools/baofeng/kicad`'s RC front end), so a
+  radio can be tried with the wire left on PA6. PA0 because it is
+  MEASURED free on these boards (the LED hunt found it following the
+  internal pull both ways). Both channels are preselected (PCSEL) and
+  timed (SMPR1/SMPR2) at init, and the tick switches SQR1 between
+  conversions only with ADSTART clear, so a switch is one register
+  write. The beacon is read BY LENGTH: a field appended to `beacon_t`
+  reads as whatever follows the struct on an older image, so
+  `rx_input` carries a tag (0x5258xxxx) and `radio_beacon.py` says "not
+  reported" without it -- tag any future appended field the same way.
+  Verified on board1: channel 16 / 3 applied, distinct noise on each.
+- The radio MIC output is DAC channel 2 (PA5), written with channel 1
+  in ONE DHR12RD store (`DAC_OUT`) at every DAC site -- tick, lead,
+  underrun, init and the mid-rail park -- so the two pins never
+  disagree; a new site that writes DHR12R1 alone would leave the radio
+  holding a stale sample. PA3 is the AIOC network's attenuator leg:
+  open-drain, driven LOW before it becomes an output (never a line-
+  level glitch), `config mic_boost` (UP_CFG 18) releases it.
+  `config mic_gain` (UP_CFG 19, whole dB -40..0) scales channel 2
+  ONLY, in the tick, by a Q15 factor the main loop computes (no libm)
+  -- the sample site writes the two channels separately for that;
+  every other site (lead, underrun, park) is mid-rail on both.
+  `config chirp <ms>` (UP_CFG 20) is an ACTION: one linear 280-2700 Hz
+  sweep at a frame's RMS through the SAME transmit path. It is a
+  second transmit SOURCE beside the modem generator, and tx_fill reads
+  only through tx_src_live/tx_src_pull/tx_src_close, so the FIFO
+  arithmetic stays single. It keys PTT and counts in tx_frames/keyups,
+  but `g_tx_is_test` keeps its end away from station_on_tx_end (which
+  would arm a reply timer for a frame that never existed). PA2 is NOT
+  a DAC pin on this part (only PA4/PA5) -- the first wiring put the
+  network there. PA2/PA3/PA5 measured free on both boards (pull test,
+  2026-11-17); verified on board1: EN1|EN2, DOR1 = DOR2 = 2048 idle,
+  PA3 OD out, ODR follows mic_boost.
 - Every carrier-sense TIME CONSTANT must exceed the longest frame the
   station can emit, and on the boards that used to be 224 s: frag_size
   is fixed at engage, so a burst engaged at rung 10 (203-byte frags)

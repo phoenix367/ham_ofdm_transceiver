@@ -586,7 +586,8 @@ class Console:
                 self.plain(f"config: {e}  (keys: rung_ceiling, burst_window,"
                            " burst_stream, freq_trim_mhz, audio_tap, anchor,"
                            " diag_stream, win_max, net_key, chan_snr,"
-                           " chan_fade, chan_delay)")
+                           " chan_fade, chan_delay, ptt_lead, ptt_tail,"
+                           " rx_input, mic_boost, mic_gain, chirp)")
         elif cmd == "debug":
             # the events come from the BOARD, whose diag stream is off
             # by default; this is `config diag_stream` with a memorable

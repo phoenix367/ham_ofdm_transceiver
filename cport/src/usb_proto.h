@@ -119,9 +119,39 @@ enum {
     UP_CFG_CHAN_FADE    = 13, /* Rayleigh Doppler spread, centi-Hz;
                                * 0 = no fading (CCIR 520: 10 good,
                                * 50 moderate, 100 poor) */
-    UP_CFG_CHAN_DELAY   = 14  /* second path delay, 0.1 ms units;
+    UP_CFG_CHAN_DELAY   = 14, /* second path delay, 0.1 ms units;
                                * 0 = one flat tap (5 good, 10
                                * moderate, 20 poor) */
+    /* PTT on PB14 (ptt.h): the pin is keyed for every transmission;
+     * these add time around the frame for a RADIO on the pin. Both 0 by
+     * default (the cable stand has no radio), clamped to 0..2000. */
+    UP_CFG_PTT_LEAD     = 15, /* ms of mid-rail AFTER keying, before the
+                               * frame: the radio's TX attack time */
+    UP_CFG_PTT_TAIL     = 16, /* ms of mid-rail after the frame, before
+                               * releasing */
+    /* which pin the receiver samples (radio firmware): 0 = PA6, the
+     * board-to-board wire (default); 1 = PA0, a radio's audio through
+     * an RC front end. Switched between two ADC conversions, so the
+     * wire can stay connected while a radio is tried on the other pin. */
+    UP_CFG_RX_INPUT     = 17,
+    /* the radio MICROPHONE output's level (radio firmware): DAC1_OUT2
+     * (PA5) carries every transmitted sample into an AIOC-style network
+     * whose attenuator leg ends on PA3. 0 = MIC level (default: PA3
+     * open-drain LOW, attenuator in, ~24 mV peak); 1 = LINE level (PA3
+     * released, ~0.3 V peak, 22 dB hotter). PA4 and the wire are not
+     * affected either way. */
+    UP_CFG_MIC_BOOST    = 18,
+    /* the radio mic output's DIGITAL gain (radio firmware), whole dB,
+     * clamped to -40..0, default 0: scales DAC channel 2 (PA5) only,
+     * so the radio's level is set without touching the wire on PA4.
+     * For finding the level a radio's limiter leaves alone. */
+    UP_CFG_MIC_GAIN     = 19,
+    /* an ACTION, not a setting (radio firmware): writing N > 0 keys ONE
+     * linear test sweep 280 -> 2700 Hz lasting N ms (clamped 100..30000)
+     * as soon as the transmitter is idle -- PTT, lead and tail, both DAC
+     * channels, mic_gain and mic_boost all apply, at the RMS of a modem
+     * frame. Announced by a log line; counted in tx_frames. */
+    UP_CFG_CHIRP        = 20
 };
 
 /* --- payload layouts, all little-endian, all fixed size ------------- */

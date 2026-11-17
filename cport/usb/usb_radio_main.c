@@ -10,6 +10,14 @@
  *
  *   DAC1_OUT1 (PA4) --- wire ---> ADC1_INP3 (PA6) on the peer, and back
  *   TIM6 at 12 kHz drives both directions; a common ground is required.
+ *   `config rx_input 1` samples ADC1_INP16 (PA0) instead -- a radio's
+ *   audio through an RC front end -- with the wire left on PA6.
+ *   DAC1_OUT2 (PA5) carries the SAME samples to a radio's microphone
+ *   through an AIOC-style network, whose attenuator leg ends on PA3
+ *   (open-drain, LOW = mic level by default; `config mic_boost 1`
+ *   releases it for line level) and `config mic_gain <dB>` scales
+ *   channel 2 alone, digitally (0 .. -40 dB). `config chirp <ms>` keys
+ *   one 280-2700 Hz test sweep through the same path (channel tests).
  *
  * ## Why the transmitter never renders a frame
  *
@@ -67,6 +75,7 @@
 #include "broadcast.h"
 #include "packets.h"
 #include "led.h"
+#include "ptt.h"
 #include "temp.h"
 
 void ofdm_usb_bsp_init(int rhport);
@@ -130,7 +139,23 @@ typedef struct {
     uint32_t chan_samples;    /* channel debug mode: samples impaired */
     uint32_t chan_sat;        /* ... and output clamps */
     uint32_t chan_snr;        /* the setting (999 = off), for the record */
+    /* PTT on PB14 (ptt.h). ptt_keyups must equal tx_frames: every
+     * transmission keys the radio, and a path that set g_tx_on without
+     * keying would put a frame into a radio that is not transmitting.
+     * ptt_cuts counts the stall watchdog: the DAC starved for 1 s while
+     * keyed and PTT was dropped mid-frame. */
+    uint32_t ptt_keyups, ptt_cuts;
+    uint32_t ptt_lead_ms, ptt_tail_ms;   /* the settings, for the record */
+    uint32_t ptt_last_ticks;  /* the last transmission's keyed time, in
+                               * 12 kHz ticks: lead + frame + tail +
+                               * drain latency (compare tx_last_total) */
+    /* receive input as APPLIED by the tick (not merely requested):
+     * RX_INPUT_TAG | 0 = PA6, | 1 = PA0. Tagged because the beacon is
+     * read by length, so an older image shows whatever follows its
+     * struct here -- the tag tells "not reported" from a real 0. */
+    uint32_t rx_input;
 } beacon_t;
+#define RX_INPUT_TAG 0x52580000u               /* 'RX' */
 volatile beacon_t g_beacon __attribute__((section(".results"), used));
 enum { ST_ENTER = 1, ST_SUPPLY, ST_ANALOG, ST_RXS, ST_TUSB, ST_LOOP,
        ST_MOUNTED };
@@ -194,19 +219,64 @@ static void beacon_flush(void)
 
 #define DAC1_BASE     0x40007400u
 #define DAC_CR        (*(volatile uint32_t *)(DAC1_BASE + 0x00u))
-#define DAC_DHR12R1   (*(volatile uint32_t *)(DAC1_BASE + 0x08u))
+#define DAC_DHR12RD   (*(volatile uint32_t *)(DAC1_BASE + 0x20u))
 #define DAC_MCR       (*(volatile uint32_t *)(DAC1_BASE + 0x3Cu))
+/* Both channels get every sample, in ONE write (DHR12RD: channel 1 in
+ * 11:0, channel 2 in 27:16): channel 1 (PA4) is the board-to-board
+ * wire, channel 2 (PA5) a radio's microphone network. Two outputs
+ * rather than one shared pin so the wire never carries the network's
+ * load, and so the radio's level can differ later without touching
+ * the wire. PA5 is MEASURED free on both boards (follows the internal
+ * pull both ways, 2026-11-17), like PA0. */
+#define DAC_OUT(v)    (DAC_DHR12RD = (uint32_t)(v) * 0x00010001u)
+
+/* The mic network's attenuator leg (AIOC rev 1.2: R17 100R || C12 100n
+ * from the network's node to its DAC_ATTEN end) is wired to PA3,
+ * MEASURED free on both boards. Open-drain LOW pulls the node to
+ * ~94 ohm and the output to mic level, which is the AIOC's own default
+ * (TXBOOST 0) for these radios; released (open-drain high = Hi-Z) the
+ * output is line level, 22 dB hotter, which overdrives a Baofeng. */
+#define MIC_PORT_BASE 0x58020000u                /* GPIOA */
+#define MIC_REG(off)  (*(volatile uint32_t *)(MIC_PORT_BASE + (off)))
+#define MIC_ATTEN_PIN 3                          /* PA3 */
+
+/* drive the attenuator pin: boost 0 = LOW (mic level), 1 = released */
+static void mic_atten_apply(int boost)
+{
+    MIC_REG(0x18u) = boost ? (1u << MIC_ATTEN_PIN)            /* BSRR */
+                           : (1u << (MIC_ATTEN_PIN + 16));
+}
+
+/* Open-drain output, LOW before the pin becomes an output so it never
+ * glitches to line level. GPIOA's clock must already be on. */
+static void mic_atten_init(void)
+{
+    mic_atten_apply(0);
+    MIC_REG(0x04u) |= 1u << MIC_ATTEN_PIN;                     /* OTYPER: OD */
+    MIC_REG(0x0Cu) &= ~(3u << (2 * MIC_ATTEN_PIN));            /* PUPDR: none */
+    MIC_REG(0x00u) = (MIC_REG(0x00u) & ~(3u << (2 * MIC_ATTEN_PIN)))
+                   | (1u << (2 * MIC_ATTEN_PIN));             /* MODER: out */
+}
 
 #define ADC1_BASE     0x40022000u
 #define ADC_ISR_R     (*(volatile uint32_t *)(ADC1_BASE + 0x00u))
 #define ADC_CR        (*(volatile uint32_t *)(ADC1_BASE + 0x08u))
 #define ADC_CFGR      (*(volatile uint32_t *)(ADC1_BASE + 0x0Cu))
 #define ADC_SMPR1     (*(volatile uint32_t *)(ADC1_BASE + 0x14u))
+#define ADC_SMPR2     (*(volatile uint32_t *)(ADC1_BASE + 0x18u))
 #define ADC_PCSEL     (*(volatile uint32_t *)(ADC1_BASE + 0x1Cu))
 #define ADC_SQR1      (*(volatile uint32_t *)(ADC1_BASE + 0x30u))
 #define ADC_DR        (*(volatile uint32_t *)(ADC1_BASE + 0x40u))
 #define ADC_CCR       (*(volatile uint32_t *)(ADC1_BASE + 0x308u))
 #define ADC_CHANNEL   3                      /* ADC12_INP3 = PA6 */
+/* The alternate receive input, `config rx_input 1`: a radio's audio
+ * through an RC front end while PA6 stays on the board-to-board wire.
+ * PA0 = ADC1_INP16 (DS12110 pin table, LQFP100 pin 22; a "fast" direct
+ * channel). Chosen because it is MEASURED free on these boards: the LED
+ * hunt (bench/led_test.c) found it following the internal pull both
+ * ways, so nothing on the PCB drives or loads it, and this firmware
+ * leaves it in its reset state (analog). */
+#define ADC_CHANNEL_ALT 16                   /* ADC1_INP16 = PA0 */
 
 /* APB1 timer clock, measured on the part by bench/analog_link.c as
  * 199999720 Hz. TIM6 divides it to 12 kHz; both boards land on the same
@@ -240,6 +310,28 @@ static int16_t g_txf[TXF_N];
  * channel on the cross-wire. Configured over USB (UP_CFG_CHAN_*), off
  * by default, integer and saturating. */
 static chanimp_t g_chan;
+/* PTT on PB14 (ptt.h): keyed from key-up until the FIFO drains, with an
+ * optional lead (mid-rail before the frame, for a radio to come up) and
+ * tail, both 0 by default; released by the ISR if the DAC starves for
+ * 1 s while keyed, and by fault_safe_state() on any fault. */
+static ptt_t g_ptt;
+/* Receive input (UP_CFG_RX_INPUT): 0 = PA6, 1 = PA0. Written by the
+ * USB config path, applied by the tick between two conversions; the
+ * channel the converter is actually set to is g_adc_ch. */
+static volatile int g_rx_input;
+static uint32_t g_adc_ch = ADC_CHANNEL;
+/* Mic output level (UP_CFG_MIC_BOOST): written by the USB config path,
+ * driven onto PA3 by the main loop when it differs from g_mic_applied. */
+static volatile int g_mic_boost;
+static int g_mic_applied;
+/* Mic output gain (UP_CFG_MIC_GAIN), whole dB <= 0: written by the USB
+ * config path, converted by the main loop to the Q15 factor the tick
+ * applies to channel 2 only (one 32-bit store, so the tick never sees
+ * half an update). Digital, so it costs resolution: at -12 dB the frame
+ * still spans ~+-385 of the 12-bit DAC's codes. */
+static volatile int g_mic_gain;
+static int g_mic_gain_applied;
+static volatile int32_t g_mic_q15 = 32768;
 static volatile uint32_t g_txf_w, g_txf_r;
 static volatile int g_tx_on;      /* ISR: 1 = drive DAC, 0 = sample ADC */
 
@@ -248,16 +340,25 @@ static void tim6_isr(void)
     TIM6_SR = 0;
     if (g_tx_on) {
         uint32_t r = g_txf_r;
-        if (r != g_txf_w) {
+        if (ptt_in_lead(&g_ptt)) {
+            /* the radio is still coming up on frequency: hold mid-rail
+             * and leave the FIFO alone -- the frame starts later, it is
+             * never cut. Not an underrun. */
+            DAC_OUT(2048);
+        } else if (r != g_txf_w) {
             /* 3/4 scale: the DAC's buffer cannot reach the rails and the
              * transmitter reaches int16 full scale (same mapping the
              * analog bench measured a clean path with). */
-            int32_t s = g_txf[r & (TXF_N - 1)];
-            DAC_DHR12R1 = (uint32_t)(2048 + ((s * 3) >> 6));
+            int32_t d = (g_txf[r & (TXF_N - 1)] * 3) >> 6;
+            /* channel 2 (the radio's mic) scaled by mic_gain, Q15 */
+            DAC_DHR12RD = (uint32_t)(2048 + d)
+                        | ((uint32_t)(2048 + ((d * g_mic_q15) >> 15)) << 16);
             g_txf_r = r + 1;
+            ptt_fed(&g_ptt);
         } else {
-            DAC_DHR12R1 = 2048;
+            DAC_OUT(2048);
             g_beacon.tx_underruns++;   /* the main loop fell behind */
+            ptt_starved(&g_ptt);       /* 1 s of this drops PTT */
         }
     } else {
         uint32_t w = g_cap_w;
@@ -296,6 +397,19 @@ static void tim6_isr(void)
             g_cap[w & (CAP_N - 1)] = v, g_cap_w = w + 1;
         else
             g_beacon.cap_overruns++;
+        /* Input switch, between conversions: SQR1 is writable only with
+         * ADSTART clear, which it is here -- the single conversion
+         * started last tick ended long ago -- but check rather than
+         * assume, and retry next tick if not. The sample above was the
+         * OLD input's, the next is the new one's. The DC blocker and
+         * carrier sense see a step and settle (~0.1 s, floor tracker). */
+        {
+            uint32_t ch = g_rx_input ? ADC_CHANNEL_ALT : ADC_CHANNEL;
+            if (ch != g_adc_ch && !(ADC_CR & (1u << 2))) {
+                ADC_SQR1 = ch << 6;
+                g_adc_ch = ch;
+            }
+        }
         ADC_CR |= (1u << 2);           /* ADSTART: next one, do not wait */
     }
 }
@@ -322,9 +436,13 @@ static int adc_init(void)
         if (!(ADC_CR & (1u << 31)))
             break;
     ADC_CFGR = 0;                                   /* 16-bit, single, sw */
-    ADC_PCSEL = 1u << ADC_CHANNEL;                  /* H7: or read garbage */
+    /* both inputs preselected and timed up front, so switching between
+     * them (rx_input) is one SQR1 write */
+    ADC_PCSEL = (1u << ADC_CHANNEL)                 /* H7: or read garbage */
+              | (1u << ADC_CHANNEL_ALT);
     ADC_SQR1 = (uint32_t)ADC_CHANNEL << 6;
     ADC_SMPR1 = 5u << (3 * ADC_CHANNEL);            /* 64.5 cycles */
+    ADC_SMPR2 = 5u << (3 * (ADC_CHANNEL_ALT - 10)); /* 64.5 cycles */
     ADC_ISR_R = 1u;                                 /* clear ADRDY */
     ADC_CR |= 1u;                                   /* ADEN */
     for (guard = 0; guard < 4000000u; guard++)
@@ -337,9 +455,9 @@ static void dac_init(void)
 {
     uint32_t g;
     RCC_APB1LENR |= (1u << 29);                     /* DAC12EN */
-    DAC_MCR = 0;                                    /* buffer on, to pin */
-    DAC_DHR12R1 = 2048;
-    DAC_CR = 1u;                                    /* EN1 */
+    DAC_MCR = 0;                      /* both channels: buffer on, to pin */
+    DAC_OUT(2048);
+    DAC_CR = 1u | (1u << 16);                       /* EN1 | EN2 */
     for (g = 0; g < 200000u; g++)
         __asm__ volatile("nop");
 }
@@ -409,6 +527,109 @@ static int phy_recv_unused(void *c, const int16_t *s, int n, uint8_t *bits,
     return -1;                        /* decoded through rxs_push instead */
 }
 
+/* --- TEST CHIRP (`config chirp <ms>`, UP_CFG_CHIRP) -------------------
+ * A measurement source, not a station frame: one LINEAR sweep
+ * CHIRP_F1 -> CHIRP_F2 over the requested time, keyed through the same
+ * path as every transmission (tx_begin / tx_fill / tx_key_up, PTT lead
+ * and tail, both DAC channels, mic_gain and the attenuator on PA5), so
+ * what it measures is the path the frames take. Its amplitude gives it
+ * the SAME RMS as a modem frame (frames measure rms/peak -8.0 dB at
+ * every mode; a sine of peak 18400 has that power), so a mic_gain that
+ * is clean for the chirp is the same level for a frame. 10 ms
+ * raised-cosine ends keep the key-up and key-down clicks out of the
+ * band. Phase law, exactly reproducible on the host:
+ *   inc[n] = (F1 + n (F2 - F1) / (N - 1)) / FS,  phase[n+1] = phase[n]
+ *   + inc[n] (mod 1), sample = AMP * env[n] * sin(2 pi phase[n]).
+ * Double precision on the M7's FPU; sine from a table built with a
+ * rotation recurrence, so no libm. */
+#define CHIRP_F1    280.0
+#define CHIRP_F2    2700.0
+#define CHIRP_AMP   18400.0
+#define CHIRP_RAMP  120                  /* 10 ms at 12 kHz */
+#define CHIRP_TAB   1024
+static float g_sin_tab[CHIRP_TAB + 1];
+static volatile int g_chirp_req;         /* ms, from USB config; 0 = none */
+static int g_chirp_on, g_chirp_n, g_chirp_i, g_tx_is_test;
+static double g_chirp_ph, g_chirp_inc, g_chirp_dinc;
+
+static void chirp_table(void)
+{
+    /* sin/cos of one table step by Taylor series (x = 2 pi / 1024: the
+     * x^7 term is 1e-17), then a rotation per entry */
+    const double x = 6.283185307179586 / CHIRP_TAB;
+    const double sx = x - x*x*x/6.0 + x*x*x*x*x/120.0;
+    const double cx = 1.0 - x*x/2.0 + x*x*x*x/24.0 - x*x*x*x*x*x/720.0;
+    double c = 1.0, s = 0.0, c2;
+    int k;
+    for (k = 0; k <= CHIRP_TAB; k++) {
+        g_sin_tab[k] = (float)s;
+        c2 = c * cx - s * sx;
+        s = s * cx + c * sx;
+        c = c2;
+    }
+}
+
+static double chirp_sin(double cycles)   /* cycles in [0, 1) */
+{
+    double p = cycles * CHIRP_TAB;
+    int i = (int)p;
+    return g_sin_tab[i] + (p - i) * (g_sin_tab[i + 1] - g_sin_tab[i]);
+}
+
+static int chirp_start(int ms)
+{
+    if (ms < 100) ms = 100;
+    if (ms > 30000) ms = 30000;
+    if (g_sin_tab[CHIRP_TAB / 4] == 0.0f)
+        chirp_table();
+    g_chirp_n = ms * 12;
+    g_chirp_i = 0;
+    g_chirp_ph = 0.0;
+    g_chirp_inc = CHIRP_F1 / 12000.0;
+    g_chirp_dinc = (CHIRP_F2 - CHIRP_F1) / 12000.0 / (double)(g_chirp_n - 1);
+    g_chirp_on = 1;
+    return g_chirp_n;
+}
+
+static int chirp_pull(int16_t *dst, int n)
+{
+    int k = 0;
+    while (k < n && g_chirp_i < g_chirp_n) {
+        int i = g_chirp_i, e = g_chirp_n - 1 - i;
+        double env = 1.0, v;
+        if (i < CHIRP_RAMP || e < CHIRP_RAMP) {
+            /* sin^2 (pi/2 * j/RAMP) = 0.5 - 0.5 cos: the raised cosine */
+            int j = i < e ? i : e;
+            double s = chirp_sin((double)j / (4.0 * CHIRP_RAMP));
+            env = s * s;
+        }
+        v = CHIRP_AMP * env * chirp_sin(g_chirp_ph);
+        dst[k++] = (int16_t)(v < 0 ? v - 0.5 : v + 0.5);
+        g_chirp_ph += g_chirp_inc;
+        if (g_chirp_ph >= 1.0)
+            g_chirp_ph -= 1.0;
+        g_chirp_inc += g_chirp_dinc;
+        g_chirp_i++;
+    }
+    return k;
+}
+
+/* The transmit SOURCE: the modem's generator or the test chirp. tx_fill
+ * reads samples only through these, so the FIFO arithmetic below stays
+ * the single implementation it has to be. */
+static int tx_src_live(void) { return g_txs != 0 || g_chirp_on; }
+
+static int tx_src_pull(int16_t *dst, int n)
+{
+    return g_txs ? txs_pull(g_txs, dst, n) : chirp_pull(dst, n);
+}
+
+static void tx_src_close(void)
+{
+    g_txs = 0;
+    g_chirp_on = 0;
+}
+
 /* Pull from the live generator into the DAC FIFO until it is within
  * `slack` samples of full, or the generator is exhausted (which clears
  * g_txs). ONE implementation on purpose: this arithmetic was written
@@ -426,7 +647,7 @@ static int phy_recv_unused(void *c, const int16_t *s, int n, uint8_t *bits,
  * then stopped being decodable at all. */
 static void tx_fill(uint32_t slack)
 {
-    while (g_txs && (uint32_t)(g_txf_w - g_txf_r) + slack < TXF_N) {
+    while (tx_src_live() && (uint32_t)(g_txf_w - g_txf_r) + slack < TXF_N) {
         int wi = (int)(g_txf_w & (TXF_N - 1));
         int room = (int)(TXF_N - (g_txf_w - g_txf_r));
         int lin = (int)TXF_N - wi;      /* contiguous, to the wrap */
@@ -435,7 +656,7 @@ static void tx_fill(uint32_t slack)
             room = lin;
         if (room <= 0)
             break;
-        got = txs_pull(g_txs, g_txf + wi, room);
+        got = tx_src_pull(g_txf + wi, room);
         if (got <= 0) {
             /* generator exhausted. Fading runs the output behind the
              * input by the Hilbert delay plus the path delay: emit
@@ -447,13 +668,48 @@ static void tx_fill(uint32_t slack)
                 g_txf_w += (uint32_t)fl;
                 continue;
             }
-            g_txs = 0;
+            /* then the PTT tail (mid-rail, 0 by default) -- after the
+             * last real sample, so the radio does not drop the carrier
+             * on it; likewise not counted in g_tx_pulled */
+            fl = ptt_tail(&g_ptt, g_txf + wi, room);
+            if (fl > 0) {
+                g_txf_w += (uint32_t)fl;
+                continue;
+            }
+            tx_src_close();
             break;
         }
         chanimp_apply(&g_chan, g_txf + wi, got);
         g_txf_w += (uint32_t)got;
         g_tx_pulled += got;
     }
+}
+
+/* Every transmission -- station frame, broadcast group, stats reply --
+ * goes tx_begin(), tx_fill(0), tx_key_up(), and ends where the FIFO has
+ * drained. One helper pair so the three sites cannot drift: PTT is a
+ * radio's transmitter, and a site that set g_tx_on without keying it
+ * would put a frame into a radio that is not transmitting. */
+static void tx_begin(void)
+{
+    g_txf_r = g_txf_w = 0;
+    chanimp_start(&g_chan);   /* channel debug mode */
+    ptt_arm(&g_ptt);          /* tail owed from here: a short frame can
+                               * exhaust its generator in the pre-fill */
+}
+
+static void tx_key_up(void)
+{
+    ptt_key_up(&g_ptt);       /* lead written before the ISR can see... */
+    g_tx_on = 1;              /* ...the transmission start */
+}
+
+/* Called by startup_flash.c's Default_Handler on ANY fault or stray
+ * interrupt: a keyed radio behind a dead firmware would stay on the air
+ * until its own time-out timer. */
+void fault_safe_state(void)
+{
+    ptt_pin_write(0);
 }
 
 static rxs_t *g_rxs[3];   /* declared here: burst_advance() needs it */
@@ -1360,6 +1616,11 @@ int main(void)
     memset((void *)&g_beacon, 0, sizeof(g_beacon));
     g_beacon.magic = BEACON_MAGIC;
     g_beacon.stage = ST_ENTER;
+    /* PTT before anything else: PB14 floats (analog) out of reset, and
+     * a radio's PTT driver should see the released level as early as
+     * the firmware can give it one */
+    ptt_init(&g_ptt);
+    ptt_pin_init();
 
     SYST_RVR = 400000u - 1u;
     SYST_CVR = 0;
@@ -1371,9 +1632,10 @@ int main(void)
     ofdm_usb_bsp_init(0);
 
     g_beacon.stage = ST_ANALOG;
-    RCC_AHB4ENR |= (1u << 0);         /* GPIOA: PA4/PA6 stay analog */
+    RCC_AHB4ENR |= (1u << 0);         /* GPIOA: PA4/PA5/PA6 stay analog */
     led_init();                       /* PA1, same port, dark until a
                                        * host attaches */
+    mic_atten_init();                 /* PA3 LOW: mic level */
     dac_init();
     dcblock_init(&g_dcb);
     cs_init(&g_cs);
@@ -1482,6 +1744,11 @@ int main(void)
                    UP_CAP_LDPC | UP_CAP_EXT_FRAMES | UP_CAP_BCAST);
     chanimp_init(&g_chan, ((uint32_t)UID[0] << 24) ^ ((uint32_t)UID[5] << 8) ^ UID[11]);
     g_modem.chan = &g_chan;
+    g_modem.ptt = &g_ptt;      /* config ptt_lead / ptt_tail */
+    g_modem.rx_input = &g_rx_input;  /* config rx_input */
+    g_modem.mic_boost = &g_mic_boost; /* config mic_boost */
+    g_modem.mic_gain = &g_mic_gain;   /* config mic_gain */
+    g_modem.chirp_req = &g_chirp_req; /* config chirp <ms>: one sweep */
     g_st.diag_cb = usb_modem_diag;
     g_st.diag_ctx = &g_modem;
     g_modem.bcast_cb = bc_cmd;
@@ -1505,14 +1772,57 @@ int main(void)
             g_beacon.rx_bytes += k;
             usb_modem_rx(&g_modem, in, (int)k);
         }
+        if (g_mic_boost != g_mic_applied) {     /* config mic_boost */
+            g_mic_applied = g_mic_boost;
+            mic_atten_apply(g_mic_applied);
+        }
+        if (g_mic_gain != g_mic_gain_applied) { /* config mic_gain */
+            /* 10^(-1/20) in Q15 = 29205.6, applied once per dB: no libm
+             * in the image for one conversion. Error < 0.01 dB at -40. */
+            int32_t q = 32768, i;
+            g_mic_gain_applied = g_mic_gain;
+            for (i = 0; i < -g_mic_gain_applied; i++)
+                q = (int32_t)(((int64_t)q * 29206 + 16384) >> 15);
+            g_mic_q15 = q;
+        }
 
         /* ---- transmit: keep the DAC FIFO fed ---- */
         if (g_txs) {
             tx_fill(256);
             if (txs_faulted())
                 g_beacon.tx_faults++;
+        } else if (g_chirp_on) {
+            tx_fill(256);
         }
-        if (g_tx_on && !g_txs && g_txf_r == g_txf_w) {
+        if (g_chirp_req > 0 && !g_tx_on && !tx_src_live()) {
+            /* `config chirp <ms>`: key one test sweep when the
+             * transmitter is idle. Counted as a transmission (it keys
+             * PTT, so ptt_keyups and tx_frames stay equal) but NOT a
+             * station frame -- its end must not reach
+             * station_on_tx_end, which would arm a reply timer. */
+            int ms = g_chirp_req;
+            char msg[64], *q = msg;
+            uint32_t ki = g_beacon.keyups & 3u;
+            g_chirp_req = 0;
+            g_tx_total = chirp_start(ms);
+            g_tx_pulled = 0;
+            tx_begin();     /* FIFO, chanimp, PTT tail */
+            tx_fill(0);
+            g_cap_r = g_cap_w;
+            g_beacon.keyup_ms[ki] = g_ms;
+            g_beacon.keyup_cs[ki] = g_cs.mean;
+            g_beacon.keyup_floor[ki] = (uint32_t)g_cs.floor_;
+            g_beacon.keyups++;
+            tx_key_up();    /* PTT, then g_tx_on */
+            g_tx_is_test = 1;
+            g_beacon.tx_frames++;
+            q = bc_str(q, "chirp: ");
+            q = bc_num(q, g_tx_total / 12);
+            q = bc_str(q, " ms, 280-2700 Hz linear, mic_gain ");
+            q = bc_num(q, g_mic_gain);
+            usb_modem_emit(&g_modem, UP_EVT_LOG, msg, (int)(q - msg));
+        }
+        if (g_tx_on && !tx_src_live() && g_txf_r == g_txf_w) {
             /* every generated sample has left the DAC.
              *
              * phy.build reported g_tx_total to the station WITHOUT
@@ -1525,6 +1835,7 @@ int main(void)
             if (g_tx_pulled != g_tx_total)
                 g_beacon.tx_short++;
             g_tx_on = 0;
+            ptt_key_down(&g_ptt);         /* the last sample is out */
             /* Park the DAC at MID-RAIL. The tick only writes the DAC
              * while transmitting, so without this the pin HOLDS the
              * frame's last sample -- anywhere within +-0.9 V -- until
@@ -1538,7 +1849,7 @@ int main(void)
              * wire and healed when a frame happened to end near zero.
              * Measured: quiet cs 8.6e4 after a fresh boot (DAC at
              * dac_init's mid-rail), 2.75e8 after the first frame. */
-            DAC_DHR12R1 = 2048;
+            DAC_OUT(2048);
             g_cap_r = g_cap_w;            /* drop what leaked in */
             {
                 /* REARM every active receiver: the capture stream they
@@ -1559,7 +1870,7 @@ int main(void)
                         rxs_set_active(g_rxs[i3], 1);
                     }
             }
-            if (!g_tx_is_bc)
+            if (!g_tx_is_bc && !g_tx_is_test)
                 station_on_tx_end(&g_st, t);
             if (g_tx_is_bc && g_bc_stat_arm) {
                 g_bc_stat_arm = 0;
@@ -1577,6 +1888,7 @@ int main(void)
                                                        8));
             }
             g_tx_is_bc = 0;
+            g_tx_is_test = 0;
         }
 
         /* ---- receive: only when not transmitting (arena, half duplex)
@@ -1760,6 +2072,13 @@ int main(void)
             g_beacon.chan_samples = g_chan.samples;
             g_beacon.chan_sat = g_chan.sat;
             g_beacon.chan_snr = (uint32_t)g_chan.snr_db;
+            g_beacon.ptt_keyups = g_ptt.keyups;
+            g_beacon.ptt_cuts = g_ptt.cuts;
+            g_beacon.ptt_lead_ms = (uint32_t)ptt_lead_ms(&g_ptt);
+            g_beacon.ptt_tail_ms = (uint32_t)ptt_tail_ms(&g_ptt);
+            g_beacon.ptt_last_ticks = g_ptt.last_on_ticks;
+            g_beacon.rx_input = RX_INPUT_TAG
+                                | (g_adc_ch == ADC_CHANNEL_ALT ? 1u : 0u);
             g_host_seen = tud_mounted() && g_host_last_ms
                           && (uint32_t)(g_ms - g_host_last_ms) < HOST_ALIVE_MS;
             led_tick();
@@ -1861,11 +2180,10 @@ int main(void)
                                                   PKT_TYP_BCSTAT,
                                                   BURST_MIN_RUNG, 0);
                         if (n2 > 0 && g_txs) {
-                            g_txf_r = g_txf_w = 0;
-                        chanimp_start(&g_chan);   /* channel debug mode */
+                            tx_begin();     /* FIFO, chanimp, PTT tail */
                             tx_fill(0);
                             g_cap_r = g_cap_w;
-                            g_tx_on = 1;
+                            tx_key_up();   /* PTT, then g_tx_on */
                             g_tx_is_bc = 1;   /* not a station frame */
                             g_beacon.tx_frames++;
                             {
@@ -1931,8 +2249,7 @@ int main(void)
                      * this very carrier-sense gate */
                     if (bc_open_group() > 0 && g_txs) {
                         uint32_t ki = g_beacon.keyups & 3u;
-                        g_txf_r = g_txf_w = 0;
-                        chanimp_start(&g_chan);   /* channel debug mode */
+                        tx_begin();     /* FIFO, chanimp, PTT tail */
                         tx_fill(0);
                         g_cap_r = g_cap_w;
                         /* the same key-up record the station path
@@ -1944,7 +2261,7 @@ int main(void)
                         g_beacon.keyup_cs[ki] = g_cs.mean;
                         g_beacon.keyup_floor[ki] = (uint32_t)g_cs.floor_;
                         g_beacon.keyups++;
-                        g_tx_on = 1;
+                        tx_key_up();   /* PTT, then g_tx_on */
                         g_tx_is_bc = 1;
                         g_beacon.tx_frames++;
                         g_beacon.bc_tx_groups++;
@@ -1968,8 +2285,7 @@ int main(void)
                      * frames, ~55 per frame, i.e. once per transmission
                      * rather than a throughput problem. Each underrun
                      * puts a mid-rail sample on the air. */
-                    g_txf_r = g_txf_w = 0;
-                        chanimp_start(&g_chan);   /* channel debug mode */
+                    tx_begin();     /* FIFO, chanimp, PTT tail */
                     tx_fill(0);
                     /* build() opened the generator; start the carrier.
                      * Drop what was captured before now: those samples
@@ -1984,7 +2300,7 @@ int main(void)
                         g_beacon.keyup_floor[ki] = (uint32_t)g_cs.floor_;
                         g_beacon.keyups++;
                     }
-                    g_tx_on = 1;
+                    tx_key_up();   /* PTT, then g_tx_on */
                     g_beacon.tx_frames++;
                     g_beacon.last_rung = g_st.stats.last_rung;
                 } else if (g_txs) {
